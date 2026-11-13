@@ -1,0 +1,485 @@
+//! The Claude Code adapter. This is the only file that knows how Claude Code talks:
+//! its flags, its JSON message types and its field names. See PLAN.md,
+//! "Messages the app sends" and "Messages the app receives".
+//!
+//! The approval channel (`--permission-prompt-tool stdio` with `control_request` /
+//! `control_response` lines) is what the Agent SDK uses but is not documented for
+//! other hosts. If an update breaks it, the fix belongs here and nowhere else.
+
+use std::collections::{HashMap, VecDeque};
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::mpsc;
+
+use super::{AgentAdapter, EventSink, RunningAgent, SpawnOptions};
+use crate::events::{AgentEvent, ApprovalKind, Block, Decision, SessionState};
+
+/// How many stderr lines to keep for an error message when the process dies.
+const STDERR_TAIL_LINES: usize = 30;
+
+pub struct ClaudeCodeAdapter;
+
+/// What an approval answer has to echo back to Claude Code.
+struct PendingApproval {
+    input: Value,
+    suggestions: Value,
+}
+
+type Pending = Arc<Mutex<HashMap<String, PendingApproval>>>;
+
+enum Out {
+    Line(String),
+    Close,
+}
+
+struct ClaudeCodeProcess {
+    tx: mpsc::UnboundedSender<Out>,
+    pending: Pending,
+    sink: EventSink,
+}
+
+impl AgentAdapter for ClaudeCodeAdapter {
+    fn spawn(&self, opts: SpawnOptions, sink: EventSink) -> Result<Box<dyn RunningAgent>, String> {
+        let mut cmd = Command::new(&opts.binary);
+        cmd.args([
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            "--permission-prompt-tool",
+            "stdio",
+        ]);
+        if let Some(id) = &opts.resume_id {
+            cmd.args(["--resume", id]);
+        }
+        if opts.plan_mode {
+            cmd.args(["--permission-mode", "plan"]);
+        }
+        cmd.current_dir(&opts.project_path)
+            // An API key in the environment overrides the subscription login in
+            // headless mode and would bill per use.
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flash
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Could not start Claude Code: {e}"))?;
+        let mut stdin = child.stdin.take().ok_or("Claude Code has no stdin")?;
+        let stdout = child.stdout.take().ok_or("Claude Code has no stdout")?;
+        let stderr = child.stderr.take().ok_or("Claude Code has no stderr")?;
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
+        let pending: Pending = Arc::default();
+        sink(AgentEvent::Status {
+            state: SessionState::Starting,
+        });
+
+        // Writer: owns stdin. When it ends, stdin closes and Claude Code finishes
+        // its turn, waits for background work, then exits on its own.
+        tokio::spawn(async move {
+            while let Some(out) = rx.recv().await {
+                let Out::Line(line) = out else { break };
+                let ok = stdin.write_all(line.as_bytes()).await.is_ok()
+                    && stdin.write_all(b"\n").await.is_ok()
+                    && stdin.flush().await.is_ok();
+                if !ok {
+                    break;
+                }
+            }
+        });
+
+        // Stderr: keep the last few lines for error display.
+        let stderr_tail: Arc<Mutex<VecDeque<String>>> = Arc::default();
+        {
+            let tail = stderr_tail.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let mut tail = tail.lock().unwrap();
+                    if tail.len() == STDERR_TAIL_LINES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(line);
+                }
+            });
+        }
+
+        // Reader: one JSON object per stdout line. It holds only a weak handle to the
+        // writer, so dropping the `RunningAgent` is enough to close stdin.
+        {
+            let weak_tx = tx.downgrade();
+            let pending = pending.clone();
+            let sink = sink.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+                        continue;
+                    };
+                    let translated = translate(&value, &pending);
+                    if let Some(reply) = translated.reply {
+                        if let Some(tx) = weak_tx.upgrade() {
+                            let _ = tx.send(Out::Line(reply));
+                        }
+                    }
+                    for event in translated.events {
+                        sink(event);
+                    }
+                }
+                let clean_exit = matches!(child.wait().await, Ok(status) if status.success());
+                pending.lock().unwrap().clear();
+                if !clean_exit {
+                    let tail: Vec<String> = stderr_tail.lock().unwrap().iter().cloned().collect();
+                    let detail = if tail.is_empty() {
+                        "no error output".to_string()
+                    } else {
+                        tail.join("\n")
+                    };
+                    sink(AgentEvent::Error {
+                        message: format!("Claude Code stopped unexpectedly:\n{detail}"),
+                    });
+                }
+                sink(AgentEvent::Status {
+                    state: SessionState::Exited,
+                });
+            });
+        }
+
+        Ok(Box::new(ClaudeCodeProcess { tx, pending, sink }))
+    }
+}
+
+impl ClaudeCodeProcess {
+    fn send(&self, value: Value) -> Result<(), String> {
+        self.tx
+            .send(Out::Line(value.to_string()))
+            .map_err(|_| "Claude Code is no longer running".to_string())
+    }
+}
+
+impl RunningAgent for ClaudeCodeProcess {
+    fn send_user_message(&self, text: &str) -> Result<(), String> {
+        self.send(json!({
+            "type": "user",
+            "message": { "role": "user", "content": text },
+        }))?;
+        (self.sink)(AgentEvent::Status {
+            state: SessionState::Working,
+        });
+        Ok(())
+    }
+
+    fn answer_approval(
+        &self,
+        request_id: &str,
+        decision: Decision,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        let approval = self
+            .pending
+            .lock()
+            .unwrap()
+            .remove(request_id)
+            .ok_or("This request is no longer waiting for an answer")?;
+        let response = match decision {
+            Decision::Allow => json!({ "behavior": "allow", "updatedInput": approval.input }),
+            Decision::AlwaysAllow => {
+                let mut r = json!({ "behavior": "allow", "updatedInput": approval.input });
+                if approval.suggestions.as_array().is_some_and(|a| !a.is_empty()) {
+                    r["updatedPermissions"] = approval.suggestions;
+                }
+                r
+            }
+            Decision::Deny => json!({
+                "behavior": "deny",
+                "message": message.unwrap_or_else(|| "The user denied this.".to_string()),
+            }),
+        };
+        self.send(json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": request_id, "response": response },
+        }))?;
+        (self.sink)(AgentEvent::Status {
+            state: SessionState::Working,
+        });
+        Ok(())
+    }
+
+    fn interrupt(&self) -> Result<(), String> {
+        self.send(json!({
+            "type": "control_request",
+            "request_id": uuid::Uuid::new_v4().to_string(),
+            "request": { "subtype": "interrupt" },
+        }))
+    }
+
+    fn set_mode(&self, mode: &str) -> Result<(), String> {
+        self.send(json!({
+            "type": "control_request",
+            "request_id": uuid::Uuid::new_v4().to_string(),
+            "request": { "subtype": "set_permission_mode", "mode": mode },
+        }))
+    }
+
+    fn close(&self) {
+        let _ = self.tx.send(Out::Close);
+    }
+}
+
+#[derive(Default)]
+struct Translated {
+    events: Vec<AgentEvent>,
+    /// A line to send straight back to Claude Code.
+    reply: Option<String>,
+}
+
+fn text_of(value: &Value) -> String {
+    value.as_str().unwrap_or_default().to_string()
+}
+
+/// Turn one line of Claude Code output into the app's events.
+/// Unknown types and subtypes are ignored: new ones appear between CLI versions.
+fn translate(v: &Value, pending: &Pending) -> Translated {
+    let mut out = Translated::default();
+    let parent_tool_id = v["parent_tool_use_id"].as_str().map(str::to_owned);
+
+    match v["type"].as_str().unwrap_or_default() {
+        // Sent at the start of every turn, not just the first.
+        "system" if v["subtype"] == "init" => {
+            out.events.push(AgentEvent::SessionStarted {
+                agent_session_id: text_of(&v["session_id"]),
+                model: v["model"].as_str().map(str::to_owned),
+                mode: v["permissionMode"].as_str().map(str::to_owned),
+            });
+            out.events.push(AgentEvent::Status {
+                state: SessionState::Working,
+            });
+        }
+
+        // Raw API streaming events. Only the main session streams; subagents do not.
+        "stream_event" if parent_tool_id.is_none() => {
+            let event = &v["event"];
+            if event["type"] == "content_block_delta" && event["delta"]["type"] == "text_delta" {
+                out.events.push(AgentEvent::TextDelta {
+                    message_id: text_of(&v["api_message_id"]),
+                    block_index: event["index"].as_u64().unwrap_or(0),
+                    text: text_of(&event["delta"]["text"]),
+                });
+            }
+        }
+
+        // One finished block per event; blocks of one reply share `message.id`.
+        "assistant" => {
+            let message_id = text_of(&v["message"]["id"]);
+            for b in v["message"]["content"].as_array().into_iter().flatten() {
+                let block = match b["type"].as_str().unwrap_or_default() {
+                    "text" => Block::Text {
+                        text: text_of(&b["text"]),
+                    },
+                    // Thinking often arrives with empty text (only a signature).
+                    "thinking" if !text_of(&b["thinking"]).is_empty() => Block::Thinking {
+                        text: text_of(&b["thinking"]),
+                    },
+                    "tool_use" => Block::ToolCall {
+                        tool_id: text_of(&b["id"]),
+                        name: text_of(&b["name"]),
+                        input: b["input"].clone(),
+                    },
+                    _ => continue,
+                };
+                out.events.push(AgentEvent::AssistantBlock {
+                    message_id: message_id.clone(),
+                    block,
+                    parent_tool_id: parent_tool_id.clone(),
+                });
+            }
+        }
+
+        // Tool results come back as user messages.
+        "user" => {
+            for item in v["message"]["content"].as_array().into_iter().flatten() {
+                if item["type"] == "tool_result" {
+                    out.events.push(AgentEvent::ToolResult {
+                        tool_id: text_of(&item["tool_use_id"]),
+                        content: item["content"].clone(),
+                        is_error: item["is_error"].as_bool().unwrap_or(false),
+                        parent_tool_id: parent_tool_id.clone(),
+                    });
+                }
+            }
+        }
+
+        "control_request" => {
+            let request_id = text_of(&v["request_id"]);
+            let request = &v["request"];
+            if request["subtype"] == "can_use_tool" {
+                let tool_name = text_of(&request["tool_name"]);
+                let approval = match tool_name.as_str() {
+                    "ExitPlanMode" => ApprovalKind::Plan,
+                    "AskUserQuestion" => ApprovalKind::Question,
+                    _ => ApprovalKind::Tool,
+                };
+                let title = request["description"]
+                    .as_str()
+                    .or(request["display_name"].as_str())
+                    .unwrap_or(&tool_name)
+                    .to_string();
+                pending.lock().unwrap().insert(
+                    request_id.clone(),
+                    PendingApproval {
+                        input: request["input"].clone(),
+                        suggestions: request["permission_suggestions"].clone(),
+                    },
+                );
+                out.events.push(AgentEvent::ApprovalRequest {
+                    request_id,
+                    approval,
+                    tool_name,
+                    title,
+                    input: request["input"].clone(),
+                    tool_id: request["tool_use_id"].as_str().map(str::to_owned),
+                });
+                out.events.push(AgentEvent::Status {
+                    state: SessionState::WaitingApproval,
+                });
+            } else {
+                // Never leave a request unanswered; Claude Code would wait forever.
+                out.reply = Some(
+                    json!({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "error",
+                            "request_id": request_id,
+                            "error": "Not supported by this app",
+                        },
+                    })
+                    .to_string(),
+                );
+            }
+        }
+
+        // Any result means the turn is over, including after an interrupt.
+        "result" => {
+            out.events.push(AgentEvent::TurnEnded {
+                ok: !v["is_error"].as_bool().unwrap_or(false),
+                duration_ms: v["duration_ms"].as_u64(),
+            });
+            out.events.push(AgentEvent::Status {
+                state: SessionState::Idle,
+            });
+        }
+
+        _ => {}
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn events(line: &str, pending: &Pending) -> Vec<AgentEvent> {
+        translate(&serde_json::from_str(line).unwrap(), pending).events
+    }
+
+    #[test]
+    fn init_gives_session_id() {
+        let got = events(
+            r#"{"type":"system","subtype":"init","session_id":"abc","model":"m","permissionMode":"default"}"#,
+            &Pending::default(),
+        );
+        assert_eq!(
+            got[0],
+            AgentEvent::SessionStarted {
+                agent_session_id: "abc".into(),
+                model: Some("m".into()),
+                mode: Some("default".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn text_delta_is_passed_through() {
+        let got = events(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"one"}},"parent_tool_use_id":null,"api_message_id":"msg_1"}"#,
+            &Pending::default(),
+        );
+        assert_eq!(
+            got,
+            vec![AgentEvent::TextDelta {
+                message_id: "msg_1".into(),
+                block_index: 1,
+                text: "one".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn empty_thinking_is_dropped_and_tool_call_kept() {
+        let got = events(
+            r#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"thinking","thinking":"","signature":"x"},{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"a"}}]},"parent_tool_use_id":null}"#,
+            &Pending::default(),
+        );
+        assert_eq!(got.len(), 1);
+        assert!(matches!(
+            &got[0],
+            AgentEvent::AssistantBlock { block: Block::ToolCall { name, .. }, .. } if name == "Write"
+        ));
+    }
+
+    #[test]
+    fn approval_is_remembered_and_plan_is_recognised() {
+        let pending = Pending::default();
+        let got = events(
+            r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","display_name":"ExitPlanMode","input":{"plan":"do it"},"tool_use_id":"toolu_2"}}"#,
+            &pending,
+        );
+        assert!(matches!(
+            &got[0],
+            AgentEvent::ApprovalRequest { approval: ApprovalKind::Plan, request_id, .. } if request_id == "r1"
+        ));
+        assert_eq!(pending.lock().unwrap()["r1"].input["plan"], "do it");
+    }
+
+    #[test]
+    fn unknown_control_request_gets_an_error_reply() {
+        let t = translate(
+            &serde_json::from_str(
+                r#"{"type":"control_request","request_id":"r9","request":{"subtype":"something_new"}}"#,
+            )
+            .unwrap(),
+            &Pending::default(),
+        );
+        assert!(t.events.is_empty());
+        assert!(t.reply.unwrap().contains(r#""request_id":"r9""#));
+    }
+
+    #[test]
+    fn result_ends_the_turn_and_unknown_types_are_ignored() {
+        let got = events(
+            r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":12}"#,
+            &Pending::default(),
+        );
+        assert_eq!(
+            got[0],
+            AgentEvent::TurnEnded {
+                ok: true,
+                duration_ms: Some(12),
+            }
+        );
+        assert!(events(r#"{"type":"brand_new_thing"}"#, &Pending::default()).is_empty());
+    }
+}
