@@ -59,8 +59,10 @@
 
   const usage = $derived.by(() => {
     if (!chat.usage) return "";
-    const names: Record<string, string> = { seven_day: "weekly", five_hour: "5-hour" };
-    const name = names[chat.usage.window ?? ""];
+    // Claude Code names the limit that applies to the current model, e.g.
+    // "seven_day", "seven_day_overage_included" or "five_hour".
+    const window = chat.usage.window ?? "";
+    const name = window.startsWith("seven_day") ? "weekly" : window.startsWith("five_hour") ? "5-hour" : "";
     const percent = Math.round(chat.usage.utilization * 100);
     return name ? `${percent}% of ${name} limit` : `${percent}% of limit`;
   });
@@ -123,7 +125,7 @@
           <option value={m.value} title={m.detail ?? ""}>{m.name}</option>
         {/each}
       </select>
-      <button onclick={changeFolder} disabled={chat.started} title={chat.started ? "" : "Choose the folder"}>
+      <button class="folder" onclick={changeFolder} disabled={chat.started} title={chat.started ? chat.projectPath : "Choose the folder"}>
         {folder}
       </button>
       <span class="spacer"></span>
@@ -182,16 +184,27 @@
     color: var(--bad);
     margin-left: 2ch;
   }
+  /* One line always: the folder gives way first when the window is narrow. */
   .meta {
     display: flex;
-    flex-wrap: wrap;
     align-items: center;
-    gap: 0 3ch;
+    gap: 3ch;
+    white-space: nowrap;
     margin-top: calc(var(--gap) * 0.6);
     color: var(--faint);
   }
-  .spacer {
-    flex: 1;
+  .meta > * {
+    flex-shrink: 0;
+  }
+  .meta .folder {
+    flex-shrink: 1;
+    min-width: 6ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .meta .spacer {
+    flex: 1 1 0;
+    min-width: 0;
   }
   .meta button:not(:disabled):hover,
   .meta select:hover {
@@ -199,6 +212,8 @@
   }
   select {
     appearance: none;
+    /* As wide as the chosen option, not the longest one. */
+    field-sizing: content;
     border: 0;
     outline: 0;
     padding: 0;

@@ -144,6 +144,11 @@
           <span class="marker"></span>
           <div class="body"><ApprovalCard item={group.item} {chat} /></div>
         </div>
+      {:else if group.item.type === "note"}
+        <div class="row block">
+          <span class="marker"></span>
+          <div class="body faint">{group.item.text}</div>
+        </div>
       {:else}
         <div class="row block">
           <span class="marker bad">!</span>

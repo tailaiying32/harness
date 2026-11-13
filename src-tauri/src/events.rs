@@ -80,6 +80,17 @@ pub enum AgentEvent {
         title: String,
         input: Value,
         tool_id: Option<String>,
+        /// What "always allow" would do here, as button text. None = nothing
+        /// to remember, so the choice isn't offered.
+        always_label: Option<String>,
+    },
+    /// The agent withdrew a request, e.g. because the turn was stopped.
+    ApprovalCancelled {
+        request_id: String,
+    },
+    /// The permission mode changed, by the user or as a side effect of an approval.
+    ModeChanged {
+        mode: String,
     },
     UserMessage {
         text: String,

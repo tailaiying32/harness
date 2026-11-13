@@ -31,7 +31,11 @@ export type AgentEvent =
       title: string;
       input: unknown;
       tool_id: string | null;
+      /** Button text for "always allow". Null when there is nothing to remember. */
+      always_label: string | null;
     }
+  | { kind: "approval_cancelled"; request_id: string }
+  | { kind: "mode_changed"; mode: string }
   | { kind: "user_message"; text: string }
   | { kind: "turn_ended"; ok: boolean; duration_ms: number | null }
   | { kind: "usage_update"; window: string | null; utilization: number }
@@ -63,7 +67,9 @@ export const answerApproval = (
   requestId: string,
   decision: Decision,
   message?: string,
-) => invoke<void>("answer_approval", { sessionId, requestId, decision, message });
+  /** For a question: each question's text mapped to the chosen answer. */
+  answers?: Record<string, string>,
+) => invoke<void>("answer_approval", { sessionId, requestId, decision, message, answers });
 
 export const interrupt = (sessionId: string) => invoke<void>("interrupt", { sessionId });
 
@@ -84,7 +90,7 @@ export const listModels = () => invoke<ModelInfo[]>("list_models");
 /** `model` is an alias ("opus"), a full name, or "default". */
 export const setModel = (sessionId: string, model: string) => invoke<void>("set_model", { sessionId, model });
 
-export const closeSession =(sessionId: string) => invoke<void>("close_session", { sessionId });
+export const closeSession = (sessionId: string) => invoke<void>("close_session", { sessionId });
 
 /** Native folder picker. Null if the user cancels. */
 export async function pickFolder(startAt?: string): Promise<string | null> {

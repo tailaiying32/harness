@@ -1,17 +1,20 @@
 # Harness v1 plan
 
-Status, 2026-11-13: steps 1 to 3 of "Order of work" are built, plus parts of
-step 4. The app is one chat in the Quiet Terminal look: formatted text, code
-blocks, folded tool runs, the approval card, the working indicator, mode
-switch, stop, a folder picker, twenty themes and three sizes. Both memory
-checkpoints passed; see the numbers under step 7.
+Status, 2026-11-13: steps 1 to 4 of "Order of work" are built. The app is one
+chat in the Quiet Terminal look: formatted text, code blocks, folded tool
+runs, approval cards (tool, plan, question), the working indicator, mode
+switch, stop, a folder picker, a model picker, twenty themes and three sizes.
+Both memory checkpoints passed; see the numbers under step 7.
 
-Not built yet: answering Claude's questions (the card only offers Skip),
-showing subagent work, the sidebar and saved history (step 5), the side panel
-(step 6). Not yet tested by hand or by script: "Always allow" sticking for the
-chat, the mode switch, stop, the folder picker, copy on code blocks, links.
-The theme and size selectors sit in the line under the message box until
-there is a settings page.
+Step 4 was tested live through the real window: answering questions, "always
+allow", plan approval (both ways), stop mid-answer and stop while an approval
+waits, deny, the copy button, the folder picker, the working indicator.
+Not tested: clicking a link (it opens the default browser), and picking a
+different folder inside the native picker.
+
+Not built yet: showing subagent work, the sidebar and saved history (step 5),
+the side panel (step 6). The theme and size selectors sit in the line under
+the message box until there is a settings page.
 
 ## What it does
 
@@ -231,14 +234,31 @@ Answer to an approval (**Tested** for allow and deny):
   "response":{"behavior":"deny","message":"reason shown to Claude"}}}
 ```
 
-- Always allow (**Verify**): same as allow, plus
-  `"updatedPermissions": <the request's permission_suggestions array>`.
-  A test with `echo hello` was inconclusive because that command needs no
-  approval. Test with a command that does, and confirm the second run of it
-  asks nothing.
+- Always allow (**Tested**): same as allow, plus
+  `"updatedPermissions": <the request's permission_suggestions array>`, each
+  with `destination` forced to `"session"`. What the suggestions hold decides
+  what "always" means, and it is not always a rule:
+  - Edits (`Write`, `Edit`) and commands that create or move files (`mkdir`,
+    `touch`) suggest `{"type":"setMode","mode":"acceptEdits"}`. Sending it back
+    switches the whole chat to auto-accept edits. Claude Code then emits
+    `system`/`status` with `permissionMode: "acceptEdits"`.
+  - Other commands suggest `{"type":"addRules","rules":[{"toolName":"Bash",
+    "ruleContent":"npm --version"}],"behavior":"allow"}`: a rule for that
+    command.
+  - Some requests also carry `{"type":"addDirectories", ...}`.
+  The button text says which it is (`always_label` in the adapter): "Allow all
+  edits this chat", "Always allow <rule>", or no button when there are no
+  suggestions.
+- Approving a plan (**Tested**): plain allow leaves plan mode for `default`
+  (asks before each edit). Allow plus
+  `"updatedPermissions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}]`
+  leaves it for auto-accept edits. The plan card offers both.
 - Answering a question from Claude (`tool_name` is `AskUserQuestion`)
-  (**Verify**, from the Agent SDK docs): allow with
+  (**Tested**): allow with
   `"updatedInput": {"questions": <original>, "answers": {"<question text>": "<chosen label>"}}`.
+  For a `multiSelect` question the labels are joined with `", "`. Free text
+  works in place of a label. The tool result then reads
+  `Your questions have been answered: "<question>"="<answer>", ...`.
 
 Stop the current turn (**Tested**):
 
@@ -246,8 +266,11 @@ Stop the current turn (**Tested**):
 {"type":"control_request","request_id":"<new uuid>","request":{"subtype":"interrupt"}}
 ```
 
-Claude Code replies with a `control_response`, then a user message
-`[Request interrupted by user]`, then a `result`.
+Claude Code replies with a `control_response`, then a `result` with
+`subtype: "error_during_execution"` and `is_error: true`. The process stays
+alive and takes the next message. If an approval was waiting, Claude Code
+first sends `{"type":"control_cancel_request","request_id":"<that request>"}`
+and a rejected tool result (**Tested**).
 
 Change mode (**Tested** for `plan` and `default`; `acceptEdits` is offered in
 suggestions):
@@ -276,7 +299,8 @@ between CLI versions and must never crash the reader.
 | `control_request`, subtype `can_use_tool` | Approval needed | `request_id`, `request.tool_name`, `request.input`, `request.description`, `request.permission_suggestions`, `request.tool_use_id` |
 | `control_response` | Reply to a request the app sent | `response.request_id`, `response.response` |
 | `result` | Turn ended | `subtype`, `is_error`, `result`, `session_id`, `usage`, `duration_ms`, `stop_reason` |
-| `system`, subtype `status` | Activity hint | `status` (e.g. `requesting`) |
+| `system`, subtype `status` | Activity hint, or a mode change | `status` (e.g. `requesting`); `permissionMode` when the mode changed |
+| `control_cancel_request` | An approval request was withdrawn | `request_id` |
 | `system`, subtype `post_turn_summary` | One-line summary of the turn | `status_detail` |
 | `rate_limit_event` | Subscription usage | `rate_limit_info.unifiedWindows.*.utilization`, `resetsAt` |
 
@@ -298,8 +322,8 @@ Details that matter:
 - **Special approval requests** by `tool_name`:
   - `ExitPlanMode`: `input.plan` is the plan as markdown; `input.planFilePath`
     is where Claude saved it. Show in the side panel. Allow = approve the plan.
-    Deny with a message = keep planning with that feedback. **Verify** which
-    mode the session is in after approval.
+    Deny with a message = keep planning with that feedback. After approval
+    the mode is `default`, or `acceptEdits` if the answer asked for it.
   - `AskUserQuestion`: `input.questions[]`, each with `question`, `header`,
     `options[]` (`label`, `description`), `multiSelect`. Show as a choice card.
   - Anything else: a normal tool approval card showing `display_name`,
@@ -316,8 +340,11 @@ Status         { state: Starting | Working | WaitingApproval | Idle | Exited }
 TextDelta      { message_id, block_index, text }              not saved
 AssistantBlock { message_id, block: Text{text} | Thinking{text} | ToolCall{tool_id, name, input}, parent_tool_id? }
 ToolResult     { tool_id, content, is_error, parent_tool_id? }
-ApprovalRequest{ request_id, kind: Tool | Plan | Question, tool_name, title, input, suggestions, tool_id }
-ApprovalAnswer { request_id, decision: Allow | AlwaysAllow | Deny, message?, answers? }
+ApprovalRequest{ request_id, kind: Tool | Plan | Question, tool_name, title, input, tool_id,
+                 always_label? }      button text for "always allow"; none = not offered
+ApprovalCancelled { request_id }      the agent withdrew the request (turn stopped)
+ApprovalAnswer { request_id, decision: Allow | AlwaysAllow | Deny, message?, answers? }   (step 5; not built)
+ModeChanged    { mode }               by the user, or as a side effect of an approval
 UserMessage    { text }
 TurnEnded      { ok, summary?, duration_ms, usage? }
 UsageUpdate    { window, utilization, resets_at }             not saved
@@ -516,6 +543,19 @@ Mocked up on the same board:
   every permission suggestion's `destination` to `"session"` before sending
   it back, so nothing is written to Claude Code's settings files. A later
   settings page will let the user change this default (chat, project).
+  As Claude Code's own prompt does, "always" on an edit means auto-accept
+  edits for the rest of the chat; the button says so and the mode shown under
+  the message box follows.
+- **The mode shown follows Claude Code.** It is set from every turn's `init`
+  and from `ModeChanged`, so approving a plan or an "allow all edits" answer
+  updates it.
+- **Question card.** Options are rows to click (`( )` pick one, `[ ]` pick
+  any), each question has a free-text row, and "Send answers" is enabled once
+  every question has an answer. Skip denies with a short message.
+- **Stop.** The chat shows a faint "stopped" line. An approval that was
+  waiting is marked cancelled. A tool call the user denied, or that was
+  cancelled, reads "Skipped ..." in its folded run and is not counted as a
+  failure.
 - **Settings page: later, not v1.** It will hold theme, size, font, idle
   timeout, the "Always allow" default and the path to Claude Code. Until then
   these are constants or a config file.
@@ -632,7 +672,12 @@ before building it. Only `claude_code.rs` would change.
    How to repeat: the app has a self-test, turned on by environment
    variables (see `autotest` in `src-tauri/src/lib.rs`). It sends scripted
    messages through the real window, allows every approval, and writes what
-   the window showed to a file. Start the built binary with
+   the window showed to a file. Messages starting with `@` steer the test
+   instead of being sent: `@model <name>`, `@mode <mode>`,
+   `@answer <allow|always_allow|deny|none>` (how approvals are answered from
+   then on; `none` leaves them waiting) and `@stop <ms>` (press stop that long
+   into the next message). Timers in a hidden window run late, so run one
+   test window at a time. Start the built binary with
    `HARNESS_AUTOTEST_FOLDER`, `HARNESS_AUTOTEST_MESSAGES` (JSON array) and
    `HARNESS_AUTOTEST_REPORT` set, and read memory with `ps` and `top`. WebKit's
    helper processes (`com.apple.WebKit.WebContent`, `.GPU`, `.Networking`) are
@@ -644,9 +689,9 @@ before building it. Only `claude_code.rs` would change.
 ### Verify list
 
 - `--resume` combined with the streaming flags.
-- Always allow via `updatedPermissions`.
-- Answer format for `AskUserQuestion`.
-- Mode after an approved plan.
+- Done: always allow via `updatedPermissions`, the answer format for
+  `AskUserQuestion`, and the mode after an approved plan. See "Messages the
+  app sends".
 - That closing stdin waits for background work before exit.
 - Done: setting the model mid-chat. The request is
   `{"type":"control_request","request_id":…,"request":{"subtype":"set_model","model":"sonnet"}}`.

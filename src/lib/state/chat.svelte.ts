@@ -26,11 +26,21 @@ export type ApprovalItem = {
   toolName: string;
   title: string;
   input: unknown;
+  /** The tool call this is about, when the agent says. */
+  toolId: string | null;
+  /** Button text for "always allow". Null when there is nothing to remember. */
+  alwaysLabel: string | null;
   answered?: Decision;
+  /** For a question: what was picked, by question text. */
+  answers?: Record<string, string>;
+  /** Withdrawn before it was answered, e.g. the turn was stopped. */
+  cancelled?: boolean;
 };
 export type ErrorItem = { id: number; type: "error"; text: string };
+/** A faint one-line remark from the app, e.g. "stopped". */
+export type NoteItem = { id: number; type: "note"; text: string };
 
-export type Item = UserItem | TextItem | ThinkingItem | ToolItem | ApprovalItem | ErrorItem;
+export type Item = UserItem | TextItem | ThinkingItem | ToolItem | ApprovalItem | ErrorItem | NoteItem;
 
 type NewItem =
   | Omit<UserItem, "id">
@@ -38,7 +48,8 @@ type NewItem =
   | Omit<ThinkingItem, "id">
   | Omit<ToolItem, "id">
   | Omit<ApprovalItem, "id">
-  | Omit<ErrorItem, "id">;
+  | Omit<ErrorItem, "id">
+  | Omit<NoteItem, "id">;
 
 function resultText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -48,6 +59,13 @@ function resultText(content: unknown): string {
       .join("\n");
   }
   return content == null ? "" : JSON.stringify(content);
+}
+
+/** For the self-test: answer each question with its first option. */
+function firstOptions(input: unknown): Record<string, string> | undefined {
+  const questions = (input as { questions?: { question: string; options?: { label: string }[] }[] })?.questions;
+  if (!Array.isArray(questions)) return undefined;
+  return Object.fromEntries(questions.map((q) => [q.question, q.options?.[0]?.label ?? ""]));
 }
 
 export class Chat {
@@ -67,8 +85,8 @@ export class Chat {
 
   /** Called once each time a turn ends. Used by the self-test. */
   onTurnEnd: (() => void) | null = null;
-  /** Answer every approval with "allow". Used by the self-test only. */
-  autoAllow = false;
+  /** Answer every approval this way. Used by the self-test only. */
+  autoAnswer: Decision | null = null;
 
   private nextId = 0;
   // Live text arrives in many small pieces. They are collected here and applied
@@ -76,6 +94,8 @@ export class Chat {
   private pendingText = new Map<string, { messageId: string; text: string }>();
   private drafts = new Map<string, TextItem>();
   private frame = 0;
+  /** The user pressed stop and the turn hasn't ended yet. */
+  private stopping = false;
 
   get busy(): boolean {
     return this.status === "starting" || this.status === "working" || this.status === "waiting_approval";
@@ -108,6 +128,13 @@ export class Chat {
     switch (event.kind) {
       case "session_started":
         this.model = event.model;
+        if (event.mode) this.mode = event.mode as Mode;
+        break;
+
+      // Claude Code can change mode on its own: approving a plan leaves plan
+      // mode, and "allow all edits" switches to auto-accept.
+      case "mode_changed":
+        this.mode = event.mode as Mode;
         break;
 
       case "status":
@@ -168,8 +195,22 @@ export class Chat {
           toolName: event.tool_name,
           title: event.title,
           input: event.input,
+          toolId: event.tool_id,
+          alwaysLabel: event.always_label,
         });
-        if (this.autoAllow) void this.answer(item, "allow");
+        if (this.autoAnswer) {
+          // A question has no "always"; it is answered with its first options.
+          const answers = event.approval === "question" ? firstOptions(event.input) : undefined;
+          void this.answer(item, answers ? "allow" : this.autoAnswer, undefined, answers);
+        }
+        break;
+      }
+
+      case "approval_cancelled": {
+        const item = this.items.find(
+          (i): i is ApprovalItem => i.type === "approval" && i.requestId === event.request_id,
+        );
+        if (item && !item.answered) this.cancel(item);
         break;
       }
 
@@ -179,9 +220,13 @@ export class Chat {
           if (item.type === "text") item.streaming = false;
           // A turn that was stopped can leave a tool without a result.
           if (item.type === "tool" && item.result === undefined) item.result = "";
+          // Nothing can be waiting for an answer once the turn is over.
+          if (item.type === "approval" && !item.answered && !item.cancelled) this.cancel(item);
         }
         this.drafts.clear();
         this.turnStartedAt = null;
+        if (this.stopping) this.push({ type: "note", text: "stopped" });
+        this.stopping = false;
         this.onTurnEnd?.();
         break;
 
@@ -198,6 +243,7 @@ export class Chat {
     const message = text.trim();
     if (!message) return;
     this.push({ type: "user", text: message });
+    this.stopping = false;
     if (this.turnStartedAt === null) this.turnStartedAt = Date.now();
     try {
       await sendMessage(this.sessionId, this.projectPath.trim(), this.mode, this.modelChoice, message);
@@ -207,19 +253,39 @@ export class Chat {
     }
   }
 
-  async answer(item: ApprovalItem, decision: Decision, message?: string): Promise<void> {
+  async answer(
+    item: ApprovalItem,
+    decision: Decision,
+    message?: string,
+    answers?: Record<string, string>,
+  ): Promise<void> {
     try {
-      await answerApproval(this.sessionId, item.requestId, decision, message);
+      await answerApproval(this.sessionId, item.requestId, decision, message, answers);
       item.answered = decision;
+      item.answers = answers;
+      if (decision === "deny") this.markDeclined(item);
     } catch (e) {
       this.push({ type: "error", text: String(e) });
     }
   }
 
+  private cancel(item: ApprovalItem): void {
+    item.cancelled = true;
+    this.markDeclined(item);
+  }
+
+  /** The tool call behind a denied or cancelled approval never ran; say so, don't call it a failure. */
+  private markDeclined(item: ApprovalItem): void {
+    const tool = this.items.find((i): i is ToolItem => i.type === "tool" && i.toolId === item.toolId);
+    if (tool) tool.declined = true;
+  }
+
   async stop(): Promise<void> {
     try {
+      this.stopping = true;
       await interrupt(this.sessionId);
     } catch (e) {
+      this.stopping = false;
       this.push({ type: "error", text: String(e) });
     }
   }

@@ -2,7 +2,7 @@
   // A run of tool calls, folded into one line. Clicking opens it to one line
   // per call, with the diff under each edit. While the run is still going the
   // line shows the current step and how long the turn has taken.
-  import { diffLines, editCounts, past, present, title, type ToolCall } from "../tools";
+  import { diffLines, editCounts, past, present, skipped, title, type ToolCall } from "../tools";
   import Clipped from "./Clipped.svelte";
 
   let {
@@ -16,7 +16,10 @@
   let open = $state(false);
 
   const running = $derived(tools.find((tool) => tool.result === undefined));
-  const failed = $derived(tools.some((tool) => tool.isError));
+  // A call the user declined is not a failure, and plans and questions report
+  // their outcome on their own card.
+  const failed = $derived(tools.some((tool) => tool.isError && !tool.declined));
+  const allSkipped = $derived(tools.every(skipped));
   const counts = $derived(editCounts(tools));
   const summary = $derived.by(() => {
     const text = tools.map(past).join(", ");
@@ -25,14 +28,14 @@
 
   /** Tools whose output is worth showing when the run is opened. */
   const showsOutput = (tool: ToolCall) =>
-    tool.isError || ["Bash", "Grep", "Glob", "WebSearch"].includes(tool.name);
+    !tool.declined && (tool.isError || ["Bash", "Grep", "Glob", "WebSearch"].includes(tool.name));
   const outputLines = (tool: ToolCall) => (tool.result ?? "").trimEnd().split("\n").map((text) => ({ text }));
 </script>
 
 <div>
   <button class="fold" onclick={() => (open = !open)} aria-expanded={open}>
     <span class="marker" class:live={active} class:bad={!active && failed}>
-      {active ? spinner : failed ? "!" : "✓"}
+      {active ? spinner : failed ? "!" : allSkipped ? "–" : "✓"}
     </span>
     <span class="summary">
       {#if active && running}{present(running)}…{:else}{summary}{/if}
@@ -53,7 +56,7 @@
             <span class="verb">{name.verb}</span>
             <span class="target">{name.target}</span>
             {#if tool.result === undefined}<span class="faint">running</span>{/if}
-            {#if tool.isError}<span class="bad">failed</span>{/if}
+            {#if skipped(tool)}<span class="faint">not run</span>{:else if tool.isError && !tool.declined}<span class="bad">failed</span>{/if}
           </div>
           {#if diff && diff.length > 0}
             <Clipped lines={diff} max={24} />

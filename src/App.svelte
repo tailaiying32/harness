@@ -6,7 +6,16 @@
   import "./app.css";
   import ChatView from "./lib/chat/ChatView.svelte";
   import Composer from "./lib/chat/Composer.svelte";
-  import { autotest, autotestReport, checkSetup, listModels, subscribe, type SetupInfo } from "./lib/ipc";
+  import {
+    autotest,
+    autotestReport,
+    checkSetup,
+    listModels,
+    subscribe,
+    type Decision,
+    type Mode,
+    type SetupInfo,
+  } from "./lib/ipc";
   import { loadCachedModels, saveCachedModels } from "./lib/models";
   import { Chat } from "./lib/state/chat.svelte";
   import { applySize, applyTheme, loadPrefs, sizes, type Size } from "./lib/themes";
@@ -53,7 +62,7 @@
   async function runSelfTest() {
     const test = await autotest();
     if (!test) return;
-    chat.autoAllow = true;
+    chat.autoAnswer = "allow";
     chat.projectPath = test.folder;
     if (test.theme) {
       theme = test.theme;
@@ -66,17 +75,28 @@
     if (test.model) chat.modelChoice = test.model;
     const started = performance.now();
     const modelsUsed: (string | null)[] = [];
+    const modesAfter: string[] = [];
+    let stopAfter = 0;
     for (const message of test.messages) {
-      // `@model <name>` switches model instead of being sent.
-      const switchTo = message.match(/^@model\s+(\S+)$/)?.[1];
-      if (switchTo) {
-        await chat.changeModel(switchTo);
-        continue;
-      }
+      // Lines starting with `@` steer the test instead of being sent:
+      // `@model <name>`, `@mode <mode>`, `@answer <allow|always_allow|deny|none>`
+      // (how approvals are answered from here on), and `@stop <ms>` (press
+      // stop that long into the next message).
+      const [, directive, value] = message.match(/^@(model|mode|answer|stop)\s+(\S+)$/) ?? [];
+      if (directive === "model") await chat.changeModel(value);
+      if (directive === "mode") await chat.changeMode(value as Mode);
+      if (directive === "answer") chat.autoAnswer = value === "none" ? null : (value as Decision);
+      if (directive === "stop") stopAfter = Number(value);
+      if (directive) continue;
+
       const done = new Promise<void>((resolve) => (chat.onTurnEnd = resolve));
       await chat.send(message);
+      if (stopAfter) setTimeout(() => void chat.stop(), stopAfter);
+      stopAfter = 0;
       await done;
+      await tick();
       modelsUsed.push(chat.model);
+      modesAfter.push(chat.mode);
     }
     chat.onTurnEnd = null;
     await tick();
@@ -86,6 +106,8 @@
           seconds: Math.round((performance.now() - started) / 100) / 10,
           model: chat.model,
           modelsUsed,
+          modesAfter,
+          footer: document.querySelector<HTMLElement>(".meta")?.innerText ?? "",
           modelsOffered: models.map((m) => m.name),
           usage: chat.usage,
           items: chat.items.map((item) => ({ ...item })),

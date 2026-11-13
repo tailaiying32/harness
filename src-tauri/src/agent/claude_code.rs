@@ -6,7 +6,7 @@
 //! `control_response` lines) is what the Agent SDK uses but is not documented for
 //! other hosts. If an update breaks it, the fix belongs here and nowhere else.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -281,13 +281,20 @@ impl RunningAgent for ClaudeCodeProcess {
         request_id: &str,
         decision: Decision,
         message: Option<String>,
+        answers: Option<BTreeMap<String, String>>,
     ) -> Result<(), String> {
-        let approval = self
+        let mut approval = self
             .pending
             .lock()
             .unwrap()
             .remove(request_id)
             .ok_or("This request is no longer waiting for an answer")?;
+        // A question is answered by allowing the call with the answers added to
+        // its input: question text -> chosen label (several labels joined by ", ").
+        // Tested on CLI 2.1.322.
+        if let (Some(answers), Some(input)) = (answers, approval.input.as_object_mut()) {
+            input.insert("answers".to_string(), json!(answers));
+        }
         let response = match decision {
             Decision::Allow => json!({ "behavior": "allow", "updatedInput": approval.input }),
             Decision::AlwaysAllow => {
@@ -361,6 +368,28 @@ fn session_scoped(suggestions: &Value) -> Option<Value> {
     Some(Value::Array(scoped))
 }
 
+/// Button text for "always allow": what Claude Code's suggestions would really
+/// do. Editing tools, and commands that create or move files, suggest switching
+/// the whole chat to auto-accept edits; other commands suggest a rule.
+fn always_label(suggestions: &Value) -> Option<String> {
+    let list = suggestions.as_array().filter(|list| !list.is_empty())?;
+    if list
+        .iter()
+        .any(|s| s["type"] == "setMode" && s["mode"] == "acceptEdits")
+    {
+        return Some("Allow all edits this chat".to_string());
+    }
+    let rule = list
+        .iter()
+        .filter(|s| s["type"] == "addRules")
+        .flat_map(|s| s["rules"].as_array().into_iter().flatten())
+        .find_map(|r| r["ruleContent"].as_str().or(r["toolName"].as_str()));
+    Some(match rule {
+        Some(rule) => format!("Always allow {rule}"),
+        None => "Always allow".to_string(),
+    })
+}
+
 #[derive(Default)]
 struct Translated {
     events: Vec<AgentEvent>,
@@ -389,6 +418,24 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
             out.events.push(AgentEvent::Status {
                 state: SessionState::Working,
             });
+        }
+
+        // Sent when the mode changes: after `set_permission_mode`, after a plan
+        // is approved, or when an "always allow" answer switches it.
+        "system" if v["subtype"] == "status" => {
+            if let Some(mode) = v["permissionMode"].as_str() {
+                out.events.push(AgentEvent::ModeChanged {
+                    mode: mode.to_string(),
+                });
+            }
+        }
+
+        // Claude Code withdrew a request, e.g. the turn was stopped while it waited.
+        "control_cancel_request" => {
+            let request_id = text_of(&v["request_id"]);
+            if pending.lock().unwrap().remove(&request_id).is_some() {
+                out.events.push(AgentEvent::ApprovalCancelled { request_id });
+            }
         }
 
         // Raw API streaming events. Only the main session streams; subagents do not.
@@ -459,11 +506,27 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
                     .or(request["display_name"].as_str())
                     .unwrap_or(&tool_name)
                     .to_string();
+                // What "always allow" sends back. A plan comes with no suggestions;
+                // its second choice is "approve and auto-accept edits", which is the
+                // same mode switch Claude Code suggests for edits. Without it the
+                // chat goes back to asking before each edit (tested on CLI 2.1.322).
+                let (suggestions, always_label) = match approval {
+                    ApprovalKind::Plan => (
+                        json!([{ "type": "setMode", "mode": "acceptEdits", "destination": "session" }]),
+                        Some("Approve, auto-accept edits".to_string()),
+                    ),
+                    ApprovalKind::Question => (Value::Null, None),
+                    ApprovalKind::Tool => {
+                        let suggestions = request["permission_suggestions"].clone();
+                        let label = always_label(&suggestions);
+                        (suggestions, label)
+                    }
+                };
                 pending.lock().unwrap().insert(
                     request_id.clone(),
                     PendingApproval {
                         input: request["input"].clone(),
-                        suggestions: request["permission_suggestions"].clone(),
+                        suggestions,
                     },
                 );
                 out.events.push(AgentEvent::ApprovalRequest {
@@ -473,6 +536,7 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
                     title,
                     input: request["input"].clone(),
                     tool_id: request["tool_use_id"].as_str().map(str::to_owned),
+                    always_label,
                 });
                 out.events.push(AgentEvent::Status {
                     state: SessionState::WaitingApproval,
@@ -675,6 +739,77 @@ mod tests {
         assert_eq!(scoped[0]["rules"][0]["toolName"], "Bash");
         assert!(session_scoped(&json!([])).is_none());
         assert!(session_scoped(&Value::Null).is_none());
+    }
+
+    #[test]
+    fn always_allow_label_says_what_it_does() {
+        let edits = json!([
+            { "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "mkdir -p one" }], "behavior": "allow", "destination": "localSettings" },
+            { "type": "setMode", "mode": "acceptEdits", "destination": "session" },
+        ]);
+        assert_eq!(always_label(&edits).unwrap(), "Allow all edits this chat");
+        let rule = json!([{ "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": "npm test:*" }], "behavior": "allow", "destination": "localSettings" }]);
+        assert_eq!(always_label(&rule).unwrap(), "Always allow npm test:*");
+        let tool_only = json!([{ "type": "addRules", "rules": [{ "toolName": "WebSearch" }], "behavior": "allow", "destination": "localSettings" }]);
+        assert_eq!(always_label(&tool_only).unwrap(), "Always allow WebSearch");
+        assert!(always_label(&Value::Null).is_none());
+    }
+
+    #[test]
+    fn a_plan_can_be_approved_with_auto_accept() {
+        let pending = Pending::default();
+        let got = events(
+            r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"do it"}}}"#,
+            &pending,
+        );
+        assert!(matches!(
+            &got[0],
+            AgentEvent::ApprovalRequest { always_label: Some(label), .. } if label == "Approve, auto-accept edits"
+        ));
+        let stored = session_scoped(&pending.lock().unwrap()["r1"].suggestions).unwrap();
+        assert_eq!(stored[0]["mode"], "acceptEdits");
+    }
+
+    #[test]
+    fn a_question_offers_no_always_allow() {
+        let got = events(
+            r#"{"type":"control_request","request_id":"q1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[]}}}"#,
+            &Pending::default(),
+        );
+        assert!(matches!(
+            &got[0],
+            AgentEvent::ApprovalRequest { approval: ApprovalKind::Question, always_label: None, .. }
+        ));
+    }
+
+    #[test]
+    fn mode_change_and_cancelled_request_are_reported() {
+        let pending = Pending::default();
+        assert_eq!(
+            events(
+                r#"{"type":"system","subtype":"status","status":null,"permissionMode":"acceptEdits"}"#,
+                &pending,
+            ),
+            vec![AgentEvent::ModeChanged {
+                mode: "acceptEdits".into(),
+            }]
+        );
+        // A status line without a mode says nothing new.
+        assert!(events(r#"{"type":"system","subtype":"status","status":"requesting"}"#, &pending).is_empty());
+
+        events(
+            r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#,
+            &pending,
+        );
+        assert_eq!(
+            events(r#"{"type":"control_cancel_request","request_id":"r1"}"#, &pending),
+            vec![AgentEvent::ApprovalCancelled {
+                request_id: "r1".into(),
+            }]
+        );
+        assert!(pending.lock().unwrap().is_empty());
+        // Cancelling something unknown is ignored.
+        assert!(events(r#"{"type":"control_cancel_request","request_id":"r1"}"#, &pending).is_empty());
     }
 
     #[test]

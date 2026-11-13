@@ -9,6 +9,8 @@ export type ToolCall = {
   /** Undefined while the tool is still running. */
   result?: string;
   isError?: boolean;
+  /** The user denied it, or it was cancelled while waiting for an answer. */
+  declined?: boolean;
 };
 
 export type DiffLine = { sign: "+" | "-"; text: string };
@@ -63,12 +65,28 @@ function wording(tool: ToolCall): [string, string] {
       return [`ran a subagent`, `Running a subagent`];
     case "TodoWrite":
       return [`updated its task list`, `Updating its task list`];
+    case "ExitPlanMode":
+      return [`presented a plan`, `Presenting a plan`];
+    case "AskUserQuestion":
+      return [`asked a question`, `Asking a question`];
+    case "ToolSearch":
+      return [`looked up a tool`, `Looking up a tool`];
     default:
       return [`used ${name}`, `Using ${name}`];
   }
 }
 
-export const past = (tool: ToolCall) => wording(tool)[0];
+/** Plans and questions have their own card, which says how they went. */
+const hasOwnCard = (tool: ToolCall) => tool.name === "ExitPlanMode" || tool.name === "AskUserQuestion";
+
+/** True when the call never ran because the user said no. */
+export const skipped = (tool: ToolCall) => Boolean(tool.declined) && !hasOwnCard(tool);
+
+/** "ran npm test" becomes "skipped npm test": the verb is swapped for "skipped". */
+export function past(tool: ToolCall): string {
+  const text = wording(tool)[0];
+  return skipped(tool) ? text.replace(/^\S+/, "skipped") : text;
+}
 export const present = (tool: ToolCall) => wording(tool)[1];
 
 /** A path as seen from the project folder, when it is inside it. */
@@ -120,6 +138,7 @@ export function editCounts(tools: ToolCall[]): { added: number; removed: number 
   let added = 0;
   let removed = 0;
   for (const tool of tools) {
+    if (tool.declined) continue; // nothing was written
     for (const line of diffLines(tool) ?? []) {
       if (line.sign === "+") added++;
       else removed++;

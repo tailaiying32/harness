@@ -3,6 +3,7 @@ mod events;
 mod locate;
 mod sessions;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -79,10 +80,11 @@ fn answer_approval(
     request_id: String,
     decision: Decision,
     message: Option<String>,
+    answers: Option<BTreeMap<String, String>>,
 ) -> Result<(), String> {
     state
         .sessions
-        .answer_approval(&session_id, &request_id, decision, message)
+        .answer_approval(&session_id, &request_id, decision, message, answers)
 }
 
 #[tauri::command]

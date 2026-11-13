@@ -3,6 +3,7 @@
 
 pub mod claude_code;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -27,11 +28,14 @@ pub struct SpawnOptions {
 /// A live agent process. Every method only queues a message, so none of them block.
 pub trait RunningAgent: Send + Sync {
     fn send_user_message(&self, text: &str) -> Result<(), String>;
+    /// `message` goes with a denial. `answers` goes with a question: each
+    /// question's text mapped to the chosen answer.
     fn answer_approval(
         &self,
         request_id: &str,
         decision: Decision,
         message: Option<String>,
+        answers: Option<BTreeMap<String, String>>,
     ) -> Result<(), String>;
     /// Stop the current turn. The chat stays usable.
     fn interrupt(&self) -> Result<(), String>;

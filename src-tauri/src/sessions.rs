@@ -2,7 +2,7 @@
 //! Spike scope: start on first message, resume after exit. Idle timers and saved
 //! history come in later steps (see PLAN.md, "Session lifecycle").
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -116,8 +116,11 @@ impl SessionManager {
         request_id: &str,
         decision: Decision,
         message: Option<String>,
+        answers: Option<BTreeMap<String, String>>,
     ) -> Result<(), String> {
-        self.with_agent(session_id, |a| a.answer_approval(request_id, decision, message))
+        self.with_agent(session_id, |a| {
+            a.answer_approval(request_id, decision, message, answers)
+        })
     }
 
     pub fn interrupt(&self, session_id: &str) -> Result<(), String> {
