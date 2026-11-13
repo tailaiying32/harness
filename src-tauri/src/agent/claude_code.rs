@@ -7,6 +7,7 @@
 //! other hosts. If an update breaks it, the fix belongs here and nowhere else.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
@@ -16,7 +17,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use super::{AgentAdapter, EventSink, RunningAgent, SpawnOptions};
-use crate::events::{AgentEvent, ApprovalKind, Block, Decision, SessionState};
+use crate::events::{AgentEvent, ApprovalKind, Block, Decision, ModelInfo, SessionState};
 
 /// How many stderr lines to keep for an error message when the process dies.
 const STDERR_TAIL_LINES: usize = 30;
@@ -61,6 +62,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
         }
         if let Some(mode) = opts.mode.as_deref().filter(|m| *m != "default") {
             cmd.args(["--permission-mode", mode]);
+        }
+        if let Some(model) = opts.model.as_deref().filter(|m| *m != "default") {
+            cmd.args(["--model", model]);
         }
         cmd.current_dir(&opts.project_path)
             // An API key in the environment overrides the subscription login in
@@ -160,6 +164,96 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
         Ok(Box::new(ClaudeCodeProcess { tx, pending, sink }))
     }
+
+    // Starts a short-lived process and sends the `initialize` request the Agent
+    // SDK opens with. The reply lists the models; no chat message is sent, so
+    // nothing is spent. Takes about a second (tested on CLI 2.1.322).
+    fn list_models(&self, binary: &Path) -> Result<Vec<ModelInfo>, String> {
+        use std::io::{BufRead, Write};
+
+        let mut cmd = std::process::Command::new(binary);
+        cmd.args([
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--permission-prompt-tool",
+            "stdio",
+        ])
+        .current_dir(std::env::temp_dir())
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Could not start Claude Code: {e}"))?;
+        let mut stdin = child.stdin.take().ok_or("Claude Code has no stdin")?;
+        let stdout = child.stdout.take().ok_or("Claude Code has no stdout")?;
+
+        let request = json!({
+            "type": "control_request",
+            "request_id": "models",
+            "request": { "subtype": "initialize" },
+        });
+        let sent = writeln!(stdin, "{request}").and_then(|_| stdin.flush());
+
+        // Read on another thread so a silent process can't hang the caller.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                    if value["type"] == "control_response" {
+                        let _ = tx.send(value);
+                        return;
+                    }
+                }
+            }
+        });
+        let reply = rx.recv_timeout(std::time::Duration::from_secs(15));
+
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+
+        sent.map_err(|e| format!("Could not talk to Claude Code: {e}"))?;
+        let reply = reply.map_err(|_| "Claude Code didn't list its models in time".to_string())?;
+        Ok(parse_models(&reply))
+    }
+}
+
+/// Pull the model list out of an `initialize` reply. Each entry has `value`
+/// (what to pass back), `displayName` and `description`; for the "default"
+/// entry the description is the model it currently stands for.
+fn parse_models(reply: &Value) -> Vec<ModelInfo> {
+    reply["response"]["response"]["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let value = m["value"].as_str()?.to_string();
+            let display = m["displayName"].as_str().unwrap_or(&value);
+            let description = m["description"].as_str();
+            let (name, detail) = match (value.as_str(), description) {
+                ("default", Some(stands_for)) => (format!("Default ({stands_for})"), None),
+                _ => (display.to_string(), description.map(str::to_owned)),
+            };
+            Some(ModelInfo {
+                value,
+                name,
+                detail,
+            })
+        })
+        .collect()
 }
 
 impl ClaudeCodeProcess {
@@ -231,6 +325,16 @@ impl RunningAgent for ClaudeCodeProcess {
             "type": "control_request",
             "request_id": uuid::Uuid::new_v4().to_string(),
             "request": { "subtype": "set_permission_mode", "mode": mode },
+        }))
+    }
+
+    // Tested on CLI 2.1.322: aliases ("opus"), full names and "default" all work,
+    // and an unknown name comes back as an error reply (see `translate`).
+    fn set_model(&self, model: &str) -> Result<(), String> {
+        self.send(json!({
+            "type": "control_request",
+            "request_id": uuid::Uuid::new_v4().to_string(),
+            "request": { "subtype": "set_model", "model": model },
         }))
     }
 
@@ -389,6 +493,17 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
             }
         }
 
+        // Replies to requests this app sent (stop, mode, model). Only failures
+        // matter to the user, e.g. an unknown model name.
+        "control_response" if v["response"]["subtype"] == "error" => {
+            out.events.push(AgentEvent::Error {
+                message: v["response"]["error"]
+                    .as_str()
+                    .unwrap_or("Claude Code refused a request")
+                    .to_string(),
+            });
+        }
+
         // Subscription usage. `rateLimitType` names the window that applies and
         // `unifiedWindows` holds how much of each is spent.
         "rate_limit_event" => {
@@ -499,6 +614,53 @@ mod tests {
         );
         assert!(t.events.is_empty());
         assert!(t.reply.unwrap().contains(r#""request_id":"r9""#));
+    }
+
+    #[test]
+    fn models_are_read_from_the_initialize_reply() {
+        let reply = json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "models", "response": { "models": [
+            { "value": "default", "resolvedModel": "claude-fable-5-2", "displayName": "Default (recommended)", "description": "Fable 5.2" },
+            { "value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5", "description": "Best for everyday, complex tasks" },
+            { "displayName": "No value, so skipped" },
+        ]}}});
+        assert_eq!(
+            parse_models(&reply),
+            vec![
+                ModelInfo {
+                    value: "default".into(),
+                    name: "Default (Fable 5.2)".into(),
+                    detail: None,
+                },
+                ModelInfo {
+                    value: "opus".into(),
+                    name: "Opus 5.5".into(),
+                    detail: Some("Best for everyday, complex tasks".into()),
+                },
+            ]
+        );
+        assert!(parse_models(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn a_refused_request_becomes_an_error() {
+        let got = events(
+            r#"{"type":"control_response","response":{"subtype":"error","request_id":"m2","error":"Model 'nope' not found","error_code":"not_found"}}"#,
+            &Pending::default(),
+        );
+        assert_eq!(
+            got,
+            vec![AgentEvent::Error {
+                message: "Model 'nope' not found".into(),
+            }]
+        );
+        // A successful reply is not shown.
+        assert!(
+            events(
+                r#"{"type":"control_response","response":{"subtype":"success","request_id":"m1","response":{"model":"x"}}}"#,
+                &Pending::default(),
+            )
+            .is_empty()
+        );
     }
 
     #[test]

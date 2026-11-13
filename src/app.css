@@ -62,8 +62,11 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Selected text is always readable, whatever colour it was: solid accent
+   behind, background colour on top. */
 ::selection {
-  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: var(--accent);
+  color: var(--bg);
 }
 
 button,

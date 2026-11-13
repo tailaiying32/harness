@@ -5,6 +5,7 @@ import {
   interrupt,
   sendMessage,
   setMode,
+  setModel,
   type AgentEvent,
   type ApprovalKind,
   type Decision,
@@ -54,7 +55,10 @@ export class Chat {
 
   items = $state<Item[]>([]);
   status = $state<SessionState | "none">("none");
+  /** The model Claude Code reports it is using. Known after the first turn starts. */
   model = $state<string | null>(null);
+  /** The model the user picked: an alias, a full name, or "default" for Claude Code's own default. */
+  modelChoice = $state("default");
   mode = $state<Mode>("default");
   usage = $state<{ window: string | null; utilization: number } | null>(null);
   projectPath = $state("");
@@ -196,7 +200,7 @@ export class Chat {
     this.push({ type: "user", text: message });
     if (this.turnStartedAt === null) this.turnStartedAt = Date.now();
     try {
-      await sendMessage(this.sessionId, this.projectPath.trim(), this.mode, message);
+      await sendMessage(this.sessionId, this.projectPath.trim(), this.mode, this.modelChoice, message);
     } catch (e) {
       this.turnStartedAt = null;
       this.push({ type: "error", text: String(e) });
@@ -217,6 +221,17 @@ export class Chat {
       await interrupt(this.sessionId);
     } catch (e) {
       this.push({ type: "error", text: String(e) });
+    }
+  }
+
+  /** Switch model. A running process is told now; otherwise it applies when one starts. */
+  async changeModel(choice: string): Promise<void> {
+    this.modelChoice = choice;
+    if (this.status === "none" || this.status === "exited") return;
+    try {
+      await setModel(this.sessionId, choice);
+    } catch {
+      // No live process: the model is passed along with the next message instead.
     }
   }
 

@@ -522,7 +522,18 @@ Mocked up on the same board:
 - **Slash commands: deferred.** The user uses `/btw` and `/compact`. v1 has no
   slash menu; whether typed slash commands work through the headless input is
   untested. `/btw` (a side question) will want its own floating view later.
-- **No model switcher and no @file menu in v1.**
+- **Model picker: built** (the user asked for it on 2026-11-13). A selector
+  in the line under the message box lists the models Claude Code itself
+  reports, by their real names ("Opus 5.5", "Default (Fable 5.2)"), including
+  older ones. The list comes from an `initialize` control request sent to a
+  short-lived Claude Code process at startup (about a second, nothing spent,
+  no chat message), read by `list_models` in the adapter; each entry has
+  `value`, `displayName` and `description`. The last list is cached so the
+  picker is right at first paint. A new chat starts on the choice (`--model`); a running
+  chat is switched with a `set_model` request and the next turn uses it. An
+  unknown name comes back as an error line and the chat stays on its model.
+  The last choice is remembered for new chats.
+- **No @file menu in v1.**
 - **Thinking** folds into a dim line, like tool calls.
 - **Long diffs and long command output** are cut, with a "show more".
 - **A chat that needs the user** shows only its sidebar dot. No system
@@ -637,6 +648,8 @@ before building it. Only `claude_code.rs` would change.
 - Answer format for `AskUserQuestion`.
 - Mode after an approved plan.
 - That closing stdin waits for background work before exit.
-- Setting the model mid-chat (SDK has `setModel`; the request subtype is
-  probably `set_model`).
+- Done: setting the model mid-chat. The request is
+  `{"type":"control_request","request_id":…,"request":{"subtype":"set_model","model":"sonnet"}}`.
+  Aliases, full names and `"default"` work; the reply carries the resolved
+  model, or `subtype: "error"` with `error` text for an unknown name.
 - Everything on Windows.

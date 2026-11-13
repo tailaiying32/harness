@@ -2,7 +2,7 @@
   // The message box: a prompt marker, a plain text area, and one faint line of
   // context under it. Enter sends; Shift+Enter adds a line.
   import { tick } from "svelte";
-  import { pickFolder, type Mode } from "../ipc";
+  import { pickFolder, type Mode, type ModelInfo } from "../ipc";
   import type { Chat } from "../state/chat.svelte";
   import { applySize, applyTheme, savePrefs, sizes, themes, type Size } from "../themes";
 
@@ -10,9 +10,10 @@
     chat,
     ready,
     home,
+    models,
     theme = $bindable(),
     size = $bindable(),
-  }: { chat: Chat; ready: boolean; home: string; theme: string; size: Size } = $props();
+  }: { chat: Chat; ready: boolean; home: string; models: ModelInfo[]; theme: string; size: Size } = $props();
 
   let draft = $state("");
   let box: HTMLTextAreaElement;
@@ -43,7 +44,18 @@
     if (picked) chat.projectPath = picked;
   }
 
-  const model = $derived(chat.model?.replace(/^claude-/, "") ?? "");
+  // The list comes from Claude Code, so it shows real names ("Opus 5.5"). A
+  // saved choice that is no longer listed still gets an entry, so it shows.
+  const modelOptions = $derived(
+    models.some((m) => m.value === chat.modelChoice)
+      ? models
+      : [{ value: chat.modelChoice, name: chat.modelChoice, detail: null }, ...models],
+  );
+
+  function pickModel(choice: string) {
+    void chat.changeModel(choice);
+    savePrefs({ theme, size, model: choice });
+  }
 
   const usage = $derived.by(() => {
     if (!chat.usage) return "";
@@ -77,13 +89,13 @@
   function pickTheme(id: string) {
     theme = id;
     applyTheme(id);
-    savePrefs({ theme, size });
+    savePrefs({ theme, size, model: chat.modelChoice });
   }
 
   function pickSize(value: Size) {
     size = value;
     applySize(value);
-    savePrefs({ theme, size });
+    savePrefs({ theme, size, model: chat.modelChoice });
   }
 </script>
 
@@ -106,7 +118,11 @@
 
     <div class="meta">
       <button onclick={nextMode} title="Switch mode">{modeLabel}</button>
-      {#if model}<span>{model}</span>{/if}
+      <select value={chat.modelChoice} onchange={(e) => pickModel(e.currentTarget.value)} aria-label="Model">
+        {#each modelOptions as m (m.value)}
+          <option value={m.value} title={m.detail ?? ""}>{m.name}</option>
+        {/each}
+      </select>
       <button onclick={changeFolder} disabled={chat.started} title={chat.started ? "" : "Choose the folder"}>
         {folder}
       </button>

@@ -54,9 +54,9 @@ export async function subscribe(onEvent: (e: Envelope) => void): Promise<void> {
 
 export const checkSetup = () => invoke<SetupInfo>("check_setup");
 
-/** `mode` only matters when this message starts the chat's process. */
-export const sendMessage = (sessionId: string, projectPath: string, mode: Mode, text: string) =>
-  invoke<void>("send_message", { sessionId, projectPath, mode, text });
+/** `mode` and `model` only matter when this message starts the chat's process. */
+export const sendMessage = (sessionId: string, projectPath: string, mode: Mode, model: string, text: string) =>
+  invoke<void>("send_message", { sessionId, projectPath, mode, model, text });
 
 export const answerApproval = (
   sessionId: string,
@@ -69,7 +69,22 @@ export const interrupt = (sessionId: string) => invoke<void>("interrupt", { sess
 
 export const setMode = (sessionId: string, mode: Mode) => invoke<void>("set_mode", { sessionId, mode });
 
-export const closeSession = (sessionId: string) => invoke<void>("close_session", { sessionId });
+/** One model the agent offers. Mirrors `ModelInfo` in src-tauri/src/events.rs. */
+export type ModelInfo = {
+  /** What to pass back to pick it: an alias, a full name, or "default". */
+  value: string;
+  /** What to show, e.g. "Opus 5.5" or "Default (Fable 5.2)". */
+  name: string;
+  detail: string | null;
+};
+
+/** Asks Claude Code for its current models. Takes about a second. */
+export const listModels = () => invoke<ModelInfo[]>("list_models");
+
+/** `model` is an alias ("opus"), a full name, or "default". */
+export const setModel = (sessionId: string, model: string) => invoke<void>("set_model", { sessionId, model });
+
+export const closeSession =(sessionId: string) => invoke<void>("close_session", { sessionId });
 
 /** Native folder picker. Null if the user cancels. */
 export async function pickFolder(startAt?: string): Promise<string | null> {
@@ -79,5 +94,11 @@ export async function pickFolder(startAt?: string): Promise<string | null> {
 
 // Self-test (see `autotest` in src-tauri/src/lib.rs). Null when not turned on.
 export const autotest = () =>
-  invoke<{ folder: string; messages: string[]; theme: string | null; size: string | null } | null>("autotest");
+  invoke<{
+    folder: string;
+    messages: string[];
+    theme: string | null;
+    size: string | null;
+    model: string | null;
+  } | null>("autotest");
 export const autotestReport = (text: string) => invoke<void>("autotest_report", { text });

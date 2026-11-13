@@ -99,6 +99,17 @@ pub enum AgentEvent {
     },
 }
 
+/// One model the agent offers.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ModelInfo {
+    /// What to pass back to pick it: an alias, a full name, or "default".
+    pub value: String,
+    /// What to show, e.g. "Opus 5.5" or "Default (Fable 5.2)".
+    pub name: String,
+    /// A short description, if the agent gives one.
+    pub detail: Option<String>,
+}
+
 /// What the window receives: an event plus the chat it belongs to.
 #[derive(Debug, Clone, Serialize)]
 pub struct Envelope {

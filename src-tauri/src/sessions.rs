@@ -20,27 +20,34 @@ struct Session {
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 
 pub struct SessionManager {
-    adapter: Box<dyn AgentAdapter>,
+    adapter: Arc<dyn AgentAdapter>,
     sessions: Sessions,
 }
 
 impl SessionManager {
-    pub fn new(adapter: Box<dyn AgentAdapter>) -> Self {
+    pub fn new(adapter: Arc<dyn AgentAdapter>) -> Self {
         Self {
             adapter,
             sessions: Arc::default(),
         }
     }
 
+    /// The agent adapter, for calls that don't belong to one chat.
+    pub fn adapter(&self) -> Arc<dyn AgentAdapter> {
+        self.adapter.clone()
+    }
+
     /// Send a message, starting or resuming the agent if it isn't running.
-    /// `mode` only matters when a process has to be started; a running one is
-    /// switched with `set_mode`. `emit` receives every event for this chat.
+    /// `mode` and `model` only matter when a process has to be started; a running
+    /// one is switched with `set_mode` and `set_model`. `emit` receives every
+    /// event for this chat.
     pub fn send_message(
         &self,
         session_id: &str,
         binary: PathBuf,
         project_path: PathBuf,
         mode: Option<String>,
+        model: Option<String>,
         text: &str,
         emit: EventSink,
     ) -> Result<(), String> {
@@ -77,6 +84,7 @@ impl SessionManager {
                     project_path,
                     resume_id: session.agent_session_id.clone(),
                     mode,
+                    model,
                 },
                 sink,
             )?);
@@ -118,6 +126,10 @@ impl SessionManager {
 
     pub fn set_mode(&self, session_id: &str, mode: &str) -> Result<(), String> {
         self.with_agent(session_id, |a| a.set_mode(mode))
+    }
+
+    pub fn set_model(&self, session_id: &str, model: &str) -> Result<(), String> {
+        self.with_agent(session_id, |a| a.set_model(model))
     }
 
     /// Ask the chat's process to finish up and exit. The chat can be resumed later.

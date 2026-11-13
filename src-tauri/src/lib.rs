@@ -11,7 +11,7 @@ use tauri::ipc::Channel;
 
 use agent::EventSink;
 use agent::claude_code::ClaudeCodeAdapter;
-use events::{AgentEvent, Decision, Envelope};
+use events::{AgentEvent, Decision, Envelope, ModelInfo};
 use locate::SetupInfo;
 use sessions::SessionManager;
 
@@ -43,6 +43,7 @@ async fn send_message(
     session_id: String,
     project_path: String,
     mode: Option<String>,
+    model: Option<String>,
     text: String,
 ) -> Result<(), String> {
     let binary = state
@@ -68,7 +69,7 @@ async fn send_message(
     });
     state
         .sessions
-        .send_message(&session_id, binary, project_path, mode, &text, emit)
+        .send_message(&session_id, binary, project_path, mode, model, &text, emit)
 }
 
 #[tauri::command]
@@ -95,6 +96,27 @@ fn set_mode(state: State<'_, AppState>, session_id: String, mode: String) -> Res
 }
 
 #[tauri::command]
+fn set_model(state: State<'_, AppState>, session_id: String, model: String) -> Result<(), String> {
+    state.sessions.set_model(&session_id, &model)
+}
+
+/// The models the agent offers. Starts a short-lived agent process, so it runs
+/// off the main thread and takes about a second.
+#[tauri::command]
+async fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfo>, String> {
+    let binary = state
+        .binary
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Claude Code couldn't be found")?;
+    let adapter = state.sessions.adapter();
+    tauri::async_runtime::spawn_blocking(move || adapter.list_models(&binary))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn close_session(state: State<'_, AppState>, session_id: String) {
     state.sessions.close(&session_id);
 }
@@ -106,12 +128,15 @@ fn close_session(state: State<'_, AppState>, session_id: String) {
 ///   HARNESS_AUTOTEST_REPORT    file the window writes its transcript to
 ///   HARNESS_AUTOTEST_THEME     theme id to show (optional, not saved)
 ///   HARNESS_AUTOTEST_SIZE      compact, regular or roomy (optional, not saved)
+///   HARNESS_AUTOTEST_MODEL     model to start on (optional, not saved)
+/// A message of the form `@model <name>` switches model instead of being sent.
 #[derive(serde::Serialize)]
 struct AutoTest {
     folder: String,
     messages: Vec<String>,
     theme: Option<String>,
     size: Option<String>,
+    model: Option<String>,
 }
 
 #[tauri::command]
@@ -126,6 +151,7 @@ fn autotest() -> Option<AutoTest> {
         messages,
         theme: std::env::var("HARNESS_AUTOTEST_THEME").ok(),
         size: std::env::var("HARNESS_AUTOTEST_SIZE").ok(),
+        model: std::env::var("HARNESS_AUTOTEST_MODEL").ok(),
     })
 }
 
@@ -143,7 +169,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
-            sessions: SessionManager::new(Box::new(ClaudeCodeAdapter)),
+            sessions: SessionManager::new(Arc::new(ClaudeCodeAdapter)),
             channel: Arc::default(),
             binary: Mutex::new(None),
         })
@@ -154,6 +180,8 @@ pub fn run() {
             answer_approval,
             interrupt,
             set_mode,
+            set_model,
+            list_models,
             close_session,
             autotest,
             autotest_report,

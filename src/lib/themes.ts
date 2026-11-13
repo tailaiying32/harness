@@ -188,7 +188,7 @@ export function applySize(size: Size): void {
   document.documentElement.dataset.size = size;
 }
 
-type Prefs = { theme: string; size: Size };
+type Prefs = { theme: string; size: Size; model: string };
 
 // Stored in the window's own storage until there is a settings page.
 export function loadPrefs(): Prefs {
@@ -197,9 +197,11 @@ export function loadPrefs(): Prefs {
     return {
       theme: themes.some((t) => t.id === saved.theme) ? saved.theme! : DEFAULT_THEME,
       size: sizes.includes(saved.size as Size) ? (saved.size as Size) : DEFAULT_SIZE,
+      // Any saved name is kept; if Claude Code no longer knows it, the chat says so.
+      model: typeof saved.model === "string" && saved.model ? saved.model : "default",
     };
   } catch {
-    return { theme: DEFAULT_THEME, size: DEFAULT_SIZE };
+    return { theme: DEFAULT_THEME, size: DEFAULT_SIZE, model: "default" };
   }
 }
 
