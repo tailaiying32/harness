@@ -2,6 +2,7 @@
 // These types mirror src-tauri/src/events.rs.
 
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 
 export type SessionState = "starting" | "working" | "waiting_approval" | "idle" | "exited";
 
@@ -12,6 +13,9 @@ export type Block =
 
 export type ApprovalKind = "tool" | "plan" | "question";
 export type Decision = "allow" | "always_allow" | "deny";
+
+/** Claude Code's permission modes. */
+export type Mode = "default" | "acceptEdits" | "plan";
 
 export type AgentEvent =
   | { kind: "session_started"; agent_session_id: string; model: string | null; mode: string | null }
@@ -30,6 +34,7 @@ export type AgentEvent =
     }
   | { kind: "user_message"; text: string }
   | { kind: "turn_ended"; ok: boolean; duration_ms: number | null }
+  | { kind: "usage_update"; window: string | null; utilization: number }
   | { kind: "error"; message: string };
 
 export type Envelope = { session_id: string; event: AgentEvent };
@@ -49,8 +54,9 @@ export async function subscribe(onEvent: (e: Envelope) => void): Promise<void> {
 
 export const checkSetup = () => invoke<SetupInfo>("check_setup");
 
-export const sendMessage = (sessionId: string, projectPath: string, text: string) =>
-  invoke<void>("send_message", { sessionId, projectPath, text });
+/** `mode` only matters when this message starts the chat's process. */
+export const sendMessage = (sessionId: string, projectPath: string, mode: Mode, text: string) =>
+  invoke<void>("send_message", { sessionId, projectPath, mode, text });
 
 export const answerApproval = (
   sessionId: string,
@@ -61,8 +67,17 @@ export const answerApproval = (
 
 export const interrupt = (sessionId: string) => invoke<void>("interrupt", { sessionId });
 
-// Self-test (see `autotest` in src-tauri/src/lib.rs). Null when not turned on.
-export const autotest = () => invoke<{ folder: string; messages: string[] } | null>("autotest");
-export const autotestReport = (text: string) => invoke<void>("autotest_report", { text });
+export const setMode = (sessionId: string, mode: Mode) => invoke<void>("set_mode", { sessionId, mode });
 
-export const closeSession =(sessionId: string) => invoke<void>("close_session", { sessionId });
+export const closeSession = (sessionId: string) => invoke<void>("close_session", { sessionId });
+
+/** Native folder picker. Null if the user cancels. */
+export async function pickFolder(startAt?: string): Promise<string | null> {
+  const picked = await open({ directory: true, multiple: false, defaultPath: startAt });
+  return typeof picked === "string" ? picked : null;
+}
+
+// Self-test (see `autotest` in src-tauri/src/lib.rs). Null when not turned on.
+export const autotest = () =>
+  invoke<{ folder: string; messages: string[]; theme: string | null; size: string | null } | null>("autotest");
+export const autotestReport = (text: string) => invoke<void>("autotest_report", { text });

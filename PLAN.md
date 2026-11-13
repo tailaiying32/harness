@@ -1,8 +1,17 @@
 # Harness v1 plan
 
-Status, 2026-11-13: steps 1 and 2 of "Order of work" are built (setup and the
-core spike: one chat in a bare window, plain text, with approvals and stop).
-The early checkpoint passed; see the numbers under step 7. Next is step 3.
+Status, 2026-11-13: steps 1 to 3 of "Order of work" are built, plus parts of
+step 4. The app is one chat in the Quiet Terminal look: formatted text, code
+blocks, folded tool runs, the approval card, the working indicator, mode
+switch, stop, a folder picker, twenty themes and three sizes. Both memory
+checkpoints passed; see the numbers under step 7.
+
+Not built yet: answering Claude's questions (the card only offers Skip),
+showing subagent work, the sidebar and saved history (step 5), the side panel
+(step 6). Not yet tested by hand or by script: "Always allow" sticking for the
+chat, the mode switch, stop, the folder picker, copy on code blocks, links.
+The theme and size selectors sit in the line under the message box until
+there is a settings page.
 
 ## What it does
 
@@ -405,7 +414,22 @@ https://www.magicpatterns.com/os/tWmrW2q43Q7sWofaHnFJVj?file=2oZgfpBgi1cedNPY3NJ
 (frame "Quiet Terminal"; its source is the reference for spacing and colour).
 
 - **Feel:** spacious, plain, text-first. Hairline rules instead of boxes. No
-  blur, translucency, shadows, gradients or motion.
+  blur, translucency, shadows or gradients. The only motion is the text cursor
+  and the working indicator.
+- **Formatted text:** render markdown the way the Claude Code CLI does, in one
+  type size (decided: headings are not scaled up; revisit only if they get
+  lost in long side-panel documents). Headings hide their `#`. Top level:
+  bold, accent colour, blank line above, hairline rule below. Second level:
+  bold and bright, blank line above. Third level and below: bold in the
+  normal text colour. Bold is
+  bold and bright; italic is italic. Bullets keep `-`, numbered lists keep
+  their numbers, checkboxes keep `[x]` / `[ ]`. Links are underlined in the
+  accent colour. Quotes get a dim rule down the left. Tables are aligned
+  columns with hairline rules.
+- **Working indicator:** like the CLI's: one changing character, the current
+  step, and elapsed seconds, on the folded line of the run in progress. Update
+  it a few times a second at most; it must not cause the rest of the chat to
+  redraw.
 - **Font:** one monospace font for everything by default
   (`ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace`,
   size per the density setting below). The font is a setting; the layout must
@@ -430,11 +454,12 @@ https://www.magicpatterns.com/os/tWmrW2q43Q7sWofaHnFJVj?file=2oZgfpBgi1cedNPY3NJ
   under each edit. While a run is still going, the line shows the current step.
 - **Approval:** the only boxed element: a one-pixel accent border, tool and
   reason on one line, the command below, then Allow (filled accent), Always
-  allow, Deny, and a faint key hint (Enter allows, Esc denies).
+  allow and Deny. Mouse only: no keyboard shortcut approves or denies, so a
+  stray keypress can never approve a command.
 - **Message box:** a rule above, an accent `>` prompt, and one faint line
   below with mode, model, folder and usage.
-- **Side panel:** the plan as a plain document: `#` heading, `[x]` / `[ ]`
-  steps, notes as dashes.
+- **Side panel:** the plan as a plain document, formatted like chat text: a
+  bold bright heading, `[x]` / `[ ]` steps, notes as dashes.
 
 #### Appearance settings (decided 2026-11-13)
 
@@ -485,13 +510,31 @@ Mocked up on the same board:
   renderer only when a terminal is first opened so it costs nothing otherwise.
   Open: bottom or side.
 
+#### Behaviour decided 2026-11-13
+
+- **"Always allow" lasts for the current chat only.** When answering, set
+  every permission suggestion's `destination` to `"session"` before sending
+  it back, so nothing is written to Claude Code's settings files. A later
+  settings page will let the user change this default (chat, project).
+- **Settings page: later, not v1.** It will hold theme, size, font, idle
+  timeout, the "Always allow" default and the path to Claude Code. Until then
+  these are constants or a config file.
+- **Slash commands: deferred.** The user uses `/btw` and `/compact`. v1 has no
+  slash menu; whether typed slash commands work through the headless input is
+  untested. `/btw` (a side question) will want its own floating view later.
+- **No model switcher and no @file menu in v1.**
+- **Thinking** folds into a dim line, like tool calls.
+- **Long diffs and long command output** are cut, with a "show more".
+- **A chat that needs the user** shows only its sidebar dot. No system
+  notifications in v1.
+
 ### UI rules
 
 - **Layout:** sidebar left (projects, each with its chats, newest first, a
   status dot per chat), chat in the middle, side panel right (collapsible).
 - **Composer:** a plain multi-line text box. Enter sends, Shift+Enter adds a
   line. A mode switch (Ask before edits / Auto-accept edits / Plan) and a stop
-  button that replaces send while working.
+  button that replaces send while working. Enter never answers an approval.
 - **Streaming performance:** collect `TextDelta`s and apply them once per
   animation frame. Re-render markdown only for the block that is streaming;
   finished blocks render once and are never touched again. Use
@@ -503,8 +546,11 @@ Mocked up on the same board:
   the chat wrote (a `Write` tool call whose path ends in `.md`). Plans carry
   Approve and Keep planning (with a feedback box) while their request is
   pending.
-- **Sanitize** all rendered markdown with dompurify. Links open in the
-  default browser, never inside the app window.
+- **Rendered markdown must be safe.** As built: markdown-it runs with raw HTML
+  turned off and its default link checks, and highlight.js escapes code, so
+  the output holds only tags the renderer itself produces. dompurify was
+  dropped as unneeded on top of that; add it back if raw HTML is ever turned
+  on. Links open in the default browser, never inside the app window.
 
 ### If the approval channel breaks
 
@@ -562,6 +608,15 @@ before building it. Only `claude_code.rs` would change.
      colours), the chat is short next to a day-long one, and the window may
      have been in the background, where the system draws less. Repeat after
      step 3.
+
+   **Checkpoint after step 3 (2026-11-13, formatted text and code colours):**
+   - App alone: 103 to 144 MB resident, 88 to 114 MB as `top` counts it,
+     including after three long formatted answers streamed over 96 seconds.
+   - CPU for the app during that stream: 3.8% average, 26% peak.
+   - Formatting did not move the numbers in any way that shows. The window
+     may again have been in the background; repeat once with it in front.
+   - The UI bundle is 260 kB (97 kB compressed), mostly markdown-it and
+     highlight.js with a fixed set of seventeen languages.
 
    How to repeat: the app has a self-test, turned on by environment
    variables (see `autotest` in `src-tauri/src/lib.rs`). It sends scripted

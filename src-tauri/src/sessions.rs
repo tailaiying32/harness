@@ -33,12 +33,14 @@ impl SessionManager {
     }
 
     /// Send a message, starting or resuming the agent if it isn't running.
-    /// `emit` receives every event for this chat.
+    /// `mode` only matters when a process has to be started; a running one is
+    /// switched with `set_mode`. `emit` receives every event for this chat.
     pub fn send_message(
         &self,
         session_id: &str,
         binary: PathBuf,
         project_path: PathBuf,
+        mode: Option<String>,
         text: &str,
         emit: EventSink,
     ) -> Result<(), String> {
@@ -74,7 +76,7 @@ impl SessionManager {
                     binary,
                     project_path,
                     resume_id: session.agent_session_id.clone(),
-                    plan_mode: false,
+                    mode,
                 },
                 sink,
             )?);

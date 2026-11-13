@@ -88,6 +88,12 @@ pub enum AgentEvent {
         ok: bool,
         duration_ms: Option<u64>,
     },
+    /// How much of a usage limit is spent. `window` names the limit, e.g. "seven_day".
+    UsageUpdate {
+        window: Option<String>,
+        /// 0.0 to 1.0.
+        utilization: f64,
+    },
     Error {
         message: String,
     },

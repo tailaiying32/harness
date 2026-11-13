@@ -1,0 +1,129 @@
+// How tool calls are worded and summarised in the chat.
+// Tool names and input fields here are Claude Code's; unknown tools fall back
+// to their own name, so a new tool never breaks the view.
+
+export type ToolCall = {
+  toolId: string;
+  name: string;
+  input: unknown;
+  /** Undefined while the tool is still running. */
+  result?: string;
+  isError?: boolean;
+};
+
+export type DiffLine = { sign: "+" | "-"; text: string };
+
+function field(input: unknown, key: string): string {
+  if (input && typeof input === "object" && key in input) {
+    const value = (input as Record<string, unknown>)[key];
+    if (typeof value === "string") return value;
+  }
+  return "";
+}
+
+const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
+const clip = (text: string, max: number) => (text.length > max ? text.slice(0, max - 1) + "…" : text);
+const firstLine = (text: string) => text.split("\n")[0];
+
+function host(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/** [past tense, present tense], each followed by what it acted on. */
+function wording(tool: ToolCall): [string, string] {
+  const { name, input } = tool;
+  const file = fileName(field(input, "file_path") || field(input, "notebook_path"));
+  switch (name) {
+    case "Read":
+      return [`read ${file}`, `Reading ${file}`];
+    case "Edit":
+    case "MultiEdit":
+    case "NotebookEdit":
+      return [`edited ${file}`, `Editing ${file}`];
+    case "Write":
+      return [`wrote ${file}`, `Writing ${file}`];
+    case "Bash": {
+      const command = clip(firstLine(field(input, "command")), 40);
+      return [`ran ${command}`, `Running ${command}`];
+    }
+    case "Grep":
+      return [`searched for ${clip(field(input, "pattern"), 30)}`, `Searching for ${clip(field(input, "pattern"), 30)}`];
+    case "Glob":
+      return [`listed ${field(input, "pattern")}`, `Listing ${field(input, "pattern")}`];
+    case "WebFetch":
+      return [`fetched ${host(field(input, "url"))}`, `Fetching ${host(field(input, "url"))}`];
+    case "WebSearch":
+      return [`searched the web for ${clip(field(input, "query"), 30)}`, `Searching the web`];
+    case "Task":
+    case "Agent":
+      return [`ran a subagent`, `Running a subagent`];
+    case "TodoWrite":
+      return [`updated its task list`, `Updating its task list`];
+    default:
+      return [`used ${name}`, `Using ${name}`];
+  }
+}
+
+export const past = (tool: ToolCall) => wording(tool)[0];
+export const present = (tool: ToolCall) => wording(tool)[1];
+
+/** A path as seen from the project folder, when it is inside it. */
+function relative(path: string, root: string): string {
+  const base = root.replace(/[\\/]$/, "");
+  if (base && path.startsWith(base) && /[\\/]/.test(path.charAt(base.length))) {
+    return path.slice(base.length + 1);
+  }
+  return path;
+}
+
+/** One line naming the call in full, for an opened run. `root` is the project folder. */
+export function title(tool: ToolCall, root = ""): { verb: string; target: string } {
+  const { name, input } = tool;
+  const target =
+    relative(field(input, "file_path") || field(input, "notebook_path"), root) ||
+    firstLine(field(input, "command")) ||
+    field(input, "pattern") ||
+    field(input, "url") ||
+    field(input, "query") ||
+    field(input, "description");
+  return { verb: name, target };
+}
+
+/** Removed and added lines of an edit, or null if this call isn't one. */
+export function diffLines(tool: ToolCall): DiffLine[] | null {
+  const { name, input } = tool;
+  // A final newline is not an extra line.
+  const lines = (text: string, sign: "+" | "-"): DiffLine[] =>
+    text === "" ? [] : text.replace(/\n$/, "").split("\n").map((line) => ({ sign, text: line }));
+
+  if (name === "Edit") {
+    return [...lines(field(input, "old_string"), "-"), ...lines(field(input, "new_string"), "+")];
+  }
+  if (name === "MultiEdit" && input && typeof input === "object" && "edits" in input) {
+    const edits = (input as { edits: unknown }).edits;
+    if (!Array.isArray(edits)) return null;
+    return edits.flatMap((edit) => [
+      ...lines(field(edit, "old_string"), "-"),
+      ...lines(field(edit, "new_string"), "+"),
+    ]);
+  }
+  if (name === "Write") return lines(field(input, "content"), "+");
+  return null;
+}
+
+/** Lines added and removed across a run of calls. */
+export function editCounts(tools: ToolCall[]): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const tool of tools) {
+    for (const line of diffLines(tool) ?? []) {
+      if (line.sign === "+") added++;
+      else removed++;
+    }
+  }
+  return { added, removed };
+}

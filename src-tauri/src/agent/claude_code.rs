@@ -59,8 +59,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
         if let Some(id) = &opts.resume_id {
             cmd.args(["--resume", id]);
         }
-        if opts.plan_mode {
-            cmd.args(["--permission-mode", "plan"]);
+        if let Some(mode) = opts.mode.as_deref().filter(|m| *m != "default") {
+            cmd.args(["--permission-mode", mode]);
         }
         cmd.current_dir(&opts.project_path)
             // An API key in the environment overrides the subscription login in
@@ -198,8 +198,8 @@ impl RunningAgent for ClaudeCodeProcess {
             Decision::Allow => json!({ "behavior": "allow", "updatedInput": approval.input }),
             Decision::AlwaysAllow => {
                 let mut r = json!({ "behavior": "allow", "updatedInput": approval.input });
-                if approval.suggestions.as_array().is_some_and(|a| !a.is_empty()) {
-                    r["updatedPermissions"] = approval.suggestions;
+                if let Some(scoped) = session_scoped(&approval.suggestions) {
+                    r["updatedPermissions"] = scoped;
                 }
                 r
             }
@@ -237,6 +237,24 @@ impl RunningAgent for ClaudeCodeProcess {
     fn close(&self) {
         let _ = self.tx.send(Out::Close);
     }
+}
+
+/// Claude Code's suggested permission changes, limited to the current chat.
+/// Each suggestion names where it would be saved; forcing "session" means
+/// "Always allow" never writes to Claude Code's settings files.
+fn session_scoped(suggestions: &Value) -> Option<Value> {
+    let list = suggestions.as_array().filter(|list| !list.is_empty())?;
+    let scoped = list
+        .iter()
+        .cloned()
+        .map(|mut suggestion| {
+            if let Some(fields) = suggestion.as_object_mut() {
+                fields.insert("destination".to_string(), json!("session"));
+            }
+            suggestion
+        })
+        .collect();
+    Some(Value::Array(scoped))
 }
 
 #[derive(Default)]
@@ -371,6 +389,22 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
             }
         }
 
+        // Subscription usage. `rateLimitType` names the window that applies and
+        // `unifiedWindows` holds how much of each is spent.
+        "rate_limit_event" => {
+            let info = &v["rate_limit_info"];
+            let window = info["rateLimitType"].as_str();
+            let utilization = window
+                .and_then(|w| info["unifiedWindows"][w]["utilization"].as_f64())
+                .or_else(|| info["utilization"].as_f64());
+            if let Some(utilization) = utilization {
+                out.events.push(AgentEvent::UsageUpdate {
+                    window: window.map(str::to_owned),
+                    utilization,
+                });
+            }
+        }
+
         // Any result means the turn is over, including after an interrupt.
         "result" => {
             out.events.push(AgentEvent::TurnEnded {
@@ -465,6 +499,35 @@ mod tests {
         );
         assert!(t.events.is_empty());
         assert!(t.reply.unwrap().contains(r#""request_id":"r9""#));
+    }
+
+    #[test]
+    fn always_allow_is_kept_to_this_chat() {
+        let suggestions = json!([
+            { "type": "addRules", "rules": [{ "toolName": "Bash" }], "behavior": "allow", "destination": "localSettings" },
+            { "type": "setMode", "mode": "acceptEdits", "destination": "session" },
+        ]);
+        let scoped = session_scoped(&suggestions).unwrap();
+        assert_eq!(scoped[0]["destination"], "session");
+        assert_eq!(scoped[1]["destination"], "session");
+        assert_eq!(scoped[0]["rules"][0]["toolName"], "Bash");
+        assert!(session_scoped(&json!([])).is_none());
+        assert!(session_scoped(&Value::Null).is_none());
+    }
+
+    #[test]
+    fn usage_comes_from_the_active_window() {
+        let got = events(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"seven_day","unifiedWindows":{"seven_day":{"utilization":0.34}}}}"#,
+            &Pending::default(),
+        );
+        assert_eq!(
+            got,
+            vec![AgentEvent::UsageUpdate {
+                window: Some("seven_day".into()),
+                utilization: 0.34,
+            }]
+        );
     }
 
     #[test]

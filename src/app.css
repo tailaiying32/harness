@@ -1,0 +1,300 @@
+/* Quiet Terminal. See PLAN.md, "Look". Colours come from the active theme
+   (src/lib/themes.ts); sizes from the data-size attribute on the root. */
+
+:root {
+  --font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* Regular size. Everything else is laid out in ch and em so it scales with these. */
+  --font: 12.5px;
+  --lh: 1.6;
+  --gap: 13px;
+  --pad-x: 30px;
+  --pad-y: 24px;
+  --col: 800px;
+
+  /* Harness Dark, so the first paint is right before the theme is applied. */
+  --bg: #111210;
+  --panel: #1a1b17;
+  --fg: #cfccc2;
+  --bright: #f1eee4;
+  --dim: #7d7a70;
+  --faint: #4d4b43;
+  --line: #24251f;
+  --accent: #d9a35b;
+  --ok: #8fae7e;
+  --bad: #d47766;
+  --syn-kw: #d9a35b;
+  --syn-fn: #9db7c9;
+  --syn-str: #8fae7e;
+  --syn-type: #c9a8c4;
+  --syn-num: #d48a6a;
+  --syn-comment: #6b685f;
+}
+
+:root[data-size="compact"] {
+  --font: 11.5px;
+  --lh: 1.5;
+  --gap: 9px;
+  --pad-x: 24px;
+  --pad-y: 18px;
+}
+
+:root[data-size="roomy"] {
+  --font: 13.5px;
+  --lh: 1.75;
+  --gap: 20px;
+  --pad-x: 40px;
+  --pad-y: 36px;
+  --col: 780px;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: var(--font) / var(--lh) var(--font-family);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+button,
+select,
+textarea,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+/* Text buttons: no chrome, like everything else. */
+button {
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+/* ---- Formatted text (markdown), set like the Claude Code CLI: one size,
+   headings marked by weight and colour. ---- */
+
+.md p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* One gap between blocks. Written with :not() so it outranks the per-element
+   margin resets in this file. */
+.md > :not(:first-child) {
+  margin-top: var(--gap);
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  font-size: inherit;
+  font-weight: 700;
+  line-height: inherit;
+  margin: 0;
+}
+
+.md > :not(:first-child):is(h1, h2) {
+  margin-top: calc(var(--gap) * 2);
+}
+
+.md h1 {
+  color: var(--accent);
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--line);
+}
+
+.md h2 {
+  color: var(--bright);
+}
+
+.md strong {
+  font-weight: 700;
+  color: var(--bright);
+}
+
+.md em {
+  font-style: italic;
+}
+
+.md a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.md ul,
+.md ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.md li {
+  position: relative;
+  padding-left: 2ch;
+}
+
+.md li > p + p,
+.md li > :is(ul, ol) {
+  margin-top: 0;
+}
+
+.md ul > li::before {
+  content: "-";
+  position: absolute;
+  left: 0;
+  color: var(--faint);
+}
+
+.md ol {
+  counter-reset: item;
+}
+
+.md ol > li {
+  padding-left: 3.5ch;
+  counter-increment: item;
+}
+
+.md ol > li::before {
+  content: counter(item) ".";
+  position: absolute;
+  left: 0;
+  color: var(--faint);
+}
+
+.md blockquote {
+  margin: 0;
+  padding-left: 2ch;
+  border-left: 1px solid var(--dim);
+  color: var(--dim);
+}
+
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.md table {
+  border-collapse: collapse;
+}
+
+.md th,
+.md td {
+  padding: 0 3ch 0 0;
+  text-align: left;
+  vertical-align: top;
+}
+
+.md th {
+  font-weight: 700;
+  color: var(--bright);
+  border-bottom: 1px solid var(--line);
+}
+
+/* Inline code: tinted. */
+.md :not(pre) > code {
+  background: var(--panel);
+  color: var(--bright);
+  padding: 0.05em 0.4em;
+}
+
+/* Code blocks: a tinted panel with a line naming the language (style D). */
+.code {
+  background: var(--panel);
+}
+
+.code-head {
+  display: flex;
+  padding: 0.35em 1.25em;
+  color: var(--dim);
+  border-bottom: 1px solid var(--line);
+}
+
+.code-copy {
+  margin-left: auto;
+  color: var(--faint);
+}
+
+.code-copy:hover {
+  color: var(--fg);
+}
+
+.code pre {
+  margin: 0;
+  padding: 0.8em 1.25em;
+  overflow-x: auto;
+  font: inherit;
+}
+
+.code code {
+  font: inherit;
+}
+
+/* Syntax colours. highlight.js emits these classes; the theme supplies six colours. */
+.hljs-keyword,
+.hljs-literal,
+.hljs-selector-tag,
+.hljs-meta .hljs-keyword {
+  color: var(--syn-kw);
+}
+
+.hljs-title,
+.hljs-title.function_,
+.hljs-section,
+.hljs-name {
+  color: var(--syn-fn);
+}
+
+.hljs-string,
+.hljs-regexp,
+.hljs-symbol,
+.hljs-addition,
+.hljs-meta .hljs-string {
+  color: var(--syn-str);
+}
+
+.hljs-type,
+.hljs-built_in,
+.hljs-title.class_,
+.hljs-attr,
+.hljs-attribute,
+.hljs-selector-class,
+.hljs-selector-id {
+  color: var(--syn-type);
+}
+
+.hljs-number,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-link {
+  color: var(--syn-num);
+}
+
+.hljs-comment,
+.hljs-quote,
+.hljs-meta {
+  color: var(--syn-comment);
+}
+
+.hljs-deletion {
+  color: var(--bad);
+}

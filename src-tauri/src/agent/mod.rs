@@ -18,8 +18,8 @@ pub struct SpawnOptions {
     pub project_path: PathBuf,
     /// The agent's own session ID, to pick an earlier chat back up.
     pub resume_id: Option<String>,
-    /// Start in plan mode.
-    pub plan_mode: bool,
+    /// Permission mode to start in ("default", "acceptEdits", "plan"). None = the agent's default.
+    pub mode: Option<String>,
 }
 
 /// A live agent process. Every method only queues a message, so none of them block.

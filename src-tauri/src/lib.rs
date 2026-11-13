@@ -42,6 +42,7 @@ async fn send_message(
     state: State<'_, AppState>,
     session_id: String,
     project_path: String,
+    mode: Option<String>,
     text: String,
 ) -> Result<(), String> {
     let binary = state
@@ -67,7 +68,7 @@ async fn send_message(
     });
     state
         .sessions
-        .send_message(&session_id, binary, project_path, &text, emit)
+        .send_message(&session_id, binary, project_path, mode, &text, emit)
 }
 
 #[tauri::command]
@@ -103,10 +104,14 @@ fn close_session(state: State<'_, AppState>, session_id: String) {
 ///   HARNESS_AUTOTEST_FOLDER    folder to chat in (turns the self-test on)
 ///   HARNESS_AUTOTEST_MESSAGES  JSON array of messages (optional)
 ///   HARNESS_AUTOTEST_REPORT    file the window writes its transcript to
+///   HARNESS_AUTOTEST_THEME     theme id to show (optional, not saved)
+///   HARNESS_AUTOTEST_SIZE      compact, regular or roomy (optional, not saved)
 #[derive(serde::Serialize)]
 struct AutoTest {
     folder: String,
     messages: Vec<String>,
+    theme: Option<String>,
+    size: Option<String>,
 }
 
 #[tauri::command]
@@ -116,7 +121,12 @@ fn autotest() -> Option<AutoTest> {
         .ok()
         .and_then(|m| serde_json::from_str(&m).ok())
         .unwrap_or_else(|| vec!["Reply with the single word: one".to_string()]);
-    Some(AutoTest { folder, messages })
+    Some(AutoTest {
+        folder,
+        messages,
+        theme: std::env::var("HARNESS_AUTOTEST_THEME").ok(),
+        size: std::env::var("HARNESS_AUTOTEST_SIZE").ok(),
+    })
 }
 
 /// Writes only to the path named in the environment, never one the window picks.
@@ -131,6 +141,7 @@ fn autotest_report(text: String) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             sessions: SessionManager::new(Box::new(ClaudeCodeAdapter)),
             channel: Arc::default(),
