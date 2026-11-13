@@ -10,9 +10,10 @@ import {
   type ApprovalKind,
   type Decision,
   type Mode,
+  type SessionRow,
   type SessionState,
 } from "../ipc";
-import type { ToolCall } from "../tools";
+import { showsOutput, type ToolCall } from "../tools";
 
 export type UserItem = { id: number; type: "user"; text: string };
 export type TextItem = { id: number; type: "text"; messageId: string; text: string; streaming: boolean };
@@ -69,8 +70,32 @@ function firstOptions(input: unknown): Record<string, string> | undefined {
 }
 
 export class Chat {
-  readonly sessionId = crypto.randomUUID();
+  readonly sessionId: string;
 
+  /** A new chat gets a fresh ID; a saved one keeps its own. */
+  constructor(sessionId: string = crypto.randomUUID()) {
+    this.sessionId = sessionId;
+  }
+
+  /**
+   * Rebuilds a saved chat by replaying its history through the same code that
+   * handles live events, so a reloaded chat looks exactly as it did.
+   */
+  static fromSaved(row: SessionRow, events: AgentEvent[], live: boolean): Chat {
+    const chat = new Chat(row.id);
+    chat.projectPath = row.project_path;
+    chat.replaying = true;
+    for (const event of events) chat.handle(event);
+    chat.replaying = false;
+    chat.mode = row.mode as Mode;
+    chat.modelChoice = row.model;
+    chat.stopping = false;
+    if (!live) chat.settle();
+    return chat;
+  }
+
+  /** What is typed in the message box but not sent yet. */
+  draft = $state("");
   items = $state<Item[]>([]);
   status = $state<SessionState | "none">("none");
   /** The model Claude Code reports it is using. Known after the first turn starts. */
@@ -85,6 +110,8 @@ export class Chat {
 
   /** Called once each time a turn ends. Used by the self-test. */
   onTurnEnd: (() => void) | null = null;
+  /** Called after a message has been handed to the core, which saves the chat. */
+  onSent: (() => void) | null = null;
   /** Answer every approval this way. Used by the self-test only. */
   autoAnswer: Decision | null = null;
 
@@ -96,6 +123,19 @@ export class Chat {
   private frame = 0;
   /** The user pressed stop and the turn hasn't ended yet. */
   private stopping = false;
+  /** History is being replayed: events are the record, not news. */
+  private replaying = false;
+
+  /** Nothing is running any more: close whatever was left open. */
+  private settle(): void {
+    for (const item of this.items) {
+      if (item.type === "text") item.streaming = false;
+      if (item.type === "tool" && item.result === undefined) item.result = "";
+      if (item.type === "approval" && !item.answered && !item.cancelled) this.cancel(item);
+    }
+    this.drafts.clear();
+    this.turnStartedAt = null;
+  }
 
   get busy(): boolean {
     return this.status === "starting" || this.status === "working" || this.status === "waiting_approval";
@@ -181,8 +221,9 @@ export class Chat {
         if (event.parent_tool_id) break;
         const tool = this.items.find((i): i is ToolItem => i.type === "tool" && i.toolId === event.tool_id);
         if (tool) {
-          tool.result = resultText(event.content);
           tool.isError = event.is_error;
+          // Output that is never shown (a file that was read, say) isn't kept.
+          tool.result = showsOutput(tool) ? resultText(event.content) : "";
         }
         break;
       }
@@ -214,17 +255,28 @@ export class Chat {
         break;
       }
 
+      // The core's record of an answer. Live, the card already shows it.
+      case "approval_answered": {
+        const item = this.items.find(
+          (i): i is ApprovalItem => i.type === "approval" && i.requestId === event.request_id,
+        );
+        if (item && !item.answered) {
+          item.answered = event.decision;
+          item.answers = event.answers ?? undefined;
+          if (event.decision === "deny") this.markDeclined(item);
+        }
+        break;
+      }
+
+      case "interrupted":
+        this.stopping = true;
+        break;
+
       case "turn_ended":
         this.flushText();
-        for (const item of this.items) {
-          if (item.type === "text") item.streaming = false;
-          // A turn that was stopped can leave a tool without a result.
-          if (item.type === "tool" && item.result === undefined) item.result = "";
-          // Nothing can be waiting for an answer once the turn is over.
-          if (item.type === "approval" && !item.answered && !item.cancelled) this.cancel(item);
-        }
-        this.drafts.clear();
-        this.turnStartedAt = null;
+        // A stopped turn can leave a tool without a result, and nothing can be
+        // waiting for an answer once the turn is over.
+        this.settle();
         if (this.stopping) this.push({ type: "note", text: "stopped" });
         this.stopping = false;
         this.onTurnEnd?.();
@@ -234,7 +286,9 @@ export class Chat {
         this.push({ type: "error", text: event.message });
         break;
 
+      // Live, the message is already on screen from when it was sent.
       case "user_message":
+        if (this.replaying) this.push({ type: "user", text: event.text });
         break;
     }
   }
@@ -247,6 +301,7 @@ export class Chat {
     if (this.turnStartedAt === null) this.turnStartedAt = Date.now();
     try {
       await sendMessage(this.sessionId, this.projectPath.trim(), this.mode, this.modelChoice, message);
+      this.onSent?.();
     } catch (e) {
       this.turnStartedAt = null;
       this.push({ type: "error", text: String(e) });

@@ -11,6 +11,7 @@
   --pad-x: 30px;
   --pad-y: 24px;
   --col: 800px;
+  --side: 228px;
 
   /* Harness Dark, so the first paint is right before the theme is applied. */
   --bg: #111210;
@@ -37,6 +38,7 @@
   --gap: 9px;
   --pad-x: 24px;
   --pad-y: 18px;
+  --side: 204px;
 }
 
 :root[data-size="roomy"] {
@@ -46,6 +48,7 @@
   --pad-x: 40px;
   --pad-y: 36px;
   --col: 780px;
+  --side: 256px;
 }
 
 html,

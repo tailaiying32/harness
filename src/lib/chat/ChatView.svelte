@@ -1,7 +1,7 @@
 <script lang="ts">
   // The chat column: messages, folded tool runs, approvals. Pinned to the
   // bottom like a terminal unless the user scrolls up.
-  import { onMount } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import type { Chat, Item, ToolItem } from "../state/chat.svelte";
   import ApprovalCard from "./ApprovalCard.svelte";
@@ -35,6 +35,30 @@
   });
 
   const lastGroup = $derived(groups[groups.length - 1]);
+
+  // Only the latest part of a chat is drawn. A long chat would otherwise cost
+  // hundreds of megabytes; earlier messages are drawn when the user scrolls up.
+  const PAGE = 60;
+  /** How many groups at the top are not drawn. */
+  let hidden = $state(untrack(() => Math.max(0, groups.length - PAGE)));
+  const drawn = $derived(hidden > 0 ? groups.slice(hidden) : groups);
+
+  // While the user stays at the bottom of a growing chat, let the top go again.
+  $effect(() => {
+    if (pinned && groups.length - hidden > PAGE * 2) hidden = groups.length - PAGE;
+  });
+
+  /** Draws one more page above, keeping what's on screen where it is. */
+  let drawingEarlier = false;
+  async function showEarlier() {
+    if (hidden === 0 || drawingEarlier) return;
+    drawingEarlier = true;
+    const before = scroller.scrollHeight;
+    hidden = Math.max(0, hidden - PAGE);
+    await tick();
+    scroller.scrollTop += scroller.scrollHeight - before;
+    drawingEarlier = false;
+  }
   const working = $derived(chat.busy && chat.status !== "waiting_approval");
   /** Show a line of its own when Claude is working but nothing on screen says so. */
   const idleLine = $derived(
@@ -60,6 +84,7 @@
 
   function onScroll() {
     pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
+    if (scroller.scrollTop < 300) void showEarlier();
   }
 
   // Sending a message always jumps back to the bottom.
@@ -110,7 +135,11 @@
       <div class="row"><span class="marker bad">!</span><div class="body bad">{problem}</div></div>
     {/if}
 
-    {#each groups as group (group.id)}
+    {#if hidden > 0}
+      <button class="earlier" onclick={showEarlier}>↑ show earlier messages</button>
+    {/if}
+
+    {#each drawn as group (group.id)}
       {#if group.kind === "run"}
         <div class="block">
           <WorkRun
@@ -191,6 +220,14 @@
   }
   .row {
     display: flex;
+  }
+  .earlier {
+    align-self: flex-start;
+    margin-left: 2.5ch;
+    color: var(--faint);
+  }
+  .earlier:hover {
+    color: var(--fg);
   }
   .marker {
     width: 2.5ch;

@@ -35,7 +35,9 @@ export type AgentEvent =
       always_label: string | null;
     }
   | { kind: "approval_cancelled"; request_id: string }
+  | { kind: "approval_answered"; request_id: string; decision: Decision; answers: Record<string, string> | null }
   | { kind: "mode_changed"; mode: string }
+  | { kind: "interrupted" }
   | { kind: "user_message"; text: string }
   | { kind: "turn_ended"; ok: boolean; duration_ms: number | null }
   | { kind: "usage_update"; window: string | null; utilization: number }
@@ -58,7 +60,32 @@ export async function subscribe(onEvent: (e: Envelope) => void): Promise<void> {
 
 export const checkSetup = () => invoke<SetupInfo>("check_setup");
 
-/** `mode` and `model` only matter when this message starts the chat's process. */
+/** A saved chat. Mirrors `SessionRow` in src-tauri/src/store.rs. */
+export type SessionRow = {
+  id: string;
+  project_path: string;
+  title: string;
+  mode: string;
+  model: string;
+  agent_session_id: string | null;
+  last_used_at: number;
+};
+
+/** A project folder and its chats, newest first. */
+export type ProjectRow = { id: string; path: string; sessions: SessionRow[] };
+
+/** Everything the sidebar shows. */
+export const sidebar = () => invoke<ProjectRow[]>("sidebar");
+
+/** A saved chat's details and history. `live` says whether its process is running. */
+export const loadSession = (sessionId: string) =>
+  invoke<{ session: SessionRow; events: AgentEvent[]; live: boolean }>("load_session", { sessionId });
+
+/** Deletes a chat and its history for good. */
+export const deleteSession = (sessionId: string) => invoke<void>("delete_session", { sessionId });
+
+/** Saves the chat on its first message. `mode` and `model` are saved with it, and
+ *  are passed to the agent when this message has to start the chat's process. */
 export const sendMessage = (sessionId: string, projectPath: string, mode: Mode, model: string, text: string) =>
   invoke<void>("send_message", { sessionId, projectPath, mode, model, text });
 
@@ -107,4 +134,6 @@ export const autotest = () =>
     size: string | null;
     model: string | null;
   } | null>("autotest");
+/** A pause timed by the core; a hidden window's own timers run late. */
+export const autotestWait = (ms: number) => invoke<void>("autotest_wait", { ms });
 export const autotestReport = (text: string) => invoke<void>("autotest_report", { text });

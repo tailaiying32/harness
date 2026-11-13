@@ -1,20 +1,24 @@
 # Harness v1 plan
 
-Status, 2026-11-13: steps 1 to 4 of "Order of work" are built. The app is one
-chat in the Quiet Terminal look: formatted text, code blocks, folded tool
-runs, approval cards (tool, plan, question), the working indicator, mode
-switch, stop, a folder picker, a model picker, twenty themes and three sizes.
-Both memory checkpoints passed; see the numbers under step 7.
+Status, 2026-11-13: steps 1 to 5 of "Order of work" are built. The app has a
+sidebar of projects and chats, saved history that comes back after a quit,
+resume after a chat's process has exited, idle shutdown, and one chat view in
+the Quiet Terminal look: formatted text, code blocks, folded tool runs,
+approval cards (tool, plan, question), the working indicator, mode switch,
+stop, a folder picker, a model picker, twenty themes and three sizes.
 
-Step 4 was tested live through the real window: answering questions, "always
-allow", plan approval (both ways), stop mid-answer and stop while an approval
-waits, deny, the copy button, the folder picker, the working indicator.
-Not tested: clicking a link (it opens the default browser), and picking a
-different folder inside the native picker.
+Tested live through the real window: everything in step 4 (see there), two
+chats side by side with a mark for the one working in the background, closing
+a process and resuming it, idle shutdown then resume, quit and reopen, a
+reloaded chat matching the live one exactly, deleting a chat, and reopening a
+400-turn chat. Not tested: clicking a link (it opens the default browser),
+picking a different folder inside the native picker, and the sidebar in the
+real window by eye (the screen was locked; it was checked in the browser
+preview instead, see "Preview page").
 
-Not built yet: showing subagent work, the sidebar and saved history (step 5),
-the side panel (step 6). The theme and size selectors sit in the line under
-the message box until there is a settings page.
+Not built yet: showing subagent work, the side panel (step 6), a settings
+page. The theme and size selectors sit in the line under the message box
+until there is one.
 
 ## What it does
 
@@ -149,24 +153,28 @@ inference and must be checked before relying on it.
 ```
 src-tauri/
   src/
-    main.rs            app setup, command registration
-    commands.rs        Tauri commands (the only surface the UI calls)
+    main.rs            starts lib.rs
+    lib.rs             app setup and the Tauri commands (the only surface the UI calls)
     events.rs          AgentEvent and related types (agent-neutral)
     agent/
-      mod.rs           AgentAdapter trait
+      mod.rs           AgentAdapter and RunningAgent traits
       claude_code.rs   the only file that knows Claude Code's wire format
-    sessions.rs        SessionManager: live processes, idle timers
+    sessions.rs        SessionManager: live processes, saving, resume, idle shutdown
     store.rs           SQLite schema, reads, writes
     locate.rs          find the claude binary, check login
 src/
+  App.svelte           the window: sidebar + the open chat; the self-test
+  preview.ts           a stand-in for the core, for the browser preview (dev only)
   lib/
     ipc.ts             typed wrappers over Tauri commands + the event channel
-    state/             Svelte stores: projects, sessions, open chat
-    chat/              ChatView, MessageBlock, ToolCall, ApprovalCard, Composer
-    sidebar/           Sidebar, ProjectGroup, SessionRow
-    panel/             SidePanel, PlanDoc, FileDoc
-    markdown.ts        markdown-it + highlight.js + dompurify setup
-  App.svelte
+    state/app.svelte.ts   sidebar data, which chat is open, each chat's status
+    state/chat.svelte.ts  one chat: items on screen, live events and replay
+    Sidebar.svelte     projects and chats
+    chat/              ChatView, WorkRun, ApprovalCard, Composer, Clipped, Markdown
+    tools.ts           how tool calls are worded
+    markdown.ts        markdown-it + highlight.js setup
+    themes.ts, models.ts, paths.ts
+preview.html           entry for the browser preview (not in the built app)
 ```
 
 Rule: nothing outside `agent/claude_code.rs` may mention Claude Code message
@@ -343,7 +351,9 @@ ToolResult     { tool_id, content, is_error, parent_tool_id? }
 ApprovalRequest{ request_id, kind: Tool | Plan | Question, tool_name, title, input, tool_id,
                  always_label? }      button text for "always allow"; none = not offered
 ApprovalCancelled { request_id }      the agent withdrew the request (turn stopped)
-ApprovalAnswer { request_id, decision: Allow | AlwaysAllow | Deny, message?, answers? }   (step 5; not built)
+ApprovalAnswered { request_id, decision: Allow | AlwaysAllow | Deny, answers? }
+                                      recorded by the core when the user answers
+Interrupted                           recorded by the core when the user presses stop
 ModeChanged    { mode }               by the user, or as a side effect of an approval
 UserMessage    { text }
 TurnEnded      { ok, summary?, duration_ms, usage? }
@@ -371,68 +381,99 @@ them back.
 
 ### Session lifecycle (`sessions.rs`)
 
-States per chat: `NotRunning`, `Starting`, `Working`, `WaitingApproval`,
-`Idle`, `Closing`.
+As built. Per chat the manager keeps: the live process (if any), `busy` (a
+turn is running), `closing` (asked to exit), and two counters. `run` counts
+process starts, so events from an old process can't change the state of a new
+one. `idle_round` counts the times the chat went idle, so an old idle timer
+can't close a chat that has been used since.
 
-- **Send while `NotRunning`:** spawn (with `--resume` if the chat has an
-  `agent_session_id`), then write the user message.
-- **Send while `Idle`:** cancel the idle timer, write the message.
-- **Send while `Working`:** write it anyway; Claude Code queues it.
-- **`result` received:** state becomes `Idle`; start the idle timer (default
-  300 seconds, a setting).
-- **Idle timer fires:** state `Closing`; call `close()`. Do not kill. The
-  process stays until its background work is done, then exits. If the user
-  sends a message while `Closing`, wait for exit, then spawn with `--resume`.
-- **Process exits unexpectedly:** emit `Error` with the tail of stderr, state
-  `NotRunning`. The next send resumes.
-- **App quit:** `close()` every live process, wait up to 3 seconds, then
-  `kill()` what remains.
-- **`agent_session_id`** comes from the first `init`. Save it at once so a
-  crash before the first `result` can still resume.
+- **Send with no process:** save the chat (`touch_session`), spawn with
+  `--resume` if the chat has an `agent_session_id`, record `UserMessage`,
+  write the message. **Tested** live: the resumed chat remembers earlier turns.
+- **Send with a process:** record and write. Claude Code queues it if a turn
+  is running.
+- **Turn ends (`Idle`):** start the idle timer. Its length is, in order:
+  `HARNESS_IDLE_SECONDS`, the `idle_seconds` setting, 300. Zero means never.
+- **Idle timer fires:** if nothing happened since, mark `closing` and call
+  `close()` (close stdin). Never kill; the process finishes background work,
+  then exits. **Tested** live at 5 and 45 seconds, with the window hidden.
+- **Send while `closing`:** wait up to 30 seconds for the exit, then spawn
+  with `--resume`. After 30 seconds return an error asking to try again.
+- **Process exits:** `Exited` clears the process. An unexpected exit also
+  emits `Error` with the tail of stderr. The next send resumes.
+- **App quit (`RunEvent::Exit`):** `close()` every live process and wait up to
+  3 seconds. Anything still running loses its stdin when the app goes, and
+  exits then. **Tested**: no chat processes are left after the app is killed.
+- **`agent_session_id`** comes from every turn's `init` and is saved at once,
+  so a crash before the first `result` can still resume.
+- **Locks:** no lock is held while calling an agent method or `spawn`. Both
+  report through the sink, which takes the sessions lock.
+- The idle timer lives in the core on purpose. A hidden window's page is
+  frozen by the system while nothing happens (seen with the screen locked):
+  its timers don't fire, though events from the core still wake it.
 
 ### Store (`store.rs`)
 
-One SQLite file in the Tauri app data directory.
+One SQLite file, `harness.db`, in the Tauri app data directory
+(`~/Library/Application Support/com.harness.app` on macOS), or in
+`HARNESS_DATA_DIR` if set (tests use this). WAL mode, `synchronous = NORMAL`.
 
 ```
-projects(id TEXT PK, path TEXT UNIQUE, name TEXT, created_at, last_used_at)
-sessions(id TEXT PK, project_id TEXT, agent TEXT DEFAULT 'claude-code',
-         agent_session_id TEXT NULL, title TEXT, mode TEXT,
-         created_at, last_used_at)
-events(id INTEGER PK AUTOINCREMENT, session_id TEXT, kind TEXT,
+projects(id TEXT PK, path TEXT UNIQUE, created_at, last_used_at)
+sessions(id TEXT PK, project_id TEXT -> projects ON DELETE CASCADE,
+         agent TEXT DEFAULT 'claude-code', agent_session_id TEXT NULL,
+         title TEXT, mode TEXT, model TEXT, created_at, last_used_at)
+events(id INTEGER PK AUTOINCREMENT, session_id TEXT -> sessions ON DELETE CASCADE,
        payload TEXT /* AgentEvent as JSON */, created_at)
        INDEX (session_id, id)
 settings(key TEXT PK, value TEXT)
 ```
 
-- Save every `AgentEvent` except `TextDelta`, `UsageUpdate` and `Status`.
+Times are milliseconds since 1970.
+
+- Save every `AgentEvent` except `TextDelta`, `UsageUpdate` and `Status`
+  (`AgentEvent::is_saved`).
+- A chat is created by its first message (`touch_session`), not before. Its
+  project is the folder it started in. Each later message updates `mode`,
+  `model` and `last_used_at`.
+- Title: the first non-empty line of the first message, cut to 60 characters.
+- A tool result longer than 20,000 characters is cut before it is saved or
+  sent to the window (`cap_tool_result`). The window shows a few lines at most.
 - The app's history comes only from this table. Do not read Claude Code's
   transcript files under `~/.claude/projects`; their format is internal and
   can change.
-- Title: first user message, trimmed to 60 characters.
-- An approval left unanswered when a process exits is shown as expired on
-  reload.
+- Rows this version can't parse are skipped on load, so data from another
+  build never breaks a chat.
+- Deleting a chat deletes its events; a project left with no chats goes too.
+- **Reload is replay.** `load_session` returns the saved events in order, and
+  the window feeds them through the same code that handles live events
+  (`Chat.fromSaved`). **Tested**: a chat with a denial, an edit, a question and
+  a stop came back with identical items and text. If the process is gone,
+  anything left open is closed: an unanswered approval shows as cancelled.
 
-### Commands (`commands.rs`)
+### Commands (in `lib.rs`)
 
 ```
-list_projects() / add_project(path) / remove_project(id)
-list_sessions(project_id)
-create_session(project_id, mode) -> session
-load_session(session_id) -> saved events
-send_message(session_id, text)
+subscribe(channel)        one app-wide tauri::ipc::Channel carrying { session_id, event }
+check_setup()             find Claude Code, check login
+sidebar()                 every project with its chats, newest first
+load_session(session_id)  -> { session, events, live }
+delete_session(session_id)
+send_message(session_id, project_path, mode, model, text)
 answer_approval(session_id, request_id, decision, message?, answers?)
 interrupt(session_id)
-set_mode(session_id, mode)
-read_document(session_id, path) -> text     only paths inside the project
-                                            folder or ~/.claude/plans
-get_settings() / set_setting(key, value)
-subscribe(channel)                          one app-wide tauri::ipc::Channel
-                                            carrying { session_id, event }
+set_mode(session_id, mode) / set_model(session_id, model)   saved; a live process is told
+list_models()
+close_session(session_id) ask the chat's process to exit (used by the self-test)
+autotest() / autotest_wait(ms) / autotest_report(text)
 ```
 
-One app-wide channel, not one per chat, so the sidebar can show status dots
-for chats that are not open.
+Not built yet: `read_document(session_id, path)` for the side panel (only
+paths inside the project folder or `~/.claude/plans`), and settings commands
+(`Store::setting` and `set_setting` exist).
+
+One app-wide channel, not one per chat, so the sidebar can show a mark for
+chats that are not open.
 
 ### Look: "Quiet Terminal" (chosen 2026-11-13)
 
@@ -583,6 +624,24 @@ Mocked up on the same board:
 
 - **Layout:** sidebar left (projects, each with its chats, newest first, a
   status dot per chat), chat in the middle, side panel right (collapsible).
+- **Sidebar, as built:** width 204 / 228 / 256 px by size. "harness" at the
+  top, then each project's folder (faint, home as `~`, the end kept when
+  long), its chats under it, "+ new chat" at the bottom. A mark before each
+  title: `●` green = working, `●` accent = needs your answer, `●` plain =
+  finished since you last looked, `○` = nothing going on. The open chat is
+  bright. On hover a folder shows `+` (new chat there) and a chat shows `×`;
+  `×` asks "delete? yes no" in place before deleting. Hidden when the window
+  is narrower than 720 px.
+- **Chats in the window:** a new chat is empty and unsaved until its first
+  message; the app opens on one, in the most recently used folder. Chats
+  opened since the app started stay in memory, so switching back is instant
+  and a chat working in the background keeps up. Unsent text stays with its
+  chat.
+- **Long chats:** only the last 60 groups are drawn; scrolling near the top
+  draws 60 more, keeping the view in place, and staying at the bottom of a
+  growing chat lets the top go again. Tool output that is never shown (a file
+  that was read) is not kept in the window's memory.
+- **A call waiting for approval** reads "Waiting to run npm test", not "Ran".
 - **Composer:** a plain multi-line text box. Enter sends, Shift+Enter adds a
   line. A mode switch (Ask before edits / Auto-accept edits / Plan) and a stop
   button that replaces send while working. Enter never answers an approval.
@@ -602,6 +661,15 @@ Mocked up on the same board:
   the output holds only tags the renderer itself produces. dompurify was
   dropped as unneeded on top of that; add it back if raw HTML is ever turned
   on. Links open in the default browser, never inside the app window.
+
+### Preview page
+
+`npm run dev`, then open `http://localhost:1420/preview.html`: the same window
+in a plain browser, with a stand-in for the core (`src/preview.ts`) that has a
+sidebar of sample chats, one saved chat, a 300-turn chat, and a scripted
+answer to anything typed. For working on the look without building the app.
+It is not part of the built app. `.claude/launch.json` starts it as
+`ui-preview`.
 
 ### If the approval channel breaks
 
@@ -626,7 +694,17 @@ before building it. Only `claude_code.rs` would change.
    answers, mode after plan approval.
 5. **Store and sidebar.** SQLite, projects, chat list, reload history, resume
    after exit, idle timer. Done when quitting and reopening restores
-   everything and a chat resumes after its process has exited.
+   everything and a chat resumes after its process has exited. **Done.**
+
+   Measured after this step (release build, window hidden, same Mac; "memory"
+   is what Activity Monitor shows, `ps` resident memory in brackets):
+   - App alone with a short chat: 105 to 160 MB (160 to 190 MB).
+   - App alone after reopening a 400-turn chat (3,604 saved events, 2,002
+     items): 167 MB (518 MB), opened in 0.3 seconds. Before only the latest
+     part was drawn it was 243 MB (605 MB).
+   - That is over the 150 MB target for a very long chat. The next step, if
+     it matters in real use: load only the last turns from the store and
+     fetch earlier ones on scroll, instead of replaying the whole history.
 6. **Side panel.** Plans and markdown documents.
 7. **Measure.** Memory of the app alone with a long chat open; memory per live
    chat with the user's real app connections; confirm idle chats hold none.
@@ -675,9 +753,16 @@ before building it. Only `claude_code.rs` would change.
    the window showed to a file. Messages starting with `@` steer the test
    instead of being sent: `@model <name>`, `@mode <mode>`,
    `@answer <allow|always_allow|deny|none>` (how approvals are answered from
-   then on; `none` leaves them waiting) and `@stop <ms>` (press stop that long
-   into the next message). Timers in a hidden window run late, so run one
-   test window at a time. Start the built binary with
+   then on; `none` leaves them waiting), `@stop <ms>` (press stop that long
+   into the next message), `@background` (don't wait for the next message's
+   answer), `@new`, `@open <n>` and `@delete <n>` (the nth chat in the
+   sidebar, from 0), `@close` (shut the open chat's process down), `@exited`
+   (wait for it to exit) and `@wait <ms>`. Set `HARNESS_DATA_DIR` so a test
+   never touches the real saved chats, and `HARNESS_IDLE_SECONDS` to test idle
+   shutdown quickly. With the window hidden or the screen locked the page is
+   frozen while nothing happens, so `@wait` never ends there: wait on an event
+   instead. The report's `shown` leaves out blocks that aren't laid out;
+   `text` has them all. Start the built binary with
    `HARNESS_AUTOTEST_FOLDER`, `HARNESS_AUTOTEST_MESSAGES` (JSON array) and
    `HARNESS_AUTOTEST_REPORT` set, and read memory with `ps` and `top`. WebKit's
    helper processes (`com.apple.WebKit.WebContent`, `.GPU`, `.Networking`) are
@@ -688,7 +773,8 @@ before building it. Only `claude_code.rs` would change.
 
 ### Verify list
 
-- `--resume` combined with the streaming flags.
+- Done: `--resume` combined with the streaming flags. The agent's session ID
+  stays the same across a resume.
 - Done: always allow via `updatedPermissions`, the answer format for
   `AskUserQuestion`, and the mode after an approved plan. See "Messages the
   app sends".

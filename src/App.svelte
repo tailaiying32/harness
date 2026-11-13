@@ -1,15 +1,18 @@
 <script lang="ts">
-  // One chat in the Quiet Terminal look. The sidebar, saved history and the
-  // side panel come in later steps of PLAN.md.
+  // The window: the sidebar of projects and chats, and the open chat in the
+  // Quiet Terminal look. The side panel comes in a later step of PLAN.md.
   import { onMount, tick } from "svelte";
   import { homeDir } from "@tauri-apps/api/path";
   import "./app.css";
   import ChatView from "./lib/chat/ChatView.svelte";
   import Composer from "./lib/chat/Composer.svelte";
+  import Sidebar from "./lib/Sidebar.svelte";
   import {
     autotest,
     autotestReport,
+    autotestWait,
     checkSetup,
+    closeSession,
     listModels,
     subscribe,
     type Decision,
@@ -17,28 +20,31 @@
     type SetupInfo,
   } from "./lib/ipc";
   import { loadCachedModels, saveCachedModels } from "./lib/models";
-  import { Chat } from "./lib/state/chat.svelte";
+  import { AppState } from "./lib/state/app.svelte";
+  import type { Chat } from "./lib/state/chat.svelte";
   import { applySize, applyTheme, loadPrefs, sizes, type Size } from "./lib/themes";
 
   const prefs = loadPrefs();
   applyTheme(prefs.theme);
   applySize(prefs.size);
 
-  const chat = new Chat();
-  chat.modelChoice = prefs.model;
+  const app = new AppState();
+  app.defaultModel = prefs.model;
+  app.current.modelChoice = prefs.model;
+  const chat = $derived(app.current);
+
   let theme = $state(prefs.theme);
   let size = $state<Size>(prefs.size);
   let setup = $state<SetupInfo | null>(null);
-  let home = $state("");
   // Last known list first; refreshed from Claude Code once it has been found.
   let models = $state(loadCachedModels());
 
   onMount(async () => {
-    await subscribe((envelope) => {
-      if (envelope.session_id === chat.sessionId) chat.handle(envelope.event);
-    });
-    home = await homeDir();
-    chat.projectPath = home;
+    await subscribe((envelope) => app.route(envelope));
+    app.home = await homeDir();
+    await app.refresh();
+    // A first chat starts where the last one was, or at home.
+    app.current.projectPath = app.projects[0]?.path ?? app.home;
     setup = await checkSetup();
     if (setup.logged_in) void refreshModels();
     void runSelfTest();
@@ -56,14 +62,13 @@
     }
   }
 
-  // Self-test: send scripted messages through this same window, allow every
+  // Self-test: send scripted messages through this same window, answer every
   // approval, then write out what the window ended up showing. Turned on by
   // environment variables; see `autotest` in src-tauri/src/lib.rs.
   async function runSelfTest() {
     const test = await autotest();
     if (!test) return;
-    chat.autoAnswer = "allow";
-    chat.projectPath = test.folder;
+    app.current.projectPath = test.folder;
     if (test.theme) {
       theme = test.theme;
       applyTheme(test.theme);
@@ -72,46 +77,100 @@
       size = test.size as Size;
       applySize(size);
     }
-    if (test.model) chat.modelChoice = test.model;
+    if (test.model) app.current.modelChoice = test.model;
     const started = performance.now();
     const modelsUsed: (string | null)[] = [];
     const modesAfter: string[] = [];
+    let answer: Decision | null = "allow";
     let stopAfter = 0;
+    let background = false;
+    // Timed by the core: a hidden window's own timers run late.
+    const pause = (ms: number) => autotestWait(ms);
+    /** Resolves when the chat's process has exited. Driven by the event, not a timer. */
+    const exited = (chat: Chat) =>
+      new Promise<void>((resolve) => {
+        const stop = $effect.root(() => {
+          $effect(() => {
+            if (chat.status !== "exited") return;
+            resolve();
+            queueMicrotask(() => stop());
+          });
+        });
+      });
+    /** The nth chat in the sidebar, counting from 0 across projects. */
+    const nth = (n: string) => app.projects.flatMap((p) => p.sessions)[Number(n)]?.id;
+
     for (const message of test.messages) {
       // Lines starting with `@` steer the test instead of being sent:
-      // `@model <name>`, `@mode <mode>`, `@answer <allow|always_allow|deny|none>`
-      // (how approvals are answered from here on), and `@stop <ms>` (press
-      // stop that long into the next message).
-      const [, directive, value] = message.match(/^@(model|mode|answer|stop)\s+(\S+)$/) ?? [];
-      if (directive === "model") await chat.changeModel(value);
-      if (directive === "mode") await chat.changeMode(value as Mode);
-      if (directive === "answer") chat.autoAnswer = value === "none" ? null : (value as Decision);
+      //   @model <name>, @mode <mode>
+      //   @answer <allow|always_allow|deny|none>  how approvals are answered from here on
+      //   @stop <ms>     press stop that long into the next message
+      //   @background    send the next message without waiting for its answer
+      //   @new           start a new chat in the same folder
+      //   @open <n>      open the nth chat in the sidebar (from 0)
+      //   @delete <n>    delete the nth chat in the sidebar
+      //   @close         shut the open chat's process down, as going idle does
+      //   @exited        wait until the open chat's process has exited (idle shutdown)
+      //   @wait <ms>     do nothing for a while. With the window hidden or the screen
+      //                  locked, the page is frozen while nothing happens and this never
+      //                  ends; wait for an event (like @exited) instead.
+      const [, directive, value = ""] =
+        message.match(/^@(model|mode|answer|stop|background|new|open|delete|close|exited|wait)(?:\s+(\S+))?$/) ?? [];
+      const current = app.current;
+      if (directive === "model") await current.changeModel(value);
+      if (directive === "mode") await current.changeMode(value as Mode);
+      if (directive === "answer") answer = value === "none" ? null : (value as Decision);
       if (directive === "stop") stopAfter = Number(value);
-      if (directive) continue;
+      if (directive === "background") background = true;
+      if (directive === "new") app.newChat();
+      if (directive === "open") await app.open(nth(value) ?? "");
+      if (directive === "delete") await app.remove(nth(value) ?? "");
+      if (directive === "wait") await pause(Number(value));
+      if (directive === "close") await closeSession(current.sessionId);
+      if (directive === "close" || directive === "exited") await exited(current);
+      if (directive) {
+        await tick();
+        continue;
+      }
 
-      const done = new Promise<void>((resolve) => (chat.onTurnEnd = resolve));
-      await chat.send(message);
-      if (stopAfter) setTimeout(() => void chat.stop(), stopAfter);
+      current.autoAnswer = answer;
+      const done = new Promise<void>((resolve) => (current.onTurnEnd = resolve));
+      await current.send(message);
+      if (stopAfter) void pause(stopAfter).then(() => current.stop());
       stopAfter = 0;
+      if (background) {
+        background = false;
+        continue;
+      }
       await done;
+      current.onTurnEnd = null;
       await tick();
-      modelsUsed.push(chat.model);
-      modesAfter.push(chat.mode);
+      modelsUsed.push(current.model);
+      modesAfter.push(current.mode);
     }
-    chat.onTurnEnd = null;
+    await app.refresh();
     await tick();
+    const current = app.current;
     await autotestReport(
       JSON.stringify(
         {
           seconds: Math.round((performance.now() - started) / 100) / 10,
-          model: chat.model,
+          model: current.model,
           modelsUsed,
           modesAfter,
           footer: document.querySelector<HTMLElement>(".meta")?.innerText ?? "",
+          sidebar: document.querySelector<HTMLElement>("aside")?.innerText ?? "",
+          projects: app.projects,
+          statuses: app.statuses,
+          dots: app.projects.flatMap((p) => p.sessions).map((s) => [s.title, app.dot(s.id)]),
+          status: current.status,
           modelsOffered: models.map((m) => m.name),
-          usage: chat.usage,
-          items: chat.items.map((item) => ({ ...item })),
+          usage: current.usage,
+          items: current.items.map((item) => ({ ...item })),
+          // `shown` leaves out blocks the browser hasn't laid out (off screen, or
+          // everything while the window is hidden); `text` has them all.
           shown: document.querySelector<HTMLElement>(".content")?.innerText ?? "",
+          text: document.querySelector<HTMLElement>(".content")?.textContent ?? "",
           html: document.querySelector<HTMLElement>(".content")?.innerHTML.length ?? 0,
         },
         null,
@@ -121,14 +180,25 @@
   }
 </script>
 
-<main>
-  <ChatView {chat} problem={setup?.problem ?? null} />
-  <Composer {chat} ready={!!setup?.logged_in} {home} {models} bind:theme bind:size />
-</main>
+<div class="app">
+  <Sidebar {app} />
+  <main>
+    <!-- Each chat gets its own view, so scroll position and open folds don't leak between chats. -->
+    {#key chat.sessionId}
+      <ChatView {chat} problem={setup?.problem ?? null} />
+      <Composer {chat} ready={!!setup?.logged_in} home={app.home} {models} bind:theme bind:size />
+    {/key}
+  </main>
+</div>
 
 <style>
-  main {
+  .app {
     height: 100%;
+    display: flex;
+  }
+  main {
+    flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
   }

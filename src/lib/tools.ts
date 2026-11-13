@@ -35,46 +35,53 @@ function host(url: string): string {
   }
 }
 
-/** [past tense, present tense], each followed by what it acted on. */
-function wording(tool: ToolCall): [string, string] {
+/** [past tense, present tense, "to ..." form], each followed by what it acted on. */
+function wording(tool: ToolCall): [string, string, string] {
   const { name, input } = tool;
   const file = fileName(field(input, "file_path") || field(input, "notebook_path"));
+  const pattern = clip(field(input, "pattern"), 30);
+  const query = clip(field(input, "query"), 30);
+  const site = host(field(input, "url"));
   switch (name) {
     case "Read":
-      return [`read ${file}`, `Reading ${file}`];
+      return [`read ${file}`, `Reading ${file}`, `read ${file}`];
     case "Edit":
     case "MultiEdit":
     case "NotebookEdit":
-      return [`edited ${file}`, `Editing ${file}`];
+      return [`edited ${file}`, `Editing ${file}`, `edit ${file}`];
     case "Write":
-      return [`wrote ${file}`, `Writing ${file}`];
+      return [`wrote ${file}`, `Writing ${file}`, `write ${file}`];
     case "Bash": {
       const command = clip(firstLine(field(input, "command")), 40);
-      return [`ran ${command}`, `Running ${command}`];
+      return [`ran ${command}`, `Running ${command}`, `run ${command}`];
     }
     case "Grep":
-      return [`searched for ${clip(field(input, "pattern"), 30)}`, `Searching for ${clip(field(input, "pattern"), 30)}`];
+      return [`searched for ${pattern}`, `Searching for ${pattern}`, `search for ${pattern}`];
     case "Glob":
-      return [`listed ${field(input, "pattern")}`, `Listing ${field(input, "pattern")}`];
+      return [`listed ${field(input, "pattern")}`, `Listing ${field(input, "pattern")}`, `list ${field(input, "pattern")}`];
     case "WebFetch":
-      return [`fetched ${host(field(input, "url"))}`, `Fetching ${host(field(input, "url"))}`];
+      return [`fetched ${site}`, `Fetching ${site}`, `fetch ${site}`];
     case "WebSearch":
-      return [`searched the web for ${clip(field(input, "query"), 30)}`, `Searching the web`];
+      return [`searched the web for ${query}`, `Searching the web`, `search the web for ${query}`];
     case "Task":
     case "Agent":
-      return [`ran a subagent`, `Running a subagent`];
+      return [`ran a subagent`, `Running a subagent`, `run a subagent`];
     case "TodoWrite":
-      return [`updated its task list`, `Updating its task list`];
+      return [`updated its task list`, `Updating its task list`, `update its task list`];
     case "ExitPlanMode":
-      return [`presented a plan`, `Presenting a plan`];
+      return [`presented a plan`, `Presenting a plan`, `present a plan`];
     case "AskUserQuestion":
-      return [`asked a question`, `Asking a question`];
+      return [`asked a question`, `Asking a question`, `ask a question`];
     case "ToolSearch":
-      return [`looked up a tool`, `Looking up a tool`];
+      return [`looked up a tool`, `Looking up a tool`, `look up a tool`];
     default:
-      return [`used ${name}`, `Using ${name}`];
+      return [`used ${name}`, `Using ${name}`, `use ${name}`];
   }
 }
+
+/** Tools whose output is shown when a folded run is opened. Errors always are. */
+export const showsOutput = (tool: ToolCall) =>
+  !tool.declined && (Boolean(tool.isError) || ["Bash", "Grep", "Glob", "WebSearch"].includes(tool.name));
 
 /** Plans and questions have their own card, which says how they went. */
 const hasOwnCard = (tool: ToolCall) => tool.name === "ExitPlanMode" || tool.name === "AskUserQuestion";
@@ -88,6 +95,15 @@ export function past(tool: ToolCall): string {
   return skipped(tool) ? text.replace(/^\S+/, "skipped") : text;
 }
 export const present = (tool: ToolCall) => wording(tool)[1];
+
+/**
+ * True while the call waits for the user to allow it. Plans and questions
+ * don't count: showing their card is the call.
+ */
+export const awaitsAnswer = (tool: ToolCall) => tool.result === undefined && !hasOwnCard(tool);
+
+/** "waiting to run npm test": for a call that hasn't been allowed yet. */
+export const pending = (tool: ToolCall) => `waiting to ${wording(tool)[2]}`;
 
 /** A path as seen from the project folder, when it is inside it. */
 function relative(path: string, root: string): string {

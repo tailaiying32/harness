@@ -1,8 +1,9 @@
 <script lang="ts">
   // The message box: a prompt marker, a plain text area, and one faint line of
   // context under it. Enter sends; Shift+Enter adds a line.
-  import { tick } from "svelte";
+  import { onMount, tick } from "svelte";
   import { pickFolder, type Mode, type ModelInfo } from "../ipc";
+  import { shortPath } from "../paths";
   import type { Chat } from "../state/chat.svelte";
   import { applySize, applyTheme, savePrefs, sizes, themes, type Size } from "../themes";
 
@@ -15,8 +16,13 @@
     size = $bindable(),
   }: { chat: Chat; ready: boolean; home: string; models: ModelInfo[]; theme: string; size: Size } = $props();
 
-  let draft = $state("");
   let box: HTMLTextAreaElement;
+
+  // Opening a chat puts the cursor in its message box, sized to any unsent text.
+  onMount(() => {
+    grow();
+    box.focus();
+  });
 
   const modes: { id: Mode; label: string }[] = [
     { id: "default", label: "ask before edits" },
@@ -30,14 +36,7 @@
     void chat.changeMode(modes[(index + 1) % modes.length].id);
   }
 
-  const folder = $derived.by(() => {
-    const path = chat.projectPath;
-    const base = home.replace(/[\\/]$/, "");
-    const short = base && path.startsWith(base) ? "~" + path.slice(base.length) : path;
-    if (short.length <= 40) return short;
-    // Too long for one line: keep the end, which says the most.
-    return "…/" + short.split(/[\\/]/).filter(Boolean).slice(-2).join("/");
-  });
+  const folder = $derived(shortPath(chat.projectPath, home));
 
   async function changeFolder() {
     const picked = await pickFolder(chat.projectPath || undefined);
@@ -73,9 +72,9 @@
   }
 
   async function send() {
-    const text = draft;
+    const text = chat.draft;
     if (!text.trim() || !ready) return;
-    draft = "";
+    chat.draft = "";
     await tick();
     grow();
     void chat.send(text);
@@ -107,7 +106,7 @@
       <span class="marker">&gt;</span>
       <textarea
         bind:this={box}
-        bind:value={draft}
+        bind:value={chat.draft}
         oninput={grow}
         onkeydown={onKey}
         rows="2"

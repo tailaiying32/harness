@@ -2,25 +2,71 @@ mod agent;
 mod events;
 mod locate;
 mod sessions;
+mod store;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use tauri::State;
 use tauri::ipc::Channel;
+use tauri::{Manager, RunEvent, State};
 
-use agent::EventSink;
 use agent::claude_code::ClaudeCodeAdapter;
 use events::{AgentEvent, Decision, Envelope, ModelInfo};
 use locate::SetupInfo;
-use sessions::SessionManager;
+use sessions::{Out, SessionManager};
+use store::{ProjectRow, SessionRow, Store};
+
+/// How long quitting waits for chat processes to finish up.
+const QUIT_WAIT: Duration = Duration::from_secs(3);
 
 struct AppState {
     sessions: SessionManager,
+    store: Arc<Store>,
     /// One app-wide channel to the window, so chats that aren't open still report status.
     channel: Arc<Mutex<Option<Channel<Envelope>>>>,
     binary: Mutex<Option<PathBuf>>,
+}
+
+/// The sidebar: every project with its chats.
+#[tauri::command]
+fn sidebar(state: State<'_, AppState>) -> Result<Vec<ProjectRow>, String> {
+    state.store.sidebar()
+}
+
+/// A saved chat: its details, its history in order, and whether a process is
+/// running for it right now.
+#[derive(serde::Serialize)]
+struct LoadedSession {
+    session: SessionRow,
+    events: Vec<AgentEvent>,
+    live: bool,
+}
+
+#[tauri::command]
+async fn load_session(state: State<'_, AppState>, session_id: String) -> Result<LoadedSession, String> {
+    let session = state
+        .store
+        .session(&session_id)?
+        .ok_or("That chat no longer exists")?;
+    let store = state.store.clone();
+    let id = session_id.clone();
+    // A long chat is a lot of rows; read them off the main thread.
+    let events = tauri::async_runtime::spawn_blocking(move || store.events(&id))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(LoadedSession {
+        session,
+        events,
+        live: state.sessions.is_live(&session_id),
+    })
+}
+
+/// Deletes a chat and its history for good.
+#[tauri::command]
+fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    state.sessions.delete(&session_id)
 }
 
 #[tauri::command]
@@ -58,19 +104,11 @@ async fn send_message(
         return Err(format!("Not a folder: {}", project_path.display()));
     }
 
-    let channel = state.channel.clone();
-    let id = session_id.clone();
-    let emit: EventSink = Arc::new(move |event: AgentEvent| {
-        if let Some(ch) = channel.lock().unwrap().as_ref() {
-            let _ = ch.send(Envelope {
-                session_id: id.clone(),
-                event,
-            });
-        }
-    });
-    state
-        .sessions
-        .send_message(&session_id, binary, project_path, mode, model, &text, emit)
+    // The manager is cloned so nothing borrowed from `state` is held while waiting.
+    let sessions = state.sessions.clone();
+    sessions
+        .send_message(&session_id, binary, project_path, mode, model, &text)
+        .await
 }
 
 #[tauri::command]
@@ -131,7 +169,10 @@ fn close_session(state: State<'_, AppState>, session_id: String) {
 ///   HARNESS_AUTOTEST_THEME     theme id to show (optional, not saved)
 ///   HARNESS_AUTOTEST_SIZE      compact, regular or roomy (optional, not saved)
 ///   HARNESS_AUTOTEST_MODEL     model to start on (optional, not saved)
-/// A message of the form `@model <name>` switches model instead of being sent.
+/// Messages starting with `@` steer the test; see `runSelfTest` in App.svelte.
+/// Two more variables help tests without touching real data:
+///   HARNESS_DATA_DIR           where the saved chats live (default: the app data folder)
+///   HARNESS_IDLE_SECONDS       idle time before a chat's process is closed
 #[derive(serde::Serialize)]
 struct AutoTest {
     folder: String,
@@ -157,6 +198,13 @@ fn autotest() -> Option<AutoTest> {
     })
 }
 
+/// A pause for the self-test, timed here in the core: a hidden window's own
+/// timers are slowed down by the system and can run very late.
+#[tauri::command]
+async fn autotest_wait(ms: u64) {
+    tokio::time::sleep(Duration::from_millis(ms.min(120_000))).await;
+}
+
 /// Writes only to the path named in the environment, never one the window picks.
 #[tauri::command]
 fn autotest_report(text: String) -> Result<(), String> {
@@ -170,14 +218,35 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState {
-            sessions: SessionManager::new(Arc::new(ClaudeCodeAdapter)),
-            channel: Arc::default(),
-            binary: Mutex::new(None),
+        .setup(|app| {
+            let dir = match std::env::var_os("HARNESS_DATA_DIR") {
+                Some(dir) => PathBuf::from(dir),
+                None => app.path().app_data_dir()?,
+            };
+            let store = Arc::new(Store::open(&dir)?);
+            let channel: Arc<Mutex<Option<Channel<Envelope>>>> = Arc::default();
+            let out: Out = {
+                let channel = channel.clone();
+                Arc::new(move |envelope: Envelope| {
+                    if let Some(ch) = channel.lock().unwrap().as_ref() {
+                        let _ = ch.send(envelope);
+                    }
+                })
+            };
+            app.manage(AppState {
+                sessions: SessionManager::new(Arc::new(ClaudeCodeAdapter), store.clone(), out),
+                store,
+                channel,
+                binary: Mutex::new(None),
+            });
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             subscribe,
             check_setup,
+            sidebar,
+            load_session,
+            delete_session,
             send_message,
             answer_approval,
             interrupt,
@@ -186,8 +255,17 @@ pub fn run() {
             list_models,
             close_session,
             autotest,
+            autotest_wait,
             autotest_report,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Quitting: ask every chat's process to finish up, and wait briefly.
+            if let RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.sessions.shutdown(QUIT_WAIT);
+                }
+            }
+        });
 }
