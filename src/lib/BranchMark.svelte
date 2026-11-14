@@ -1,11 +1,13 @@
 <script lang="ts">
-  // A branch mark for a chat with a worktree, coloured by its pull request:
-  // faint none, dim draft, green open, purple merged, red closed. Drawn rather
-  // than a font glyph, so it looks the same in every font.
+  // A branch mark for a chat, coloured by its pull requests taken together:
+  // green while any is open, dim while only drafts are left, purple once the
+  // work has merged, red if every one was closed. Drawn rather than a font
+  // glyph, so it looks the same in every font.
   import type { PrInfo } from "./ipc";
+  import { prSummary } from "./paths";
 
-  let { pr }: { pr: PrInfo | null } = $props();
-  const state = $derived(pr?.state ?? "none");
+  let { prs }: { prs: PrInfo[] } = $props();
+  const state = $derived(prSummary(prs) ?? "none");
 </script>
 
 <svg class="mark {state}" viewBox="0 0 16 16" aria-hidden="true">

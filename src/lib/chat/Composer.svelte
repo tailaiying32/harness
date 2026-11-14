@@ -5,7 +5,7 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import BranchMark from "../BranchMark.svelte";
   import { pickFolder, type Mode, type ModelInfo } from "../ipc";
-  import { prLabel, shortPath } from "../paths";
+  import { prLabel, prShort, shortPath } from "../paths";
   import type { Chat } from "../state/chat.svelte";
   import { savePrefs } from "../themes";
   import { indent, newLine, outdent, renumbered, type Edit } from "./editing";
@@ -77,18 +77,22 @@
     efforts.includes(chat.effortChoice) ? chat.effortChoice : (picked?.default_effort ?? null),
   );
 
-  let menuOpen = $state(false);
-  let menu = $state<HTMLElement>();
+  // The line under the box has two menus, one open at a time: the chat's
+  // pull requests, and the model.
+  let open = $state<"prs" | "model" | null>(null);
+  let menus = $state<Record<string, HTMLElement | undefined>>({});
+  const toggle = (which: "prs" | "model") => (open = open === which ? null : which);
 
-  // Any click outside the menu, or Escape, closes it.
+  // Any click outside the open menu, or Escape, closes it.
   $effect(() => {
-    if (!menuOpen) return;
+    const menu = open && menus[open];
+    if (!menu) return;
     const away = (e: PointerEvent) => {
-      if (!menu?.contains(e.target as Node)) menuOpen = false;
+      if (!menu.contains(e.target as Node)) open = null;
     };
     const escape = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        menuOpen = false;
+        open = null;
         box.focus();
       }
     };
@@ -192,27 +196,41 @@
         <button class="folder" onclick={changeFolder} title="Choose the folder this chat works in">
           {folder}
         </button>
-      {:else if chat.branch}
-        <!-- A chat with its own worktree: its branch, and its pull request if any. -->
-        <span class="folder branch" title="This chat works in its own worktree: {chat.workPath ?? ''}">
-          <BranchMark pr={chat.pr} />
-          {chat.branch}
-        </span>
-        {#if chat.pr}
-          {@const pr = chat.pr}
-          <button class="pr {pr.state}" onclick={() => openUrl(pr.url)} title="Open the pull request">
-            #{pr.number} {pr.state}
+      {:else if chat.prs.length}
+        <!-- The chat's pull requests: one mark and a count; the menu lists
+             them. A worktree with no pull request yet shows nothing. -->
+        <span class="picker" bind:this={menus.prs}>
+          <button
+            class="prs"
+            onclick={() => toggle("prs")}
+            title={prLabel(chat.prs)}
+            aria-haspopup="menu"
+            aria-expanded={open === "prs"}
+          >
+            <BranchMark prs={chat.prs} />
+            {prShort(chat.prs)}
           </button>
-        {:else}
-          <span title={prLabel(null)}>no PR</span>
-        {/if}
+          {#if open === "prs"}
+            <div class="menu left" role="menu">
+              {#each chat.prs as pr (pr.url)}
+                <button role="menuitem" class="row" title="Open on GitHub" onclick={() => openUrl(pr.url)}>
+                  <span class="pr {pr.state}">#{pr.number} {pr.state}</span>
+                  <span>{pr.branch}</span>
+                </button>
+              {/each}
+              {#if chat.workPath}
+                <div class="where" title="This chat works in its own worktree">{shortPath(chat.workPath, home, 60)}</div>
+              {/if}
+            </div>
+          {/if}
+        </span>
       {/if}
       <span class="spacer"></span>
-      <span class="picker" bind:this={menu}>
-        <button onclick={() => (menuOpen = !menuOpen)} title="Model and effort" aria-haspopup="menu" aria-expanded={menuOpen}>
+      <span class="picker" bind:this={menus.model}>
+        <button onclick={() => toggle("model")} title="Model and effort" aria-haspopup="menu" aria-expanded={open === "model"}>
           {picked?.name ?? chat.modelChoice}{#if effort}&ensp;{effort}{/if}
         </button>
-        {#if menuOpen}
+        {#if open === "model"}
           <div class="menu" role="menu">
             {#each modelOptions as m (m.value)}
               <button
@@ -302,7 +320,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .meta .branch {
+  .meta .prs {
     display: flex;
     align-items: center;
     gap: 1ch;
@@ -326,8 +344,9 @@
   .meta button:not(:disabled):hover {
     color: var(--fg);
   }
-  /* The model menu opens upward from its label, right-aligned with it. A model
-     click picks and leaves it open, so effort can be set in the same visit. */
+  /* A menu opens upward from its label: the model's right-aligned with it,
+     the pull requests' left-aligned. A model click picks and leaves the menu
+     open, so effort can be set in the same visit. */
   .picker {
     position: relative;
   }
@@ -351,6 +370,27 @@
   }
   .menu button.on {
     color: var(--accent);
+  }
+  .menu.left {
+    right: auto;
+    left: 0;
+  }
+  .menu .row {
+    display: flex;
+    gap: 2ch;
+  }
+  /* Wide enough for "#123 merged", so the branches line up. */
+  .menu .row .pr {
+    min-width: 11ch;
+  }
+  .menu .row:hover {
+    color: var(--fg);
+  }
+  .where {
+    margin-top: calc(var(--gap) * 0.4);
+    padding: calc(var(--gap) * 0.4) 2ch 0;
+    border-top: 1px solid var(--line);
+    color: var(--faint);
   }
   .efforts {
     display: flex;

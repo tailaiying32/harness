@@ -216,7 +216,7 @@
           statuses: app.statuses,
           dots: app.projects.flatMap((p) => p.sessions).map((s) => [s.title, app.dot(s.id)]),
           status: current.status,
-          worktree: { branch: current.branch, workPath: current.workPath, pr: current.pr },
+          worktree: { branch: current.branch, workPath: current.workPath, prs: current.prs },
           trash: app.trash.map((s) => s.title),
           modelsOffered: models.map((m) => m.name),
           usage: current.usage,

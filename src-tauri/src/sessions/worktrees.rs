@@ -9,10 +9,34 @@ use std::time::{Duration, Instant};
 use super::{Ask, SessionManager, blocking};
 use crate::events::{AgentEvent, Decision};
 use crate::store::{ChatGit, SessionRow, now_ms};
-use crate::worktree::{self, Merged, PrInfo};
+use crate::worktree::{self, Merged, PrInfo, Worktree};
 
-/// Finds the pull request for (repo root, branch).
-pub type PrLookup = Arc<dyn Fn(&Path, &str) -> Result<Option<PrInfo>, String> + Send + Sync>;
+/// How pull requests are looked up: GitHub in the app, stand-ins in tests.
+#[derive(Clone)]
+pub struct PrLookup {
+    /// The newest pull request for (repo root, branch).
+    pub by_branch: Arc<dyn Fn(&Path, &str) -> Result<Option<PrInfo>, String> + Send + Sync>,
+    /// The pull request at a link.
+    pub by_url: Arc<dyn Fn(&str) -> Result<Option<PrInfo>, String> + Send + Sync>,
+}
+
+impl PrLookup {
+    pub fn github() -> Self {
+        Self {
+            by_branch: Arc::new(crate::github::pr_for),
+            by_url: Arc::new(crate::github::pr_at),
+        }
+    }
+
+    /// Finds nothing anywhere.
+    #[cfg(test)]
+    pub fn none() -> Self {
+        Self {
+            by_branch: Arc::new(|_, _| Ok(None)),
+            by_url: Arc::new(|_| Ok(None)),
+        }
+    }
+}
 
 /// Days without a message before a chat's worktree folder is put away.
 const DEFAULT_IDLE_DAYS: u64 = 14;
@@ -345,22 +369,23 @@ impl SessionManager {
         .await
     }
 
-    /// After a turn: a worktree chat's pull request may have just been opened.
+    /// After a turn: the chat may have switched its folder to another
+    /// branch, or opened a pull request.
     pub(super) fn after_turn(&self, session_id: &str) {
-        if !self.pr_due(session_id, PR_AFTER_TURN) {
-            return;
-        }
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
         let manager = self.clone();
         let id = session_id.to_string();
         tokio::spawn(async move {
-            manager.refresh_pr(&id).await;
+            manager.follow_branch(&id).await;
+            if manager.pr_due(&id, PR_AFTER_TURN) {
+                manager.refresh_prs(&id).await;
+            }
         });
     }
 
-    /// Whether a chat's pull request is due a lookup; marks it looked up if so.
+    /// Whether a chat's pull requests are due a lookup; marks them looked up if so.
     fn pr_due(&self, session_id: &str, every: Duration) -> bool {
         let mut checked = self.0.pr_checked.lock().unwrap();
         if checked.get(session_id).is_some_and(|at| at.elapsed() < every) {
@@ -370,24 +395,91 @@ impl SessionManager {
         true
     }
 
-    /// Looks up the chat's pull request and reports a change. Returns what is
-    /// known afterwards.
-    async fn refresh_pr(&self, session_id: &str) -> Option<PrInfo> {
+    /// The chat's live worktree, after noting any branch its folder was
+    /// switched to (a split task's next part). Putting it away, bringing it
+    /// back and cleanup all go by the branch saved here.
+    async fn follow_branch(&self, session_id: &str) -> Option<Worktree> {
         let git = self.0.store.chat_git(session_id).ok()??;
-        git.status.as_ref()?;
-        let wt = git.worktree?;
-        let lookup = self.0.pr_lookup.clone();
-        let found = blocking(move || lookup(&wt.repo_root, &wt.branch)).await;
-        match found {
-            Ok(pr) => {
-                if pr != git.pr {
-                    let _ = self.0.store.set_pr(session_id, pr.as_ref());
-                    self.record(session_id, AgentEvent::PrChanged { pr: pr.clone() });
-                }
-                pr
+        let wt = git.worktree.filter(|_| git.status.as_deref() == Some("live"))?;
+        let now = {
+            let wt = wt.clone();
+            blocking(move || worktree::follow(&wt)).await
+        };
+        match now {
+            Some(moved) => {
+                let _ = self.0.store.set_wt_branch(session_id, &moved);
+                Some(moved)
             }
-            Err(_) => git.pr,
+            None => Some(wt),
         }
+    }
+
+    /// Saves one pull request to the chat's list and reports a change.
+    fn save_pr(&self, session_id: &str, pr: &PrInfo) {
+        if let Ok((prs, true)) = self.0.store.upsert_pr(session_id, pr) {
+            self.record(session_id, AgentEvent::PrsChanged { prs });
+        }
+    }
+
+    /// The agent ran `gh pr create` and these links were in what it printed
+    /// (a new pull request, or the one that already exists): each is looked
+    /// up and added to the chat's list.
+    ///
+    /// Links wait in a queue and are looked up one at a time, oldest first,
+    /// so the list keeps the order the pull requests were opened in however
+    /// long each lookup takes.
+    pub(super) fn learn_prs(&self, session_id: &str, links: Vec<String>) {
+        if links.is_empty() || tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let waiting = links.len();
+        self.0
+            .pr_links
+            .lock()
+            .unwrap()
+            .extend(links.into_iter().map(|link| (session_id.to_string(), link)));
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let _one_at_a_time = manager.0.pr_learn_lock.lock().await;
+            for _ in 0..waiting {
+                let Some((id, link)) = manager.0.pr_links.lock().unwrap().pop_front() else {
+                    return;
+                };
+                let lookup = manager.0.pr_lookup.by_url.clone();
+                if let Ok(Some(pr)) = blocking(move || lookup(&link)).await {
+                    manager.save_pr(&id, &pr);
+                }
+            }
+        });
+    }
+
+    /// Looks the chat's pull requests up again: the one for its worktree's
+    /// branch (it may have been opened outside the chat), and every listed
+    /// one still open or a draft. Merged and closed ones aren't asked about
+    /// again. Each answer updates only its own entry, so one added meanwhile
+    /// is kept. Returns the list afterwards.
+    async fn refresh_prs(&self, session_id: &str) -> Vec<PrInfo> {
+        let Ok(Some(git)) = self.0.store.chat_git(session_id) else {
+            return Vec::new();
+        };
+        let mut asked = None;
+        if let Some(wt) = git.worktree.filter(|_| git.status.is_some()) {
+            let lookup = self.0.pr_lookup.by_branch.clone();
+            if let Ok(Some(pr)) = blocking(move || lookup(&wt.repo_root, &wt.branch)).await {
+                self.save_pr(session_id, &pr);
+                asked = Some(pr.url);
+            }
+        }
+        for pr in git.prs {
+            if !matches!(pr.state.as_str(), "open" | "draft") || asked.as_ref() == Some(&pr.url) {
+                continue;
+            }
+            let lookup = self.0.pr_lookup.by_url.clone();
+            if let Ok(Some(pr)) = blocking(move || lookup(&pr.url)).await {
+                self.save_pr(session_id, &pr);
+            }
+        }
+        self.0.store.chat_git(session_id).ok().flatten().map(|g| g.prs).unwrap_or_default()
     }
 
     /// Starts a sweep in the background, unless one is running.
@@ -399,10 +491,12 @@ impl SessionManager {
         tokio::spawn(async move { manager.sweep().await });
     }
 
-    /// The cleanup pass. For each chat with a worktree whose process isn't
-    /// running: a merged one loses its folder and branch; one with no message
-    /// for the idle limit has its folder put away; one put away past the keep
-    /// limit loses its branch. Trashed chats past the keep limit are deleted.
+    /// The cleanup pass. For each chat whose process isn't running: open pull
+    /// requests are looked up again. Then, for one with a worktree: once all
+    /// its work has landed it loses its folder and branches; one with no
+    /// message for the idle limit has its folder put away; one put away past
+    /// the keep limit loses its branch. Trashed chats past the keep limit are
+    /// deleted.
     pub async fn sweep(&self) {
         let Ok(_one_at_a_time) = self.0.sweep_lock.try_lock() else {
             return;
@@ -422,13 +516,15 @@ impl SessionManager {
                 self.purge(&row).await;
                 continue;
             }
-            let (Some(wt), Some(status)) = (row.worktree.clone(), row.status.clone()) else {
-                continue;
-            };
-            let pr = if self.pr_due(&id, PR_IN_SWEEP) {
-                self.refresh_pr(&id).await
+            // Before the lookup, which asks about the branch the folder is on.
+            let followed = self.follow_branch(&id).await;
+            let prs = if self.pr_due(&id, PR_IN_SWEEP) {
+                self.refresh_prs(&id).await
             } else {
-                row.pr.clone()
+                row.prs.clone()
+            };
+            let (Some(wt), Some(status)) = (followed.or(row.worktree.clone()), row.status.clone()) else {
+                continue;
             };
             // Not while a message is starting this chat (it may be restoring).
             let _starting = self.0.start_lock.lock().await;
@@ -437,7 +533,10 @@ impl SessionManager {
             }
             let check = wt.clone();
             let chat = id.clone();
-            let merged = blocking(move || worktree::is_merged(&check, pr.as_ref(), &chat)).await;
+            let merged = {
+                let prs = prs.clone();
+                blocking(move || worktree::is_merged(&check, &prs, &chat)).await
+            };
             let changed = |status: &str| {
                 self.record(
                     &id,
@@ -458,7 +557,16 @@ impl SessionManager {
             };
             match merged {
                 Ok(Merged::ByGit | Merged::ByPr) => {
-                    if blocking(drop_all).await.is_ok() {
+                    let done = {
+                        let (drop_all, wt) = (drop_all.clone(), wt.clone());
+                        blocking(move || {
+                            drop_all()?;
+                            worktree::drop_landed_branches(&wt, &prs);
+                            Ok::<(), String>(())
+                        })
+                        .await
+                    };
+                    if done.is_ok() {
                         let _ = self.0.store.clear_worktree(&id);
                         changed("merged");
                     }
@@ -478,6 +586,11 @@ impl SessionManager {
                 Ok(Merged::No) => {}
             }
             if status == "live" && now - row.last_used_at > idle_limit {
+                // On no branch, there would be none to bring it back on.
+                let away = wt.clone();
+                if blocking(move || worktree::is_detached(&away)).await {
+                    continue;
+                }
                 let away = wt.clone();
                 let chat = id.clone();
                 match blocking(move || worktree::put_away(&away, &chat)).await {
@@ -498,8 +611,8 @@ impl SessionManager {
     /// Moves a chat to the trash. Its worktree folder, if any, is put away.
     pub(super) async fn trash(&self, session_id: &str) -> Result<(), String> {
         let store = &self.0.store;
-        let git = store.chat_git(session_id)?.ok_or("That chat no longer exists")?;
-        if let (Some(wt), Some("live")) = (git.worktree, git.status.as_deref()) {
+        store.chat_git(session_id)?.ok_or("That chat no longer exists")?;
+        if let Some(wt) = self.follow_branch(session_id).await {
             let away = wt.clone();
             let chat = session_id.to_string();
             match blocking(move || worktree::put_away(&away, &chat)).await {

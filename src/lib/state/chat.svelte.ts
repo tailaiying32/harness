@@ -168,7 +168,7 @@ export class Chat {
   workPath = $state<string | null>(null);
   /** The worktree's branch, and its pull request as last seen. */
   branch = $state<string | null>(null);
-  pr = $state<PrInfo | null>(null);
+  prs = $state<PrInfo[]>([]);
   /** The folder paths are shown relative to: the worktree if there is one. */
   get root(): string {
     return this.workPath ?? this.projectPath;
@@ -177,7 +177,7 @@ export class Chat {
   syncRow(row: SessionRow): void {
     this.workPath = row.work_path;
     this.branch = row.branch;
-    this.pr = row.pr;
+    this.prs = row.prs;
   }
   /** When the current turn began, for the elapsed-time counter. */
   turnStartedAt = $state<number | null>(null);
@@ -457,8 +457,8 @@ export class Chat {
         this.push({ type: "note", text: worktreeNote(event.status, event.branch) });
         break;
 
-      case "pr_changed":
-        this.pr = event.pr;
+      case "prs_changed":
+        this.prs = event.prs;
         break;
 
       case "approval_cancelled": {

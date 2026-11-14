@@ -5,13 +5,13 @@
 
 mod worktrees;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::agent::{AgentAdapter, EventSink, RunningAgent, SpawnOptions};
-use crate::events::{AgentEvent, Decision, Envelope, SessionState};
+use crate::events::{AgentEvent, Block, Decision, Envelope, SessionState};
 use crate::store::Store;
 use crate::worktree;
 
@@ -24,6 +24,9 @@ pub type Out = Arc<dyn Fn(Envelope) + Send + Sync>;
 const DEFAULT_IDLE_SECONDS: u64 = 300;
 /// Longest tool result kept, in characters. See `AgentEvent::cap_tool_result`.
 const TOOL_RESULT_MAX_CHARS: usize = 20_000;
+/// The command that opens a pull request. Only its output is read for links:
+/// other `gh pr` commands print links to pull requests the chat merely looked at.
+const PR_CREATE: &str = "gh pr create";
 /// How long a process asked to exit may take before it is stopped.
 const CLOSE_GRACE: Duration = Duration::from_secs(30);
 /// How long a new message waits for a stopped process to exit.
@@ -65,6 +68,9 @@ struct Session {
     repo_root: Option<PathBuf>,
     /// The agent's request for a worktree, while it waits for the user.
     ask: Option<Ask>,
+    /// Tool calls that run `gh pr create`, until their results arrive: what
+    /// they print names the chat's new pull request.
+    pr_calls: HashSet<String>,
 }
 
 /// The agent asked for a worktree, and waits for the user's answer.
@@ -94,6 +100,10 @@ struct Inner {
     sweep_lock: tokio::sync::Mutex<()>,
     /// When each chat's pull request was last looked up.
     pr_checked: Mutex<HashMap<String, Instant>>,
+    /// Links to new pull requests waiting to be looked up, as (chat, link),
+    /// oldest first; and the lock that has them looked up one at a time.
+    pr_links: Mutex<VecDeque<(String, String)>>,
+    pr_learn_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -107,8 +117,7 @@ impl SessionManager {
             worktree_idle: None,
             keep: None,
         };
-        let pr_lookup: PrLookup = Arc::new(crate::github::pr_for);
-        Self::build(adapter, store, out, timings, data_dir, pr_lookup)
+        Self::build(adapter, store, out, timings, data_dir, PrLookup::github())
     }
 
     fn build(
@@ -130,6 +139,8 @@ impl SessionManager {
             pr_lookup,
             sweep_lock: tokio::sync::Mutex::default(),
             pr_checked: Mutex::default(),
+            pr_links: Mutex::default(),
+            pr_learn_lock: tokio::sync::Mutex::default(),
         }))
     }
 
@@ -365,6 +376,29 @@ impl SessionManager {
                 AgentEvent::Status { state } => manager.on_state(&id, run, state),
                 AgentEvent::BackgroundWork { running } => manager.on_background(&id, run, *running > 0),
                 AgentEvent::TurnEnded { .. } => manager.after_turn(&id),
+                AgentEvent::AssistantBlock {
+                    block: Block::ToolCall { tool_id, name, input },
+                    ..
+                } if name == "Bash" && input["command"].as_str().is_some_and(|c| c.contains(PR_CREATE)) => {
+                    if let Some(session) = manager.0.sessions.lock().unwrap().get_mut(&id) {
+                        session.pr_calls.insert(tool_id.clone());
+                    }
+                }
+                // Read whole, before it is cut below. A failed call counts
+                // too: "already exists" comes with the link.
+                AgentEvent::ToolResult { tool_id, .. } => {
+                    let ours = manager
+                        .0
+                        .sessions
+                        .lock()
+                        .unwrap()
+                        .get_mut(&id)
+                        .is_some_and(|s| s.pr_calls.remove(tool_id));
+                    if ours {
+                        let text = event.tool_result_text().unwrap_or_default();
+                        manager.learn_prs(&id, crate::github::pr_links(&text));
+                    }
+                }
                 _ => {}
             }
             event.cap_tool_result(TOOL_RESULT_MAX_CHARS);
@@ -636,6 +670,9 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tests written from the outside: what a user does and should see.
+    mod black_box;
     use crate::events::ModelInfo;
     use crate::worktree::PrInfo;
     use std::path::Path;
@@ -745,7 +782,7 @@ mod tests {
     }
 
     fn rig(idle: Duration) -> Rig {
-        rig_with(idle, LONG, LONG, Arc::new(|_: &Path, _: &str| Ok(None)))
+        rig_with(idle, LONG, LONG, PrLookup::none())
     }
 
     fn rig_with(idle: Duration, worktree_idle: Duration, keep: Duration, lookup: PrLookup) -> Rig {
@@ -1178,7 +1215,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_idle_worktree_is_put_away_and_comes_back_with_its_edits() {
-        let rig = rig_with(LONG, Duration::ZERO, LONG, Arc::new(|_: &Path, _: &str| Ok(None)));
+        let rig = rig_with(LONG, Duration::ZERO, LONG, PrLookup::none());
         let repo = scratch_repo();
         let wt = rig.into_worktree(&repo).await;
         std::fs::write(wt.path.join("app.py"), "half done\n").unwrap();
@@ -1202,9 +1239,12 @@ mod tests {
     #[tokio::test]
     async fn a_merged_pull_request_removes_the_worktree_and_branch() {
         let found: Arc<Mutex<Option<PrInfo>>> = Arc::default();
-        let lookup: PrLookup = {
+        let lookup = {
             let found = found.clone();
-            Arc::new(move |_: &Path, _: &str| Ok(found.lock().unwrap().clone()))
+            PrLookup {
+                by_branch: Arc::new(move |_: &Path, _: &str| Ok(found.lock().unwrap().clone())),
+                ..PrLookup::none()
+            }
         };
         let rig = rig_with(LONG, LONG, LONG, lookup);
         let repo = scratch_repo();
@@ -1218,14 +1258,21 @@ mod tests {
         let tip = git(&wt.path, &["rev-parse", "HEAD"]);
 
         // An open PR is shown, and nothing is removed.
-        *found.lock().unwrap() = Some(PrInfo { number: 3, state: "open".into(), url: "u".into(), head: tip.clone() });
+        let pr = |state: &str| PrInfo {
+            number: 3,
+            state: state.into(),
+            url: "u".into(),
+            head: tip.clone(),
+            branch: wt.branch.clone(),
+        };
+        *found.lock().unwrap() = Some(pr("open"));
         rig.turn_ends();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(rig.store.session("s1").unwrap().unwrap().pr.unwrap().state, "open");
-        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::PrChanged { .. })), 1);
+        assert_eq!(rig.store.session("s1").unwrap().unwrap().prs[0].state, "open");
+        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::PrsChanged { .. })), 1);
 
         // Squash-merged on GitHub: gone after the next sweep once the process is closed.
-        *found.lock().unwrap() = Some(PrInfo { number: 3, state: "merged".into(), url: "u".into(), head: tip });
+        *found.lock().unwrap() = Some(pr("merged"));
         rig.manager.close("s1");
         rig.manager.0.pr_checked.lock().unwrap().clear();
         rig.sweep().await;
@@ -1234,13 +1281,13 @@ mod tests {
         let row = rig.store.chat_git("s1").unwrap().unwrap();
         assert_eq!((row.status, row.choice), (None, None));
         // The merged pull request stays, so the sidebar keeps its purple mark.
-        assert_eq!(row.pr.map(|pr| pr.state).as_deref(), Some("merged"));
+        assert_eq!(row.prs.iter().map(|pr| pr.state.as_str()).collect::<Vec<_>>(), ["merged"]);
         assert_eq!(rig.saw(|e| matches!(e, AgentEvent::WorktreeChanged { status, .. } if status == "merged")), 1);
     }
 
     #[tokio::test]
     async fn a_trashed_worktree_chat_is_restorable_then_purged_with_its_branch() {
-        let rig = rig_with(LONG, LONG, Duration::ZERO, Arc::new(|_: &Path, _: &str| Ok(None)));
+        let rig = rig_with(LONG, LONG, Duration::ZERO, PrLookup::none());
         let repo = scratch_repo();
         let wt = rig.into_worktree(&repo).await;
         std::fs::write(wt.path.join("app.py"), "unsaved\n").unwrap();
