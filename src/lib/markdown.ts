@@ -1,7 +1,8 @@
 // Markdown to HTML for chat text.
 //
 // Safety: raw HTML in the source is escaped (`html: false`), markdown-it
-// refuses javascript: and similar links by default, and highlight.js escapes
+// refuses javascript: and similar links (file: links are let back in: they
+// only ever open in the side panel or Finder), and highlight.js escapes
 // the code it colours. So the output contains only tags this file produces.
 
 import MarkdownIt from "markdown-it";
@@ -33,6 +34,8 @@ for (const [name, language] of Object.entries({
 }
 
 const md = new MarkdownIt({ html: false, linkify: true });
+const validateLink = md.validateLink.bind(md);
+md.validateLink = (url) => /^file:/i.test(url.trim()) || validateLink(url);
 
 function codeBlock(code: string, lang: string): string {
   const source = code.replace(/\n$/, "");

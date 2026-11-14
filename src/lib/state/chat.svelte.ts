@@ -3,6 +3,7 @@
 import {
   answerApproval,
   interrupt,
+  readDoc,
   sendMessage,
   setMode,
   setModel,
@@ -194,6 +195,29 @@ export class Chat {
     }
     const doc = this.docs.find((d) => d.path === tab);
     if (doc) doc.closed = true;
+  }
+
+  /**
+   * A markdown file on disk, from a link, shown as a tab. Read fresh each time,
+   * so the tab shows the file as it is now. A link to the plan's own file
+   * opens the plan tab.
+   */
+  async openFile(path: string): Promise<void> {
+    if (path === this.planPath && this.plan) {
+      this.openPanel(PLAN_TAB);
+      return;
+    }
+    let text: string;
+    try {
+      text = await readDoc(path);
+    } catch (e) {
+      this.push({ type: "error", text: `Couldn't open ${path}: ${e}` });
+      return;
+    }
+    const doc = this.docs.find((d) => d.path === path);
+    if (doc) doc.text = text;
+    else this.docs.push({ path, text });
+    this.openPanel(path);
   }
 
   /** A call that wrote or edited a markdown file adds its tab, or updates it. */

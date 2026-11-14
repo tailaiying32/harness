@@ -1,6 +1,6 @@
 <script lang="ts">
   // The side panel: a tabbed space beside the chat. One tab for the plan and
-  // one for each markdown file the chat wrote. The plan's answer buttons live
+  // one for each markdown file the chat wrote or a link opened. The plan's answer buttons live
   // here, at the foot of its tab, while Claude waits. Mouse only, like every
   // approval: no key approves a plan.
   //
@@ -9,10 +9,18 @@
   import { contentClick } from "../clicks";
   import Markdown from "../chat/Markdown.svelte";
   import { PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
+  import { folderOf } from "../paths";
   import { applyPanelWidth, DEFAULT_PANEL_WIDTH, savePrefs } from "../themes";
   import { baseName, planOf } from "../tools";
 
   let { chat }: { chat: Chat } = $props();
+
+  // A relative link in a document starts from that document's folder, as in
+  // any markdown viewer; in the plan, from the project folder.
+  const onClick = contentClick({
+    base: () => (chat.activeTab === PLAN_TAB ? chat.projectPath : folderOf(chat.activeTab)),
+    openDoc: (path) => void chat.openFile(path),
+  });
 
   const active = $derived(chat.activeTab);
   const plan = $derived(chat.planTab ? chat.plan : null);
@@ -109,7 +117,7 @@
   <!-- Each tab starts at its top. -->
   {#key active}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="body" onclick={contentClick}>
+    <div class="body" onclick={onClick}>
       <Markdown {text} />
     </div>
   {/key}

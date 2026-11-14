@@ -150,3 +150,6 @@ export const autotest = () =>
 /** A pause timed by the core; a hidden window's own timers run late. */
 export const autotestWait = (ms: number) => invoke<void>("autotest_wait", { ms });
 export const autotestReport = (text: string) => invoke<void>("autotest_report", { text });
+
+/** A markdown file's text, for a link opened in the side panel. */
+export const readDoc = (path: string) => invoke<string>("read_doc", { path });

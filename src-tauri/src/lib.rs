@@ -1,11 +1,12 @@
 mod agent;
+mod docs;
 mod events;
 mod locate;
 mod sessions;
 mod store;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -147,6 +148,14 @@ fn set_model(state: State<'_, AppState>, session_id: String, model: String) -> R
     state.sessions.set_model(&session_id, &model)
 }
 
+/// A markdown file's text, for a link opened in the side panel.
+#[tauri::command]
+async fn read_doc(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || docs::read_doc(Path::new(&path)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// The models the agent offers. Starts a short-lived agent process, so it runs
 /// off the main thread and takes about a second.
 #[tauri::command]
@@ -262,6 +271,7 @@ pub fn run() {
             set_model,
             list_models,
             close_session,
+            read_doc,
             autotest,
             autotest_wait,
             autotest_report,

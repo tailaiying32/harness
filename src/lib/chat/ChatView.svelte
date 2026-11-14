@@ -118,10 +118,13 @@
 
   // Files with a tab in the side panel; their names in a folded run open it.
   const docPaths = $derived(chat.docs.map((doc) => doc.path));
+
+  // Relative links in the chat start from its project folder.
+  const onClick = contentClick({ base: () => chat.projectPath, openDoc: (path) => void chat.openFile(path) });
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="scroll" bind:this={scroller} onscroll={onScroll} onclick={contentClick}>
+<div class="scroll" bind:this={scroller} onscroll={onScroll} onclick={onClick}>
   <div class="content" bind:this={content}>
     {#if problem}
       <div class="row"><span class="marker bad">!</span><div class="body bad">{problem}</div></div>
