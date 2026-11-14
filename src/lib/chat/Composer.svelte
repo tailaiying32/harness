@@ -28,6 +28,7 @@
     { id: "default", label: "ask before edits" },
     { id: "acceptEdits", label: "auto-accept edits" },
     { id: "plan", label: "plan" },
+    { id: "auto", label: "auto" },
   ];
   const modeLabel = $derived(modes.find((m) => m.id === chat.mode)?.label ?? chat.mode);
 

@@ -14,8 +14,11 @@ export type Block =
 export type ApprovalKind = "tool" | "plan" | "question";
 export type Decision = "allow" | "always_allow" | "deny";
 
-/** Claude Code's permission modes. */
-export type Mode = "default" | "acceptEdits" | "plan";
+/**
+ * Claude Code's permission modes, as the app offers them. In "auto" Claude Code
+ * decides by itself which actions are safe to run without asking.
+ */
+export type Mode = "default" | "acceptEdits" | "plan" | "auto";
 
 export type AgentEvent =
   | { kind: "session_started"; agent_session_id: string; model: string | null; mode: string | null }

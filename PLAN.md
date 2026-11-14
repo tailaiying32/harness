@@ -587,6 +587,12 @@ Mocked up on the same board:
   As Claude Code's own prompt does, "always" on an edit means auto-accept
   edits for the rest of the chat; the button says so and the mode shown under
   the message box follows.
+- **Auto mode** (added 2026-11-13 at the user's request). The mode switch
+  cycles ask before edits, auto-accept edits, plan, auto. "auto" is Claude
+  Code's own mode of that name (`--permission-mode auto`, or
+  `set_permission_mode` with `"auto"`): it decides by itself which actions
+  are safe to run without asking. **Tested** on CLI 2.1.322 both ways: `init`
+  reports `permissionMode: "auto"` and a `mkdir` ran with no approval request.
 - **The mode shown follows Claude Code.** It is set from every turn's `init`
   and from `ModeChanged`, so approving a plan or an "allow all edits" answer
   updates it.
