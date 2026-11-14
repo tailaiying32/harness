@@ -6,7 +6,7 @@
 //! `control_response` lines) is what the Agent SDK uses but is not documented for
 //! other hosts. If an update breaks it, the fix belongs here and nowhere else.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -32,6 +32,71 @@ struct PendingApproval {
 
 type Pending = Arc<Mutex<HashMap<String, PendingApproval>>>;
 
+/// IDs of messages written to Claude Code that it hasn't echoed back yet.
+type Sent = Arc<Mutex<HashSet<String>>>;
+
+/// Added to Claude Code's own instructions on every launch, so a plan always
+/// reaches the app as a plan request (shown in the side panel), whatever mode
+/// the chat is in.
+const PLAN_INSTRUCTION: &str = "When the user asks for a plan, or you are about to lay out an \
+implementation plan before building, do not write the plan in the chat. If you are not already in \
+plan mode, call EnterPlanMode. Write the plan to the plan file, then present it with ExitPlanMode. \
+This app shows the plan in a side panel with approve buttons. This applies in every permission \
+mode. Short answers, status summaries and discussion are not plans and stay in the chat.";
+
+/// The command line for one chat's process.
+fn launch_args(opts: &SpawnOptions) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        // Echo each user message back when it is taken in (see `MessageSeen`).
+        "--replay-user-messages",
+        "--permission-prompt-tool",
+        "stdio",
+        // Per launch: a resumed session does not remember it.
+        "--append-system-prompt",
+        PLAN_INSTRUCTION,
+    ]
+    .map(String::from)
+    .to_vec();
+    if let Some(id) = &opts.resume_id {
+        args.extend(["--resume".to_string(), id.clone()]);
+    }
+    if let Some(mode) = opts.mode.as_deref().filter(|m| *m != "default") {
+        args.extend(["--permission-mode".to_string(), mode.to_string()]);
+    }
+    if let Some(model) = opts.model.as_deref().filter(|m| *m != "default") {
+        args.extend(["--model".to_string(), model.to_string()]);
+    }
+    args
+}
+
+/// Passes on only the echoes of messages this process was sent (a resume may
+/// replay older ones), each followed by "working": a message taken in after a
+/// turn ended starts a new turn with no other sign of it.
+fn acknowledge(events: Vec<AgentEvent>, sent: &Sent) -> Vec<AgentEvent> {
+    let mut out = Vec::with_capacity(events.len());
+    for event in events {
+        if let AgentEvent::MessageSeen { id } = &event {
+            if !sent.lock().unwrap().remove(id) {
+                continue;
+            }
+            out.push(event);
+            out.push(AgentEvent::Status {
+                state: SessionState::Working,
+            });
+        } else {
+            out.push(event);
+        }
+    }
+    out
+}
+
 enum Out {
     Line(String),
     Close,
@@ -40,32 +105,14 @@ enum Out {
 struct ClaudeCodeProcess {
     tx: mpsc::UnboundedSender<Out>,
     pending: Pending,
+    sent: Sent,
     sink: EventSink,
 }
 
 impl AgentAdapter for ClaudeCodeAdapter {
     fn spawn(&self, opts: SpawnOptions, sink: EventSink) -> Result<Box<dyn RunningAgent>, String> {
         let mut cmd = Command::new(&opts.binary);
-        cmd.args([
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-            "--permission-prompt-tool",
-            "stdio",
-        ]);
-        if let Some(id) = &opts.resume_id {
-            cmd.args(["--resume", id]);
-        }
-        if let Some(mode) = opts.mode.as_deref().filter(|m| *m != "default") {
-            cmd.args(["--permission-mode", mode]);
-        }
-        if let Some(model) = opts.model.as_deref().filter(|m| *m != "default") {
-            cmd.args(["--model", model]);
-        }
+        cmd.args(launch_args(&opts));
         cmd.current_dir(&opts.project_path)
             // An API key in the environment overrides the subscription login in
             // headless mode and would bill per use.
@@ -87,6 +134,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
         let pending: Pending = Arc::default();
+        let sent: Sent = Arc::default();
         sink(AgentEvent::Status {
             state: SessionState::Starting,
         });
@@ -126,6 +174,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         {
             let weak_tx = tx.downgrade();
             let pending = pending.clone();
+            let sent = sent.clone();
             let sink = sink.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
@@ -139,7 +188,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                             let _ = tx.send(Out::Line(reply));
                         }
                     }
-                    for event in translated.events {
+                    for event in acknowledge(translated.events, &sent) {
                         sink(event);
                     }
                 }
@@ -162,7 +211,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
             });
         }
 
-        Ok(Box::new(ClaudeCodeProcess { tx, pending, sink }))
+        Ok(Box::new(ClaudeCodeProcess {
+            tx,
+            pending,
+            sent,
+            sink,
+        }))
     }
 
     // Starts a short-lived process and sends the `initialize` request the Agent
@@ -265,9 +319,12 @@ impl ClaudeCodeProcess {
 }
 
 impl RunningAgent for ClaudeCodeProcess {
-    fn send_user_message(&self, text: &str) -> Result<(), String> {
+    fn send_user_message(&self, text: &str, id: &str) -> Result<(), String> {
+        // Claude Code echoes the message back under this ID when it takes it in.
+        self.sent.lock().unwrap().insert(id.to_string());
         self.send(json!({
             "type": "user",
+            "uuid": id,
             "message": { "role": "user", "content": text },
         }))?;
         (self.sink)(AgentEvent::Status {
@@ -477,6 +534,14 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
             }
         }
 
+        // The echo of a message the app sent, written when Claude Code takes it
+        // in: at once for the first of a turn, after the running step otherwise.
+        "user" if v["isReplay"] == true => {
+            out.events.push(AgentEvent::MessageSeen {
+                id: text_of(&v["uuid"]),
+            });
+        }
+
         // Tool results come back as user messages.
         "user" => {
             for item in v["message"]["content"].as_array().into_iter().flatten() {
@@ -606,6 +671,42 @@ mod tests {
 
     fn events(line: &str, pending: &Pending) -> Vec<AgentEvent> {
         translate(&serde_json::from_str(line).unwrap(), pending).events
+    }
+
+    #[test]
+    fn every_launch_asks_for_echoes_and_carries_the_plan_instruction() {
+        let args = launch_args(&SpawnOptions {
+            binary: "claude".into(),
+            project_path: "/work".into(),
+            resume_id: Some("abc".into()),
+            mode: Some("plan".into()),
+            model: None,
+        });
+        assert!(args.contains(&"--replay-user-messages".to_string()));
+        let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
+        assert_eq!(args[at + 1], PLAN_INSTRUCTION);
+        assert!(args.windows(2).any(|w| w == ["--resume", "abc"]));
+        assert!(args.windows(2).any(|w| w == ["--permission-mode", "plan"]));
+    }
+
+    #[test]
+    fn an_echo_of_a_sent_message_is_reported_once_then_working() {
+        let echo = r#"{"type":"user","isReplay":true,"uuid":"u1","message":{"role":"user","content":"hi"}}"#;
+        let sent = Sent::default();
+        sent.lock().unwrap().insert("u1".into());
+        let got = acknowledge(events(echo, &Pending::default()), &sent);
+        assert_eq!(
+            got,
+            vec![
+                AgentEvent::MessageSeen { id: "u1".into() },
+                AgentEvent::Status {
+                    state: SessionState::Working
+                },
+            ]
+        );
+        // The same echo again, or one for a message this process never sent
+        // (history replayed by a resume), is dropped.
+        assert!(acknowledge(events(echo, &Pending::default()), &sent).is_empty());
     }
 
     #[test]

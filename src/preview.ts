@@ -234,12 +234,18 @@ const longChat: AgentEvent[] = Array.from({ length: 300 }, (_, n) => [
   ended,
 ]).flat();
 
+/** Chats with a scripted answer under way, and the messages sent to each meanwhile. */
+const playing = new Map<string, string[]>();
+
 /** A scripted answer to any message typed in the preview. */
-async function play(id: string) {
+async function play(id: string, messageId: string) {
   const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  playing.set(id, []);
   emit(id, { kind: "session_started", agent_session_id: "agent-" + id, model: "claude-fable-5-2", mode: "default" });
   emit(id, { kind: "status", state: "working" });
-  await wait(900);
+  await wait(300);
+  emit(id, { kind: "message_seen", id: messageId });
+  await wait(600);
   const words = "Here is a **sample answer**, streamed a few words at a time so the live text can be checked. ".split(" ");
   for (const word of words) {
     emit(id, { kind: "text_delta", message_id: "live", block_index: 0, text: word + " " });
@@ -263,6 +269,9 @@ async function play(id: string) {
 function finish(id: string) {
   emit(id, { kind: "status", state: "working" });
   emit(id, result("live-t", "12 passed"));
+  // Messages sent while the answer was under way are taken in after the step.
+  for (const messageId of playing.get(id) ?? []) emit(id, { kind: "message_seen", id: messageId });
+  playing.delete(id);
   emit(id, text("live-2", "Done. The tests pass."));
   emit(id, ended);
   emit(id, { kind: "status", state: "idle" });
@@ -303,11 +312,14 @@ const commands: Record<string, (args: Args) => unknown> = {
       project.sessions = [row(args.sessionId, args.projectPath, args.text.slice(0, 60), 0), ...project.sessions];
       projects = [project, ...projects.filter((p) => p !== project)];
     }
-    void play(args.sessionId);
+    const waiting = playing.get(args.sessionId);
+    if (waiting) waiting.push(args.messageId);
+    else void play(args.sessionId, args.messageId);
   },
   answer_approval: (args) =>
     String(args.requestId).startsWith("plan-") ? void afterPlan(args.sessionId, args.decision) : finish(args.sessionId),
   interrupt: (args) => {
+    playing.delete(args.sessionId);
     emit(args.sessionId, { kind: "interrupted" });
     emit(args.sessionId, { kind: "turn_ended", ok: false, duration_ms: null });
     emit(args.sessionId, { kind: "status", state: "idle" });

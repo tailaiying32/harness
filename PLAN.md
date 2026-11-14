@@ -20,6 +20,13 @@ Step 6, the side panel, is built, checked in the browser preview and tested
 live once (see "Side panel, as built" and step 6 of "Order of work"). Not built yet: showing subagent work. The settings page
 holds only theme and size so far.
 
+Added 2026-11-13 (quick wins): rename a chat (double-click its title), close a single side panel tab, Cmd+N for a new chat, a
+"queued" mark on a message sent while Claude works, plans always opening in
+the side panel, and a chat that stays at its end when opened. **Tested** live
+with the self-test: the queued mark (also with stop), and a plan asked for in
+`default` and in `auto` mode. Not checked by eye: tab closing, Cmd+N and the
+scroll fix (type check only; the scroll bug was not reproduced first).
+
 ## What it does
 
 A light desktop app for chatting with Claude Code. It gives you a sidebar of
@@ -195,7 +202,9 @@ claude -p
   --output-format stream-json
   --verbose
   --include-partial-messages
+  --replay-user-messages          echo each user message when it is taken in
   --permission-prompt-tool stdio
+  --append-system-prompt <text>   the plan instruction; see "Behaviour decided"
   [--permission-mode plan]        only when the chat starts in plan mode
 ```
 
@@ -234,8 +243,15 @@ One JSON object per line.
 User message (**Tested**):
 
 ```json
-{"type":"user","message":{"role":"user","content":"text here"}}
+{"type":"user","uuid":"<id the app made>","message":{"role":"user","content":"text here"}}
 ```
+
+Claude Code echoes it back on stdout, with the same `uuid` and
+`"isReplay": true`, when it takes the message in (**Tested**): about a second
+after sending for the first message of a turn; right after the running tool's
+result for one sent mid-turn, which is then answered in the same turn. A
+message waiting when the user presses stop is taken in after the stopped
+turn's `result` and starts a new turn.
 
 Answer to an approval (**Tested** for allow and deny):
 
@@ -308,6 +324,7 @@ between CLI versions and must never crash the reader.
 | `system`, subtype `init` | Start of every turn (not just the first) | `session_id`, `model`, `permissionMode`, `cwd`, `tools`, `mcp_servers`, `slash_commands` |
 | `stream_event` | Live piece of an answer | `event` (raw API event), `api_message_id`, `parent_tool_use_id` |
 | `assistant` | One finished block of an answer | `message.id`, `message.content` (one block: `text`, `thinking` or `tool_use`), `parent_tool_use_id` |
+| `user` with `isReplay: true` | Echo of a message the app sent: it has been taken in | `uuid` |
 | `user` | Tool result, or the interrupt notice | `message.content[]` with `tool_result` + `tool_use_id`, `is_error` |
 | `control_request`, subtype `can_use_tool` | Approval needed | `request_id`, `request.tool_name`, `request.input`, `request.description`, `request.permission_suggestions`, `request.tool_use_id` |
 | `control_response` | Reply to a request the app sent | `response.request_id`, `response.response` |
@@ -360,7 +377,8 @@ ApprovalAnswered { request_id, decision: Allow | AlwaysAllow | Deny, answers? }
                                       recorded by the core when the user answers
 Interrupted                           recorded by the core when the user presses stop
 ModeChanged    { mode }               by the user, or as a side effect of an approval
-UserMessage    { text }
+UserMessage    { text, id? }          id: made by the window; absent in older history
+MessageSeen    { id }                 the agent took that message in
 TurnEnded      { ok, summary?, duration_ms, usage? }
 UsageUpdate    { window, utilization, resets_at }             not saved
 Error          { message }
@@ -372,7 +390,7 @@ Error          { message }
 spawn(project_path, resume_id: Option<String>, mode) -> RunningAgent
 RunningAgent:
   events()                      stream of AgentEvent
-  send_user_message(text)
+  send_user_message(text, id)
   answer_approval(request_id, decision, original_input, suggestions, answers)
   interrupt()
   set_mode(mode)
@@ -464,7 +482,8 @@ check_setup()             find Claude Code, check login
 sidebar()                 every project with its chats, newest first
 load_session(session_id)  -> { session, events, live }
 delete_session(session_id)
-send_message(session_id, project_path, mode, model, text)
+send_message(session_id, project_path, mode, model, text, message_id)
+rename_session(session_id, title)
 answer_approval(session_id, request_id, decision, message?, answers?)
 interrupt(session_id)
 set_mode(session_id, mode) / set_model(session_id, model)   saved; a live process is told
@@ -519,6 +538,9 @@ https://www.magicpatterns.com/os/tWmrW2q43Q7sWofaHnFJVj?file=2oZgfpBgi1cedNPY3NJ
 - **Sidebar:** bare chat titles under each project's path, one status dot per
   chat (accent = waiting on the user, ok = working, hollow = idle). No preview
   line, no time.
+- **Scrolling:** a chat opens at its end and follows new output. It lets go
+  only when the view moves up, and takes hold again within 40px of the end.
+  Growth of the page under a still view never counts as scrolling away.
 - **Chat:** a centred column, about 800px wide. The user's message is a block
   on the right in the theme's `panel` colour: bright text, left aligned, at
   most 85% of the column, nearly square corners, with about twice the normal
@@ -604,6 +626,9 @@ Mocked up on the same board:
   `set_permission_mode` with `"auto"`): it decides by itself which actions
   are safe to run without asking. **Tested** on CLI 2.1.322 both ways: `init`
   reports `permissionMode: "auto"` and a `mkdir` ran with no approval request.
+- **New chats start in auto mode** (2026-11-13, the user's request), or in
+  the mode last picked with the mode switch. Plan is never remembered. Before
+  this every new chat started in ask-before-edits.
 - **The mode shown follows Claude Code.** It is set from every turn's `init`
   and from `ModeChanged`, so approving a plan or an "allow all edits" answer
   updates it.
@@ -616,8 +641,12 @@ Mocked up on the same board:
   failure.
 - **Settings page: started 2026-11-13** (the user wanted theme and size out of
   the bottom bar). "settings" at the bottom of the sidebar, or Cmd+, / Ctrl+,
-  opens it over the chat; "close" or Escape closes it. It holds size and theme
-  (dark and light lists); a click applies at once and is remembered. Still to
+  opens it over the chat; "close" or Escape closes it. It holds spacing
+  (compact, regular, roomy: line height, gaps and margins), font size (11 to
+  16 px) and theme (dark and light lists). Spacing and font size were one
+  "size" setting until 2026-11-13; they are separate now, and a saved size
+  with no saved font size keeps the text size it used to give (11.5, 12.5,
+  13.5); a click applies at once and is remembered. Still to
   add: font, idle timeout, the "Always allow" default and the path to Claude
   Code, which are constants until then.
 - **The line under the message box** follows the Claude desktop app (the
@@ -626,6 +655,25 @@ Mocked up on the same board:
   is sent (the sidebar shows the folder from then on). Model, mode and usage
   sit at the right, in that order. The desktop app also shows an effort level
   ("High") next to the model; Harness has no effort setting yet.
+- **Queued mark** (2026-11-13). A message sent while Claude works shows a
+  "send now" button under it, at the right, until `MessageSeen` arrives. The
+  button presses stop: the running turn is cut off and the message starts a
+  new one (**Tested**). Left alone, the message moves to the end
+  of the chat's items at that moment, so it sits after the step Claude
+  finished before reading it. A message sent when idle gets no mark. The
+  adapter only reports echoes of IDs it sent, and follows each with
+  `Status: Working`, which covers a message taken in after a turn has ended.
+  Replay gives the same order. A chat reloaded with no live process clears
+  every mark; a message lost because the process died gets no warning.
+- **Plans always open in the side panel** (2026-11-13, the user's request).
+  Every launch appends an instruction to Claude Code's system prompt
+  (`PLAN_INSTRUCTION` in `claude_code.rs`): when asked for a plan in any mode,
+  call `EnterPlanMode`, write the plan, present it with `ExitPlanMode`.
+  **Tested**: `EnterPlanMode` raises no approval request, and after a plain
+  approval the chat returns to the mode it was in (`default` and `auto`
+  checked). It is an instruction, not a guarantee.
+- **Cmd+N / Ctrl+N** starts a new chat in the open chat's folder and puts the
+  cursor in the message box.
 - **Slash commands: deferred.** The user uses `/btw` and `/compact`. v1 has no
   slash menu; whether typed slash commands work through the headless input is
   untested. `/btw` (a side question) will want its own floating view later.
@@ -670,7 +718,21 @@ Mocked up on the same board:
   that was read) is not kept in the window's memory.
 - **A call waiting for approval** reads "Waiting to run npm test", not "Ran".
 - **Composer:** a plain multi-line text box. Enter sends, Shift+Enter adds a
-  line. A mode switch (Ask before edits / Auto-accept edits / Plan) and a stop
+  line. It edits like a document (`chat/editing.ts`, the user's request,
+  2026-11-13): Tab indents the cursor's line, or every selected line, by two
+  spaces, also on a plain or empty line; Shift+Tab takes them off; Tab never
+  moves to the next control. Shift+Enter on a list item (`-`, `*`, `+`, `1.`,
+  `1)`, with or without a checkbox) starts the next item at the same indent,
+  with the next number; on an item that is still empty it steps back one
+  level, or removes the marker at the top level. Edits go through
+  `insertText`, so undo works. Each of these keys also renumbers
+  (`renumbered`): in the run of non-blank lines around the edit, every
+  numbered item counts on from the one before it at the same indent; a list's
+  first item keeps its number unless the key just moved it to that level,
+  where it starts at 1. The renumbering and the edit are one replacement, so
+  one undo step. Edits made by hand (Backspace, paste) do not renumber, and a
+  blank line ends a list, so removing an empty item leaves the items below it
+  as they were. A mode switch (Ask before edits / Auto-accept edits / Plan) and a stop
   button that replaces send while working. Enter never answers an approval.
 - **Streaming performance:** collect `TextDelta`s and apply them once per
   animation frame. Re-render markdown only for the block that is streaming;
@@ -685,7 +747,10 @@ Mocked up on the same board:
   - **Tabs:** one `plan` tab (the latest `ExitPlanMode` request; a revised
     plan replaces the old one in the same tab) and one tab per markdown file
     the chat wrote, in the order first written. A tab's name is the file name,
-    with its folder when two share a name. No way to close a single tab yet.
+    with its folder when two share a name. Each tab has a `×` (shown on the
+    tab in front, or under the pointer); a plan still waiting can't be
+    closed. A closed document keeps following edits, and its name in the
+    chat, or "open plan", brings the tab back. Closed tabs are not saved.
   - **Documents come from the chat's history, not from disk.** A `Write` whose
     path ends in `.md` or `.markdown` starts the tab with its content; later
     `Edit` / `MultiEdit` calls on that path are applied to the text
@@ -705,7 +770,7 @@ Mocked up on the same board:
     quietly. In the chat, a document's name in a folded run, and in the
     opened run, is a link to its tab. With the panel closed and at least one
     tab, a faint "panel · 3 tabs ◂" sits at the top right of the chat, with an
-    accent dot while a plan waits. `×` in the tab bar closes the panel. Open
+    accent dot while a plan waits. `▸` at the right end of the tab bar closes the panel. Open
     or closed, and the chosen tab, are kept per chat for the run, not saved.
   - **The plan in the chat** is one line: "● Plan · ready for your review ·
     open plan" while waiting, then a faint "Plan · approved", "Plan · approved
@@ -716,8 +781,10 @@ Mocked up on the same board:
     planning. Keep planning sends the feedback as the denial message
     ("Keep planning." when empty). Enter in the box adds a line; it never
     answers. Once answered the foot shows the outcome.
-  - **Width:** 46% of the window, as in the mock-up. Below 1100 px the open
-    panel takes the chat's place. A draggable divider is not built.
+  - **Width:** 46% of the window by default. Its left edge drags to resize
+    (the chat keeps at least 360 px, the panel 280 px); a double-click on the
+    edge goes back to 46%. The width is one saved setting for every chat.
+    Below 1100 px the open panel takes the chat's place.
   - **A terminal later** (the user's note, 2026-11-13: decide where its
     selector lives). The tab strip holds what the chat produced; the right
     end of the bar, before `×`, is kept free for things that aren't the
@@ -842,8 +909,9 @@ before building it. Only `claude_code.rs` would change.
    helper processes (`com.apple.WebKit.WebContent`, `.GPU`, `.Networking`) are
    not children of the app; count the ones that appear after launch.
 8. **Windows pass.** Build and run on the Windows laptop. Check binary
-   lookup, no console window, paths, and that Git for Windows is present (the
-   Bash tool needs it).
+   lookup, no console window, paths, that Git for Windows is present (the
+   Bash tool needs it), and that Ctrl+N doesn't open a browser window in
+   WebView2.
 
 ### Verify list
 

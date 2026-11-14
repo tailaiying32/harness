@@ -9,12 +9,13 @@
   import { contentClick } from "../clicks";
   import Markdown from "../chat/Markdown.svelte";
   import { PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
+  import { applyPanelWidth, DEFAULT_PANEL_WIDTH, savePrefs } from "../themes";
   import { baseName, planOf } from "../tools";
 
   let { chat }: { chat: Chat } = $props();
 
   const active = $derived(chat.activeTab);
-  const plan = $derived(chat.plan);
+  const plan = $derived(chat.planTab ? chat.plan : null);
   const text = $derived(
     active === PLAN_TAB
       ? plan
@@ -26,8 +27,40 @@
   /** A file's name; with its folder when two tabs share a name. */
   function label(path: string): string {
     const name = baseName(path);
-    if (chat.docs.filter((doc) => baseName(doc.path) === name).length < 2) return name;
+    if (chat.openDocs.filter((doc) => baseName(doc.path) === name).length < 2) return name;
     return path.split(/[\\/]/).slice(-2).join("/");
+  }
+
+  // The panel's left edge drags to set its width, kept as a share of the
+  // window. The chat keeps at least MIN_CHAT px and the panel MIN_PANEL px.
+  const MIN_CHAT = 360;
+  const MIN_PANEL = 280;
+  let panel: HTMLElement;
+  let share = 0;
+
+  function drag(e: PointerEvent) {
+    const chatLeft = panel.previousElementSibling?.getBoundingClientRect().left ?? 0;
+    const width = window.innerWidth;
+    const edge = Math.max(chatLeft + MIN_CHAT, Math.min(e.clientX, width - MIN_PANEL));
+    share = (width - edge) / width;
+    applyPanelWidth(share);
+  }
+
+  function startDrag(e: PointerEvent) {
+    e.preventDefault();
+    const grip = e.currentTarget as HTMLElement;
+    grip.setPointerCapture(e.pointerId);
+    grip.onpointermove = drag;
+    grip.onpointerup = grip.onpointercancel = () => {
+      grip.onpointermove = grip.onpointerup = grip.onpointercancel = null;
+      if (share) savePrefs({ panelWidth: share });
+    };
+  }
+
+  /** Double-click the edge: back to the usual width. */
+  function resetWidth() {
+    applyPanelWidth(DEFAULT_PANEL_WIDTH);
+    savePrefs({ panelWidth: DEFAULT_PANEL_WIDTH });
   }
 
   let feedback = $state("");
@@ -46,22 +79,31 @@
   }
 </script>
 
-<aside class="panel">
+<aside class="panel" bind:this={panel}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="grip" title="Drag to resize; double-click to reset" onpointerdown={startDrag} ondblclick={resetWidth}></div>
   <div class="bar">
     <div class="tabs">
       {#if plan}
-        <button class:on={active === PLAN_TAB} onclick={() => chat.openPanel(PLAN_TAB)}>
-          {#if chat.planPending}<span class="accent">●</span>{/if}
-          plan
-        </button>
+        <span class="tab" class:on={active === PLAN_TAB}>
+          <button onclick={() => chat.openPanel(PLAN_TAB)}>
+            {#if chat.planPending}<span class="accent">●</span>{/if}
+            plan
+          </button>
+          <!-- A plan that is waiting for an answer stays put. -->
+          {#if !chat.planPending}
+            <button class="shut" title="Close this tab" onclick={() => chat.closeTab(PLAN_TAB)}>×</button>
+          {/if}
+        </span>
       {/if}
-      {#each chat.docs as doc (doc.path)}
-        <button class:on={active === doc.path} title={doc.path} onclick={() => chat.openPanel(doc.path)}>
-          {label(doc.path)}
-        </button>
+      {#each chat.openDocs as doc (doc.path)}
+        <span class="tab" class:on={active === doc.path}>
+          <button title={doc.path} onclick={() => chat.openPanel(doc.path)}>{label(doc.path)}</button>
+          <button class="shut" title="Close this tab" onclick={() => chat.closeTab(doc.path)}>×</button>
+        </span>
       {/each}
     </div>
-    <button class="close" title="Close the panel" onclick={() => (chat.panelOpen = false)}>×</button>
+    <button class="close" title="Close the panel" onclick={() => (chat.panelOpen = false)}>▸</button>
   </div>
 
   <!-- Each tab starts at its top. -->
@@ -101,18 +143,36 @@
 
 <style>
   .panel {
-    width: 46%;
+    width: var(--panel-w, 46%);
     flex-shrink: 0;
     min-width: 0;
     display: flex;
     flex-direction: column;
     border-left: 1px solid var(--line);
+    position: relative;
+  }
+  /* The left edge, a little wider than the line it sits on, drags the width. */
+  .grip {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -4px;
+    width: 8px;
+    cursor: col-resize;
+    z-index: 1;
+  }
+  .grip:hover,
+  .grip:active {
+    background: linear-gradient(to right, transparent 3px, var(--faint) 3px, var(--faint) 5px, transparent 5px);
   }
   /* Too narrow for both: the panel takes the chat's place (see App.svelte). */
   @media (max-width: 1100px) {
     .panel {
       width: auto;
       flex: 1;
+    }
+    .grip {
+      display: none;
     }
   }
   .bar {
@@ -132,14 +192,24 @@
     overflow-x: auto;
     scrollbar-width: none;
   }
-  .tabs button {
+  .tab {
     flex-shrink: 0;
+    display: flex;
+    gap: 1.5ch;
   }
   .bar button:hover {
     color: var(--fg);
   }
-  .bar button.on {
+  .tab.on button:first-child {
     color: var(--bright);
+  }
+  /* A tab's close mark shows on the tab in front, or under the pointer. */
+  .shut {
+    visibility: hidden;
+  }
+  .tab.on .shut,
+  .tab:hover .shut {
+    visibility: visible;
   }
   .close {
     flex-shrink: 0;

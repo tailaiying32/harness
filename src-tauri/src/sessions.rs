@@ -119,6 +119,7 @@ impl SessionManager {
         mode: Option<String>,
         model: Option<String>,
         text: &str,
+        message_id: &str,
     ) -> Result<(), String> {
         let inner = &self.0;
 
@@ -194,9 +195,10 @@ impl SessionManager {
             session_id,
             AgentEvent::UserMessage {
                 text: text.to_string(),
+                id: Some(message_id.to_string()),
             },
         );
-        self.agent(session_id)?.send_user_message(text)
+        self.agent(session_id)?.send_user_message(text, message_id)
     }
 
     /// What a process's events pass through: bookkeeping, saving, then the window.
@@ -415,7 +417,7 @@ mod tests {
     }
 
     impl RunningAgent for FakeAgent {
-        fn send_user_message(&self, text: &str) -> Result<(), String> {
+        fn send_user_message(&self, text: &str, _id: &str) -> Result<(), String> {
             self.told.lock().unwrap().push(format!("say {text}"));
             (self.sink)(AgentEvent::Status {
                 state: SessionState::Working,
@@ -501,7 +503,7 @@ mod tests {
     impl Rig {
         async fn send(&self, text: &str) {
             self.manager
-                .send_message("s1", "claude".into(), "/work".into(), Some("plan".into()), None, text)
+                .send_message("s1", "claude".into(), "/work".into(), Some("plan".into()), None, text, "m1")
                 .await
                 .unwrap();
         }
@@ -537,7 +539,8 @@ mod tests {
         assert_eq!(
             rig.store.events("s1").unwrap(),
             vec![AgentEvent::UserMessage {
-                text: "Hello there".into()
+                text: "Hello there".into(),
+                id: Some("m1".into()),
             }]
         );
         // A second message goes to the same process.

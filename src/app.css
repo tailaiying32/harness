@@ -4,7 +4,8 @@
 :root {
   --font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
-  /* Regular size. Everything else is laid out in ch and em so it scales with these. */
+  /* The text size is its own setting (see applyFontSize); the rest is regular
+     spacing. Everything else is laid out in ch and em so it scales with these. */
   --font: 12.5px;
   --lh: 1.6;
   --gap: 13px;
@@ -33,7 +34,6 @@
 }
 
 :root[data-size="compact"] {
-  --font: 11.5px;
   --lh: 1.5;
   --gap: 9px;
   --pad-x: 24px;
@@ -42,7 +42,6 @@
 }
 
 :root[data-size="roomy"] {
-  --font: 13.5px;
   --lh: 1.75;
   --gap: 20px;
   --pad-x: 40px;

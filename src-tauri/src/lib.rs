@@ -98,6 +98,7 @@ async fn send_message(
     mode: Option<String>,
     model: Option<String>,
     text: String,
+    message_id: String,
 ) -> Result<(), String> {
     let binary = state
         .binary
@@ -113,7 +114,7 @@ async fn send_message(
     // The manager is cloned so nothing borrowed from `state` is held while waiting.
     let sessions = state.sessions.clone();
     sessions
-        .send_message(&session_id, binary, project_path, mode, model, &text)
+        .send_message(&session_id, binary, project_path, mode, model, &text, &message_id)
         .await
 }
 

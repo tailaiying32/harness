@@ -183,25 +183,62 @@ export function applyTheme(id: string): void {
   root.style.colorScheme = t.dark ? "dark" : "light";
 }
 
-/** Sizes are defined in app.css, keyed on this attribute. */
+/** Spacing: line height, gaps and margins. Defined in app.css, keyed on this attribute. */
 export function applySize(size: Size): void {
   document.documentElement.dataset.size = size;
 }
 
-type Prefs = { theme: string; size: Size; model: string };
+/** Text sizes on offer, in px. */
+export const fontSizes = [11, 11.5, 12, 12.5, 13, 13.5, 14, 15, 16] as const;
+export const DEFAULT_FONT_SIZE = 12.5;
+/** The text size each spacing used to bring with it, before the two were separate settings. */
+const fontOfSize: Record<Size, number> = { compact: 11.5, regular: 12.5, roomy: 13.5 };
+
+/** The text size. Spacing (`applySize`) is separate and doesn't change it. */
+export function applyFontSize(px: number): void {
+  document.documentElement.style.setProperty("--font", `${px}px`);
+}
+
+/** `size` is the spacing: line height, gaps and margins. */
+type Prefs = {
+  theme: string;
+  size: Size;
+  model: string;
+  fontSize: number;
+  /** The permission mode new chats start in: the last one picked, plan aside. */
+  mode: string;
+  /** The side panel's share of the window's width, 0 to 1. */
+  panelWidth: number;
+};
+export const DEFAULT_PANEL_WIDTH = 0.46;
+
+/** The side panel's width, as a share of the window. Set by dragging its left edge. */
+export function applyPanelWidth(share: number): void {
+  document.documentElement.style.setProperty("--panel-w", `${(share * 100).toFixed(2)}%`);
+}
+export const DEFAULT_MODE = "auto";
+const modes = ["default", "acceptEdits", "auto"];
 
 // Stored in the window's own storage until there is a settings page.
 export function loadPrefs(): Prefs {
   try {
     const saved = JSON.parse(localStorage.getItem("harness.prefs") ?? "{}") as Partial<Prefs>;
+    const size = sizes.includes(saved.size as Size) ? (saved.size as Size) : DEFAULT_SIZE;
     return {
       theme: themes.some((t) => t.id === saved.theme) ? saved.theme! : DEFAULT_THEME,
-      size: sizes.includes(saved.size as Size) ? (saved.size as Size) : DEFAULT_SIZE,
+      size,
       // Any saved name is kept; if Claude Code no longer knows it, the chat says so.
       model: typeof saved.model === "string" && saved.model ? saved.model : "default",
+      // With none saved, keep the text size the saved spacing used to give.
+      fontSize: (fontSizes as readonly number[]).includes(saved.fontSize as number) ? saved.fontSize! : fontOfSize[size],
+      mode: modes.includes(saved.mode as string) ? saved.mode! : DEFAULT_MODE,
+      panelWidth:
+        typeof saved.panelWidth === "number" && saved.panelWidth > 0.1 && saved.panelWidth < 0.9
+          ? saved.panelWidth
+          : DEFAULT_PANEL_WIDTH,
     };
   } catch {
-    return { theme: DEFAULT_THEME, size: DEFAULT_SIZE, model: "default" };
+    return { theme: DEFAULT_THEME, size: DEFAULT_SIZE, model: "default", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH };
   }
 }
 

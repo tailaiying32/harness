@@ -6,15 +6,29 @@
   import { shortPath } from "../paths";
   import type { Chat } from "../state/chat.svelte";
   import { savePrefs } from "../themes";
+  import { indent, newLine, outdent, renumbered, type Edit } from "./editing";
 
-  let { chat, ready, home, models }: { chat: Chat; ready: boolean; home: string; models: ModelInfo[] } = $props();
+  let {
+    chat,
+    ready,
+    home,
+    models,
+    focus = 0,
+  }: { chat: Chat; ready: boolean; home: string; models: ModelInfo[]; focus?: number } = $props();
 
   let box: HTMLTextAreaElement;
+  let frame: HTMLElement;
 
   // Opening a chat puts the cursor in its message box, sized to any unsent text.
   onMount(() => {
     grow();
     box.focus();
+  });
+
+  // Asking for a new chat while already on an empty one changes nothing on
+  // screen, so the cursor is put in the box by hand.
+  $effect(() => {
+    if (focus) box?.focus();
   });
 
   const modes: { id: Mode; label: string }[] = [
@@ -27,7 +41,10 @@
 
   function nextMode() {
     const index = modes.findIndex((m) => m.id === chat.mode);
-    void chat.changeMode(modes[(index + 1) % modes.length].id);
+    const mode = modes[(index + 1) % modes.length].id;
+    void chat.changeMode(mode);
+    // New chats start in the last mode picked. Plan is for one task, so it isn't kept.
+    if (mode !== "plan") savePrefs({ mode });
   }
 
   const folder = $derived(shortPath(chat.projectPath, home));
@@ -60,9 +77,14 @@
     return name ? `${percent}% of ${name} limit` : `${percent}% of limit`;
   });
 
+  // The box is measured by letting it collapse for a moment. The composer's
+  // own height is held meanwhile: otherwise the chat above would stretch into
+  // the freed space and back, and lose its place at the end on every key.
   function grow() {
+    frame.style.height = `${frame.offsetHeight}px`;
     box.style.height = "auto";
     box.style.height = `${box.scrollHeight}px`;
+    frame.style.height = "";
   }
 
   async function send() {
@@ -74,15 +96,45 @@
     void chat.send(text);
   }
 
+  /** Makes one replacement in the box the way typing would, so undo still works. */
+  async function apply(asked: Edit) {
+    // Numbered lists the edit disturbs are put back in order in the same step.
+    const edit = renumbered(chat.draft, asked);
+    box.setSelectionRange(edit.from, edit.to);
+    const typed = edit.insert
+      ? document.execCommand("insertText", false, edit.insert)
+      : edit.from === edit.to || document.execCommand("delete");
+    if (!typed) {
+      chat.draft = chat.draft.slice(0, edit.from) + edit.insert + chat.draft.slice(edit.to);
+      await tick();
+    }
+    box.setSelectionRange(edit.selStart, edit.selEnd);
+    grow();
+  }
+
+  // The box is for writing, so its keys work as in a document: Tab indents
+  // and Shift+Tab pulls back (Tab never leaves the box), and a new line in a
+  // list starts the next item. Enter alone still sends.
   function onKey(e: KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    if (e.isComposing) return;
+    const { selectionStart: start, selectionEnd: end } = box;
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void send();
+    } else if (e.key === "Enter") {
+      const edit = newLine(chat.draft, start, end);
+      if (!edit) return;
+      e.preventDefault();
+      void apply(edit);
+    } else if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      const edit = e.shiftKey ? outdent(chat.draft, start, end) : indent(chat.draft, start, end);
+      if (edit) void apply(edit);
     }
   }
 </script>
 
-<div class="composer">
+<div class="composer" bind:this={frame}>
   <div class="inner">
     <div class="prompt">
       <span class="marker">&gt;</span>

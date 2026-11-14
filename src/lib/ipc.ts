@@ -41,7 +41,8 @@ export type AgentEvent =
   | { kind: "approval_answered"; request_id: string; decision: Decision; answers: Record<string, string> | null }
   | { kind: "mode_changed"; mode: string }
   | { kind: "interrupted" }
-  | { kind: "user_message"; text: string }
+  | { kind: "user_message"; text: string; id?: string | null }
+  | { kind: "message_seen"; id: string }
   | { kind: "turn_ended"; ok: boolean; duration_ms: number | null }
   | { kind: "usage_update"; window: string | null; utilization: number }
   | { kind: "error"; message: string };
@@ -91,8 +92,14 @@ export const deleteSession = (sessionId: string) => invoke<void>("delete_session
 
 /** Saves the chat on its first message. `mode` and `model` are saved with it, and
  *  are passed to the agent when this message has to start the chat's process. */
-export const sendMessage = (sessionId: string, projectPath: string, mode: Mode, model: string, text: string) =>
-  invoke<void>("send_message", { sessionId, projectPath, mode, model, text });
+export const sendMessage = (
+  sessionId: string,
+  projectPath: string,
+  mode: Mode,
+  model: string,
+  text: string,
+  messageId: string,
+) => invoke<void>("send_message", { sessionId, projectPath, mode, model, text, messageId });
 
 export const answerApproval = (
   sessionId: string,

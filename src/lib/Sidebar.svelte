@@ -72,11 +72,10 @@
                 }}
               />
             {:else}
-              <button class="open" ondblclick={() => startRename(session.id, session.title)} onclick={() => app.open(session.id)} title={session.title}>
+              <button class="open" ondblclick={() => startRename(session.id, session.title)} onclick={() => app.open(session.id)} title="{session.title} (double-click to rename)">
                 <span class="dot {dot}" title={meaning[dot]}>{glyph[dot]}</span>
                 <span class="title">{session.title || "untitled"}</span>
               </button>
-              <button class="quiet" title="Rename (or double-click the title)" onclick={() => startRename(session.id, session.title)}>✎</button>
               <button class="quiet" title="Delete this chat" onclick={() => (deleting = session.id)}>×</button>
             {/if}
           </div>
