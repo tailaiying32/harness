@@ -608,9 +608,12 @@ Mocked up on the same board:
   (dark and light lists); a click applies at once and is remembered. Still to
   add: font, idle timeout, the "Always allow" default and the path to Claude
   Code, which are constants until then.
-- **The line under the message box** (the user's layout, 2026-11-13): the
-  folder first, at the left, then mode, then model; usage at the right. The
-  folder can be changed until the chat's first message.
+- **The line under the message box** follows the Claude desktop app (the
+  user's choice, 2026-11-13, from a screenshot of it): on a new chat the
+  folder picker sits at the left, and it disappears once the first message
+  is sent (the sidebar shows the folder from then on). Model, mode and usage
+  sit at the right, in that order. The desktop app also shows an effort level
+  ("High") next to the model; Harness has no effort setting yet.
 - **Slash commands: deferred.** The user uses `/btw` and `/compact`. v1 has no
   slash menu; whether typed slash commands work through the headless input is
   untested. `/btw` (a side question) will want its own floating view later.

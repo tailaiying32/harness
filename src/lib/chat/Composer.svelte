@@ -100,22 +100,21 @@
     </div>
 
     <div class="meta">
-      <!-- Where the chat runs comes first; it can be changed until the first message. -->
-      <button
-        class="folder"
-        onclick={changeFolder}
-        disabled={chat.started}
-        title={chat.started ? chat.projectPath : "Choose the folder this chat works in"}
-      >
-        {folder}
-      </button>
-      <button onclick={nextMode} title="Switch mode">{modeLabel}</button>
+      <!-- Laid out like the Claude desktop app: on a new chat the folder picker
+           sits at the left; once the chat has started it is gone (the sidebar
+           shows the folder). Model, mode and usage sit at the right. -->
+      {#if !chat.started}
+        <button class="folder" onclick={changeFolder} title="Choose the folder this chat works in">
+          {folder}
+        </button>
+      {/if}
+      <span class="spacer"></span>
       <select value={chat.modelChoice} onchange={(e) => pickModel(e.currentTarget.value)} aria-label="Model">
         {#each modelOptions as m (m.value)}
           <option value={m.value} title={m.detail ?? ""}>{m.name}</option>
         {/each}
       </select>
-      <span class="spacer"></span>
+      <button onclick={nextMode} title="Switch mode">{modeLabel}</button>
       {#if usage}<span>{usage}</span>{/if}
     </div>
   </div>
