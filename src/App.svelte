@@ -1,11 +1,12 @@
 <script lang="ts">
-  // The window: the sidebar of projects and chats, and the open chat in the
-  // Quiet Terminal look. The side panel comes in a later step of PLAN.md.
+  // The window: the sidebar of projects and chats, the open chat, and the side
+  // panel for its plan and documents, in the Quiet Terminal look.
   import { onMount, tick } from "svelte";
   import { homeDir } from "@tauri-apps/api/path";
   import "./app.css";
   import ChatView from "./lib/chat/ChatView.svelte";
   import Composer from "./lib/chat/Composer.svelte";
+  import SidePanel from "./lib/panel/SidePanel.svelte";
   import Settings from "./lib/Settings.svelte";
   import Sidebar from "./lib/Sidebar.svelte";
   import {
@@ -33,6 +34,7 @@
   app.defaultModel = prefs.model;
   app.current.modelChoice = prefs.model;
   const chat = $derived(app.current);
+  const panelOpen = $derived(chat.panelOpen && chat.tabCount > 0);
 
   let theme = $state(prefs.theme);
   let size = $state<Size>(prefs.size);
@@ -178,6 +180,12 @@
           status: current.status,
           modelsOffered: models.map((m) => m.name),
           usage: current.usage,
+          panel: {
+            open: current.panelOpen,
+            tab: current.activeTab,
+            plan: current.plan ? { pending: current.planPending, answered: current.plan.answered ?? null } : null,
+            docs: current.docs.map((doc) => ({ path: doc.path, length: doc.text.length, start: doc.text.slice(0, 80) })),
+          },
           items: current.items.map((item) => ({ ...item })),
           // `shown` leaves out blocks the browser hasn't laid out (off screen, or
           // everything while the window is hidden); `text` has them all.
@@ -194,11 +202,18 @@
 
 <svelte:window onkeydown={onKey} />
 
-<div class="app">
+<div class="app" class:paneled={panelOpen}>
   <Sidebar {app} onsettings={() => (showSettings = !showSettings)} />
   <main>
     <!-- Each chat gets its own view, so scroll position and open folds don't leak between chats. -->
     {#key chat.sessionId}
+      <!-- With the panel closed, one faint line brings it back. -->
+      {#if !panelOpen && chat.tabCount > 0}
+        <button class="reopen" onclick={() => chat.openPanel()}>
+          {#if chat.planPending}<span class="accent">●</span>{/if}
+          panel · {chat.tabCount} {chat.tabCount === 1 ? "tab" : "tabs"} ◂
+        </button>
+      {/if}
       <ChatView {chat} problem={setup?.problem ?? null} />
       <Composer {chat} ready={!!setup?.logged_in} home={app.home} {models} />
     {/key}
@@ -207,6 +222,11 @@
       <Settings bind:theme bind:size onclose={() => (showSettings = false)} />
     {/if}
   </main>
+  {#if panelOpen}
+    {#key chat.sessionId}
+      <SidePanel {chat} />
+    {/key}
+  {/if}
 </div>
 
 <style>
@@ -220,5 +240,23 @@
     display: flex;
     flex-direction: column;
     position: relative;
+  }
+  .reopen {
+    align-self: flex-end;
+    padding: calc(var(--pad-y) * 0.6) var(--pad-x) 0;
+    color: var(--faint);
+    white-space: nowrap;
+  }
+  .reopen:hover {
+    color: var(--fg);
+  }
+  .accent {
+    color: var(--accent);
+  }
+  /* Too narrow for chat and panel side by side: the open panel takes the chat's place. */
+  @media (max-width: 1100px) {
+    .paneled main {
+      display: none;
+    }
   }
 </style>

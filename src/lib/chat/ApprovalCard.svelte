@@ -1,20 +1,16 @@
 <script lang="ts">
-  // The one boxed element in the chat. Mouse only: no key approves or denies,
-  // so a stray keypress can never approve a command.
+  // The one boxed element in the chat, for tool approvals and questions. (A
+  // plan is answered in the side panel.) Mouse only: no key approves or
+  // denies, so a stray keypress can never approve a command.
   import type { ApprovalItem, Chat } from "../state/chat.svelte";
   import { diffLines, title } from "../tools";
   import Clipped from "./Clipped.svelte";
-  import Markdown from "./Markdown.svelte";
 
   let { item, chat }: { item: ApprovalItem; chat: Chat } = $props();
 
   const call = $derived({ toolId: "", name: item.toolName, input: item.input });
   const diff = $derived(diffLines(call));
   const target = $derived(title(call, chat.projectPath).target);
-
-  const planText = $derived(
-    item.input && typeof item.input === "object" && "plan" in item.input ? String(item.input.plan) : "",
-  );
 
   type Question = {
     question: string;
@@ -65,11 +61,6 @@
 
   const outcome = $derived.by(() => {
     if (item.cancelled) return "cancelled";
-    if (item.approval === "plan") {
-      if (item.answered === "allow") return "approved";
-      if (item.answered === "always_allow") return "approved · auto-accepting edits";
-      return "kept planning";
-    }
     if (item.approval === "question") return item.answered === "deny" ? "skipped" : "answered";
     if (item.answered === "allow") return "allowed";
     if (item.answered === "always_allow") return "allowed for this chat";
@@ -86,10 +77,7 @@
   </div>
 {:else}
 <div class="approval" class:closed>
-  {#if item.approval === "plan"}
-    <div class="head"><span class="accent">Plan</span> · ready for your review</div>
-    <Markdown text={planText} />
-  {:else if item.approval === "question"}
+  {#if item.approval === "question"}
     <div class="head"><span class="accent">Question</span></div>
     {#each questions as q, i}
       {@const multi = Boolean(q.multiSelect)}
@@ -135,12 +123,6 @@
   <div class="actions">
     {#if closed}
       <span class="faint">{outcome}</span>
-    {:else if item.approval === "plan"}
-      <button class="primary" onclick={() => chat.answer(item, "allow")}>Approve plan</button>
-      {#if item.alwaysLabel}
-        <button onclick={() => chat.answer(item, "always_allow")}>{item.alwaysLabel}</button>
-      {/if}
-      <button onclick={() => chat.answer(item, "deny", "Keep planning.")}>Keep planning</button>
     {:else if item.approval === "question"}
       <button class="primary" disabled={!complete} onclick={sendAnswers}>Send answers</button>
       <button

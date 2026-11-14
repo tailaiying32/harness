@@ -13,7 +13,7 @@ import {
   type SessionRow,
   type SessionState,
 } from "../ipc";
-import { showsOutput, type ToolCall } from "../tools";
+import { docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
 
 export type UserItem = { id: number; type: "user"; text: string };
 export type TextItem = { id: number; type: "text"; messageId: string; text: string; streaming: boolean };
@@ -41,6 +41,12 @@ export type ErrorItem = { id: number; type: "error"; text: string };
 /** A faint one-line remark from the app, e.g. "stopped". */
 export type NoteItem = { id: number; type: "note"; text: string };
 
+/** A markdown file the chat wrote, as a tab in the side panel. */
+export type DocTab = { path: string; text: string };
+
+/** The plan's tab in the side panel. Documents use their file path. */
+export const PLAN_TAB = "plan";
+
 export type Item = UserItem | TextItem | ThinkingItem | ToolItem | ApprovalItem | ErrorItem | NoteItem;
 
 type NewItem =
@@ -51,6 +57,14 @@ type NewItem =
   | Omit<ApprovalItem, "id">
   | Omit<ErrorItem, "id">
   | Omit<NoteItem, "id">;
+
+/** How an answered plan went, in a few words. */
+export function planOutcome(item: ApprovalItem): string {
+  if (item.cancelled) return "cancelled";
+  if (item.answered === "allow") return "approved";
+  if (item.answered === "always_allow") return "approved · auto-accepting edits";
+  return "kept planning";
+}
 
 function resultText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -91,6 +105,8 @@ export class Chat {
     chat.modelChoice = row.model;
     chat.stopping = false;
     if (!live) chat.settle();
+    // A plan still waiting for an answer is shown, as it would be live.
+    if (chat.planPending) chat.openPanel(PLAN_TAB);
     return chat;
   }
 
@@ -107,6 +123,48 @@ export class Chat {
   projectPath = $state("");
   /** When the current turn began, for the elapsed-time counter. */
   turnStartedAt = $state<number | null>(null);
+
+  // ---- The side panel ----
+  /** The latest plan Claude presented. A revised plan replaces it. */
+  plan = $state<ApprovalItem | null>(null);
+  /** Markdown files this chat wrote, kept in step with its later edits to them. */
+  docs = $state<DocTab[]>([]);
+  panelOpen = $state(false);
+  /** The chosen tab: PLAN_TAB or a document's path. */
+  panelTab = $state(PLAN_TAB);
+  /** Where Claude Code keeps the plan. It is the plan's tab, not a document. */
+  private planPath = "";
+
+  get planPending(): boolean {
+    return this.plan !== null && !this.plan.answered && !this.plan.cancelled;
+  }
+
+  get tabCount(): number {
+    return (this.plan ? 1 : 0) + this.docs.length;
+  }
+
+  /** The tab on show: the chosen one if it still exists, else the first. */
+  get activeTab(): string {
+    if (this.panelTab === PLAN_TAB && this.plan) return PLAN_TAB;
+    if (this.docs.some((doc) => doc.path === this.panelTab)) return this.panelTab;
+    return this.plan ? PLAN_TAB : (this.docs[0]?.path ?? "");
+  }
+
+  openPanel(tab?: string): void {
+    if (tab) this.panelTab = tab;
+    this.panelOpen = this.tabCount > 0;
+  }
+
+  /** A call that wrote or edited a markdown file adds its tab, or updates it. */
+  private trackDocument(tool: ToolItem): void {
+    const path = docPath(tool);
+    if (!path || path === this.planPath) return;
+    const doc = this.docs.find((d) => d.path === path);
+    const text = textAfter(tool, doc?.text);
+    if (text === null) return;
+    if (doc) doc.text = text;
+    else this.docs.push({ path, text });
+  }
 
   /** Called once each time a turn ends. Used by the self-test. */
   onTurnEnd: (() => void) | null = null;
@@ -224,6 +282,7 @@ export class Chat {
           tool.isError = event.is_error;
           // Output that is never shown (a file that was read, say) isn't kept.
           tool.result = showsOutput(tool) ? resultText(event.content) : "";
+          if (!event.is_error) this.trackDocument(tool);
         }
         break;
       }
@@ -239,6 +298,14 @@ export class Chat {
           toolId: event.tool_id,
           alwaysLabel: event.always_label,
         });
+        if (event.approval === "plan") {
+          this.plan = item;
+          // Claude Code drafts the plan in a file of its own; that file is this tab.
+          this.planPath = planOf(event.input).path;
+          this.docs = this.docs.filter((doc) => doc.path !== this.planPath);
+          // Claude is waiting on the user, so the plan is put in front of them.
+          if (!this.replaying) this.openPanel(PLAN_TAB);
+        }
         if (this.autoAnswer) {
           // A question has no "always"; it is answered with its first options.
           const answers = event.approval === "question" ? firstOptions(event.input) : undefined;

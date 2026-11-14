@@ -16,8 +16,9 @@ picking a different folder inside the native picker, and the sidebar in the
 real window by eye (the screen was locked; it was checked in the browser
 preview instead, see "Preview page").
 
-Not built yet: showing subagent work, the side panel (step 6). The settings
-page holds only theme and size so far.
+Step 6, the side panel, is built, checked in the browser preview and tested
+live once (see "Side panel, as built" and step 6 of "Order of work"). Not built yet: showing subagent work. The settings page
+holds only theme and size so far.
 
 ## What it does
 
@@ -61,7 +62,10 @@ piece, not reworking the app.
   asks you show up the same way, as a choice card.
 - **Stop.** A stop button cuts off the current answer. The chat stays usable.
 - **Plan.** Switch a chat to plan mode. The plan opens in the side panel with
-  Approve and Keep planning, and stays out of the chat.
+  Approve and Keep planning, and stays out of the chat, which keeps one line
+  that opens it.
+- **Read what Claude wrote.** Each markdown file a chat writes gets a tab in
+  the side panel, and the tab follows Claude's later edits to that file.
 - **Walk away.** Five minutes after a chat's last answer, its process exits
   and frees its memory. The chat stays in the sidebar. Your next message
   restarts it where it left off. A chat with background work still running
@@ -170,7 +174,9 @@ src/
     state/chat.svelte.ts  one chat: items on screen, live events and replay
     Sidebar.svelte     projects and chats
     chat/              ChatView, WorkRun, ApprovalCard, Composer, Clipped, Markdown
-    tools.ts           how tool calls are worded
+    panel/SidePanel.svelte   the tabbed side panel: plan and documents
+    clicks.ts          copy and link clicks in formatted text (chat and panel)
+    tools.ts           how tool calls are worded; which calls write documents
     markdown.ts        markdown-it + highlight.js setup
     themes.ts, models.ts, paths.ts
 preview.html           entry for the browser preview (not in the built app)
@@ -467,9 +473,10 @@ close_session(session_id) ask the chat's process to exit (used by the self-test)
 autotest() / autotest_wait(ms) / autotest_report(text)
 ```
 
-Not built yet: `read_document(session_id, path)` for the side panel (only
-paths inside the project folder or `~/.claude/plans`), and settings commands
-(`Store::setting` and `set_setting` exist).
+Not built yet: settings commands (`Store::setting` and `set_setting` exist).
+`read_document` was planned for the side panel and turned out not to be
+needed: the panel is built from the chat's own history (see "Side panel, as
+built"). Add it only if tabs should show files as they are on disk.
 
 One app-wide channel, not one per chat, so the sidebar can show a mark for
 chats that are not open.
@@ -524,7 +531,8 @@ https://www.magicpatterns.com/os/tWmrW2q43Q7sWofaHnFJVj?file=2oZgfpBgi1cedNPY3NJ
   allow and Deny. Mouse only: no keyboard shortcut approves or denies, so a
   stray keypress can never approve a command.
 - **Message box:** a rule above, an accent `>` prompt, and one faint line
-  below with mode, model, folder and usage.
+  below with mode, model, folder and usage. The box is two rows tall when
+  empty; the line below sits a fifth of a gap under it (tightened 2026-11-13).
 - **Side panel:** the plan as a plain document, formatted like chat text: a
   bold bright heading, `[x]` / `[ ]` steps, notes as dashes.
 
@@ -667,10 +675,49 @@ Mocked up on the same board:
   scroll. Add a virtual list only if measurement shows it is needed.
 - **Tool calls:** folded as described under "Look". An opened line shows each
   call's input and result; long results are cut with a show-more.
-- **Side panel:** a tab per plan (from `ExitPlanMode`) and per markdown file
-  the chat wrote (a `Write` tool call whose path ends in `.md`). Plans carry
-  Approve and Keep planning (with a feedback box) while their request is
-  pending.
+- **Side panel, as built** (decided with the user 2026-11-13; mock-up: frame
+  "Side Panel" on the Magic Patterns board, section 5). A tabbed space on the
+  right, per chat, built for more kinds of tab later.
+  - **Tabs:** one `plan` tab (the latest `ExitPlanMode` request; a revised
+    plan replaces the old one in the same tab) and one tab per markdown file
+    the chat wrote, in the order first written. A tab's name is the file name,
+    with its folder when two share a name. No way to close a single tab yet.
+  - **Documents come from the chat's history, not from disk.** A `Write` whose
+    path ends in `.md` or `.markdown` starts the tab with its content; later
+    `Edit` / `MultiEdit` calls on that path are applied to the text
+    (`textAfter` in `tools.ts`), so the tab follows Claude's edits. Only calls
+    whose result is not an error count. Changes made any other way (by the
+    user, by a shell command) are not seen. An edit to a markdown file the
+    chat never wrote in full gets no tab. No new core command, and a reloaded
+    chat rebuilds the same tabs by replay.
+  - **The plan's own file is not a document.** Claude Code drafts the plan in
+    a file (`planFilePath` on the request). When the request arrives, a tab
+    for that path is dropped and later writes to it are ignored. **Tested**
+    live: Claude Code writes the draft to `~/.claude/plans/<name>.md` before
+    the request, so until the request arrives the draft is an ordinary
+    document tab for a moment (added quietly, then dropped).
+  - **Opening:** a plan request opens the panel on the plan tab (also when a
+    chat is reopened with its plan still waiting). Documents add a tab
+    quietly. In the chat, a document's name in a folded run, and in the
+    opened run, is a link to its tab. With the panel closed and at least one
+    tab, a faint "panel · 3 tabs ◂" sits at the top right of the chat, with an
+    accent dot while a plan waits. `×` in the tab bar closes the panel. Open
+    or closed, and the chosen tab, are kept per chat for the run, not saved.
+  - **The plan in the chat** is one line: "● Plan · ready for your review ·
+    open plan" while waiting, then a faint "Plan · approved", "Plan · approved
+    · auto-accepting edits", "Plan · kept planning" or "Plan · cancelled".
+    Only the latest plan's line keeps the "open plan" link.
+  - **Answering a plan** happens at the foot of its tab, mouse only: a
+    feedback box, then Approve plan, Approve and auto-accept edits, Keep
+    planning. Keep planning sends the feedback as the denial message
+    ("Keep planning." when empty). Enter in the box adds a line; it never
+    answers. Once answered the foot shows the outcome.
+  - **Width:** 46% of the window, as in the mock-up. Below 1100 px the open
+    panel takes the chat's place. A draggable divider is not built.
+  - **A terminal later** (the user's note, 2026-11-13: decide where its
+    selector lives). The tab strip holds what the chat produced; the right
+    end of the bar, before `×`, is kept free for things that aren't the
+    chat's, such as a terminal. Not decided.
 - **Rendered markdown must be safe.** As built: markdown-it runs with raw HTML
   turned off and its default link checks, and highlight.js escapes code, so
   the output holds only tags the renderer itself produces. dompurify was
@@ -681,8 +728,10 @@ Mocked up on the same board:
 
 `npm run dev`, then open `http://localhost:1420/preview.html`: the same window
 in a plain browser, with a stand-in for the core (`src/preview.ts`) that has a
-sidebar of sample chats, one saved chat, a 300-turn chat, and a scripted
-answer to anything typed. For working on the look without building the app.
+sidebar of sample chats, one saved chat, a 300-turn chat, a chat with a plan
+waiting and two documents (for the side panel; Keep planning brings a revised
+plan, approving brings an edit to a document), and a scripted answer to
+anything typed. For working on the look without building the app.
 It is not part of the built app. `.claude/launch.json` starts it as
 `ui-preview`.
 
@@ -720,7 +769,13 @@ before building it. Only `claude_code.rs` would change.
    - That is over the 150 MB target for a very long chat. The next step, if
      it matters in real use: load only the last turns from the store and
      fetch earlier ones on scroll, instead of replaying the whole history.
-6. **Side panel.** Plans and markdown documents.
+6. **Side panel.** Plans and markdown documents. **Built**; checked in the
+   browser preview at 1280 and 1000 px wide, and **tested** live with the
+   self-test (a debug build, 2026-11-13): a plan-mode chat was approved with
+   auto-accept, wrote `NOTES.md`, then edited it; the report's `panel` showed
+   the plan answered, one document tab, and its text equal to the file on
+   disk. Not tested live: Keep planning with feedback, and the look in the
+   real window by eye.
 7. **Measure.** Memory of the app alone with a long chat open; memory per live
    chat with the user's real app connections; confirm idle chats hold none.
    Target for the app alone: under 150 MB. Fix what misses.

@@ -165,7 +165,7 @@
     align-items: center;
     gap: 3ch;
     white-space: nowrap;
-    margin-top: calc(var(--gap) * 0.6);
+    margin-top: calc(var(--gap) * 0.2);
     color: var(--faint);
   }
   .meta > * {

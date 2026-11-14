@@ -2,8 +2,8 @@
   // The chat column: messages, folded tool runs, approvals. Pinned to the
   // bottom like a terminal unless the user scrolls up.
   import { onMount, tick, untrack } from "svelte";
-  import { openUrl } from "@tauri-apps/plugin-opener";
-  import type { Chat, Item, ToolItem } from "../state/chat.svelte";
+  import { contentClick } from "../clicks";
+  import { PLAN_TAB, planOutcome, type Chat, type Item, type ToolItem } from "../state/chat.svelte";
   import ApprovalCard from "./ApprovalCard.svelte";
   import Markdown from "./Markdown.svelte";
   import WorkRun from "./WorkRun.svelte";
@@ -103,33 +103,12 @@
     return () => observer.disconnect();
   });
 
-  async function onClick(e: MouseEvent) {
-    const target = e.target as HTMLElement;
-
-    const copy = target.closest<HTMLElement>("[data-copy]");
-    if (copy) {
-      const code = copy.closest(".code")?.querySelector("pre")?.textContent ?? "";
-      try {
-        await navigator.clipboard.writeText(code);
-        copy.textContent = "copied";
-        setTimeout(() => (copy.textContent = "copy"), 1200);
-      } catch {
-        copy.textContent = "couldn't copy";
-      }
-      return;
-    }
-
-    // Links open in the default browser, never inside this window.
-    const link = target.closest("a");
-    if (link?.href) {
-      e.preventDefault();
-      void openUrl(link.href);
-    }
-  }
+  // Files with a tab in the side panel; their names in a folded run open it.
+  const docPaths = $derived(chat.docs.map((doc) => doc.path));
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="scroll" bind:this={scroller} onscroll={onScroll} onclick={onClick}>
+<div class="scroll" bind:this={scroller} onscroll={onScroll} onclick={contentClick}>
   <div class="content" bind:this={content}>
     {#if problem}
       <div class="row"><span class="marker bad">!</span><div class="body bad">{problem}</div></div>
@@ -148,6 +127,8 @@
             active={working && group === lastGroup}
             spinner={working && group === lastGroup ? spinner : ""}
             elapsed={working && group === lastGroup ? elapsed : 0}
+            docs={docPaths}
+            onopen={(path) => chat.openPanel(path)}
           />
         </div>
       {:else if group.item.type === "user"}
@@ -167,6 +148,25 @@
             <summary>Thinking</summary>
             <div class="thought">{group.item.text}</div>
           </details>
+        </div>
+      {:else if group.item.type === "approval" && group.item.approval === "plan"}
+        <!-- The plan itself is in the side panel; the chat keeps one line. -->
+        {@const plan = group.item}
+        {@const waiting = !plan.answered && !plan.cancelled}
+        {@const latest = plan.requestId === chat.plan?.requestId}
+        <div class="row block">
+          <span class="marker accent">{waiting ? "●" : ""}</span>
+          <div class="body" class:faint={!waiting}>
+            {#if waiting}
+              <span class="accent">Plan</span> <span class="dim">· ready for your review</span>
+            {:else}
+              Plan · {planOutcome(plan)}
+            {/if}
+            {#if latest}
+              <span class:dim={waiting}>·</span>
+              <button class="open" class:waiting onclick={() => chat.openPanel(PLAN_TAB)}>open plan</button>
+            {/if}
+          </div>
         </div>
       {:else if group.item.type === "approval"}
         <div class="row block">
@@ -257,6 +257,16 @@
   }
   .faint {
     color: var(--faint);
+  }
+  .open {
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+  }
+  .open.waiting {
+    color: var(--bright);
+  }
+  .open:hover {
+    color: var(--fg);
   }
   .thinking {
     color: var(--dim);

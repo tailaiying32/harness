@@ -34,6 +34,7 @@ let projects: ProjectRow[] = [
     id: "p1",
     path: `${home}/code/harness`,
     sessions: [
+      row("planning", `${home}/code/harness`, "Idle timeout for chat processes", 1),
       row("saved", `${home}/code/harness`, "Add a sidebar with saved chats", 2),
       row("working", `${home}/code/harness`, "Why is the idle timer late when hidden?", 9),
       row("waiting", `${home}/code/harness`, "Bump dependencies and run the tests", 30),
@@ -120,6 +121,74 @@ const savedChat: AgentEvent[] = [
   ended,
 ];
 
+// A chat in plan mode: it wrote two documents, then presented a plan that is
+// still waiting for an answer. For the side panel.
+const notesPath = `${home}/code/harness/docs/memory-notes.md`;
+const testPlanPath = `${home}/code/harness/docs/test-plan.md`;
+const planPath = `${home}/.claude/plans/idle-timeout.md`;
+const notesText =
+  "# Memory per chat\n\nWhat each part of the app holds, measured on this Mac with a release build and the window hidden.\n\n## Readings\n\n- A waiting chat's process holds about 260 MB.\n- After a few turns it rises to about 310 MB.\n- The app alone, with a short chat open: 105 to 160 MB.\n\n## Takeaway\n\nFour idle chats cost over 1 GB today. With `IDLE_TIMEOUT` at five minutes they cost nothing.\n\n| Part | Memory |\n|---|---|\n| App alone | 105 to 160 MB |\n| One chat's process | 260 to 310 MB |\n";
+const planText = (revised: boolean) =>
+  "# Idle timeout for chats\n\nClose a chat's process " +
+  (revised ? "**ten** minutes" : "five minutes") +
+  " after its last answer, and resume it on the next message.\n\n## What changes\n\n- Each session gets an idle timer, started when a turn ends.\n- A new message cancels the timer.\n- When it fires, the process is asked to exit. It finishes background work first.\n- The next message resumes the chat by its session ID.\n\n## Order of work\n\n1. Add the timer to the session manager in `sessions.rs`\n2. Close on fire, cancel on message\n3. Resume on the next send\n4. Test at 5 and 45 seconds with the window hidden\n\n```rust\nfn spawn_idle_timer(id: SessionId, after: Duration) -> JoinHandle<()> {\n    tokio::spawn(async move { sleep(after).await; close(id); })\n}\n```\n\n## Not covered\n\n- Chats with background work still running are left alone.\n- The timeout is fixed until the settings page has it.\n";
+const planRequest = (request_id: string, tool_id: string, revised: boolean): AgentEvent => ({
+  kind: "approval_request",
+  request_id,
+  approval: "plan",
+  tool_name: "ExitPlanMode",
+  title: "Plan",
+  input: { plan: planText(revised), planFilePath: planPath },
+  tool_id,
+  always_label: "Approve, auto-accept edits",
+});
+
+const planningChat: AgentEvent[] = [
+  { kind: "user_message", text: "Chats I've walked away from should stop using memory. Plan it out before changing anything." },
+  { kind: "session_started", agent_session_id: "agent-planning", model: "claude-fable-5-2", mode: "plan" },
+  text("p1", "I'll look at how chats are tracked, measure what an idle one holds, then write a plan."),
+  tool("pt1", "Read", { file_path: `${home}/code/harness/src-tauri/src/sessions.rs` }),
+  result("pt1", "…"),
+  tool("pt2", "Grep", { pattern: "SessionState::Idle" }),
+  result("pt2", "src-tauri/src/sessions.rs:88"),
+  text("p2", "The session manager already knows when a turn ends, so the timer can start there. I wrote down what I measured, and a short list of what to test."),
+  tool("pt3", "Bash", { command: "ps -o rss,command -ax | grep claude" }),
+  result("pt3", "264112 claude -p"),
+  tool("pt4", "Write", { file_path: notesPath, content: notesText }),
+  result("pt4", "ok"),
+  tool("pt5", "Write", { file_path: testPlanPath, content: "# What to test\n\n- [ ] The timer fires at 5 seconds\n- [ ] A message cancels it\n- [x] Resume works after an exit\n" }),
+  result("pt5", "ok"),
+  // The plan's own file: it becomes the plan tab, not a document tab.
+  tool("pt6", "Write", { file_path: planPath, content: planText(false) }),
+  result("pt6", "ok"),
+  tool("pt7", "ExitPlanMode", { plan: planText(false), planFilePath: planPath }),
+  planRequest("plan-r1", "pt7", false),
+];
+
+/** What the preview does when the sample plan is answered. */
+async function afterPlan(id: string, decision: string) {
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  emit(id, { kind: "status", state: "working" });
+  await wait(700);
+  if (decision === "deny") {
+    // Keep planning: a revised plan replaces the old one in the same tab.
+    emit(id, result("pt7", "The user wants changes.", true));
+    emit(id, text("p3", "Understood. I've moved the timeout to ten minutes."));
+    emit(id, tool("pt8", "ExitPlanMode", { plan: planText(true), planFilePath: planPath }));
+    emit(id, planRequest("plan-r2", "pt8", true));
+    emit(id, { kind: "status", state: "waiting_approval" });
+    return;
+  }
+  emit(id, { kind: "mode_changed", mode: decision === "always_allow" ? "acceptEdits" : "default" });
+  emit(id, result("pt7", "Plan approved."));
+  // An edit to a document the chat wrote: its tab follows.
+  emit(id, tool("pt9", "Edit", { file_path: notesPath, old_string: "## Takeaway", new_string: "## Takeaway (after the change)" }));
+  emit(id, result("pt9", "ok"));
+  emit(id, text("p4", "The timer is in. I updated the notes with the new readings."));
+  emit(id, ended);
+  emit(id, { kind: "status", state: "idle" });
+}
+
 /** Three hundred short turns, for checking that a long chat stays light. */
 const longChat: AgentEvent[] = Array.from({ length: 300 }, (_, n) => [
   { kind: "user_message", text: `Question ${n + 1}` } as AgentEvent,
@@ -172,6 +241,7 @@ const commands: Record<string, (args: Args) => unknown> = {
     setTimeout(() => {
       emit("working", { kind: "status", state: "working" });
       emit("waiting", { kind: "status", state: "waiting_approval" });
+      emit("planning", { kind: "status", state: "waiting_approval" });
       emit("unseen", ended);
     }, 50);
   },
@@ -179,8 +249,8 @@ const commands: Record<string, (args: Args) => unknown> = {
   sidebar: () => projects,
   load_session: (args) => ({
     session: projects.flatMap((p) => p.sessions).find((s) => s.id === args.sessionId),
-    events: args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
-    live: false,
+    events: args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
+    live: args.sessionId === "planning",
   }),
   delete_session: (args) => {
     projects = projects
@@ -196,7 +266,8 @@ const commands: Record<string, (args: Args) => unknown> = {
     }
     void play(args.sessionId);
   },
-  answer_approval: (args) => finish(args.sessionId),
+  answer_approval: (args) =>
+    String(args.requestId).startsWith("plan-") ? void afterPlan(args.sessionId, args.decision) : finish(args.sessionId),
   interrupt: (args) => {
     emit(args.sessionId, { kind: "interrupted" });
     emit(args.sessionId, { kind: "turn_ended", ok: false, duration_ms: null });

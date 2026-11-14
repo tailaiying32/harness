@@ -162,3 +162,46 @@ export function editCounts(tools: ToolCall[]): { added: number; removed: number 
   }
   return { added, removed };
 }
+
+// ---- The side panel: plans and the markdown documents a chat wrote ----
+
+/** The markdown file a call writes or edits, or "" if it isn't one. */
+export function docPath(tool: ToolCall): string {
+  if (!["Write", "Edit", "MultiEdit"].includes(tool.name)) return "";
+  const path = field(tool.input, "file_path");
+  return /\.(md|markdown)$/i.test(path) ? path : "";
+}
+
+/**
+ * A document's text after a call that wrote or edited it. `before` is what it
+ * held, when the chat has seen it written. Null means the text can't be told:
+ * an edit to a file this chat never wrote in full.
+ */
+export function textAfter(tool: ToolCall, before: string | undefined): string | null {
+  const { name, input } = tool;
+  if (name === "Write") return field(input, "content");
+  if (before === undefined) return null;
+  // Not String.replace with a string: "$" in the new text would be read as a pattern.
+  const apply = (text: string, edit: unknown): string => {
+    const from = field(edit, "old_string");
+    const to = field(edit, "new_string");
+    if (!from) return text;
+    if ((edit as { replace_all?: unknown })?.replace_all === true) return text.split(from).join(to);
+    const at = text.indexOf(from);
+    return at < 0 ? text : text.slice(0, at) + to + text.slice(at + from.length);
+  };
+  if (name === "Edit") return apply(before, input);
+  if (name === "MultiEdit") {
+    const edits = (input as { edits?: unknown })?.edits;
+    return Array.isArray(edits) ? edits.reduce(apply, before) : before;
+  }
+  return null;
+}
+
+/** A plan request's text, and the file Claude Code keeps the plan in. */
+export function planOf(input: unknown): { text: string; path: string } {
+  return { text: field(input, "plan"), path: field(input, "planFilePath") };
+}
+
+/** A file's name without its folders. */
+export const baseName = fileName;
