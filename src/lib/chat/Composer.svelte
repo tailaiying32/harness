@@ -247,7 +247,7 @@
 
 <style>
   .composer {
-    padding: 0 var(--pad-x) calc(var(--pad-y) * 0.7);
+    padding: 0 var(--pad-x) var(--foot-y);
   }
   .inner {
     max-width: var(--col);
@@ -290,7 +290,7 @@
     align-items: center;
     gap: 3ch;
     white-space: nowrap;
-    margin-top: calc(var(--gap) * 0.2);
+    margin-top: var(--foot-gap);
     color: var(--faint);
   }
   .meta > * {

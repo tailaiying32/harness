@@ -5,3 +5,6 @@ node_modules
 .env.*
 !.env.example
 vite.config.ts.timestamp-*
+
+# Local Claude Code files (preview config, worktrees, settings)
+/.claude/

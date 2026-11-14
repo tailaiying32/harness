@@ -229,7 +229,7 @@
     padding: var(--pad-y) var(--pad-x);
   }
   .foot {
-    margin: 0 var(--pad-x) calc(var(--pad-y) * 0.7);
+    margin: 0 var(--pad-x) var(--foot-y);
     padding-top: var(--gap);
     border-top: 1px solid var(--line);
   }
@@ -261,7 +261,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0 3ch;
-    margin-top: calc(var(--gap) * 0.6);
+    margin-top: var(--foot-gap);
   }
   .actions button:hover {
     color: var(--bright);

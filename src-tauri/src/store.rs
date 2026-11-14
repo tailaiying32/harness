@@ -415,16 +415,21 @@ impl Store {
     pub fn set_worktree(&self, session_id: &str, worktree: &Worktree, status: &str) -> Result<(), String> {
         let json = serde_json::to_string(worktree).map_err(|e| e.to_string())?;
         let put_away_at = (status == "put_away").then(now_ms);
+        // A chat starting a new worktree (none saved) drops the last one's pull
+        // request: new branch, new pull request. Put away and back keeps it.
         self.exec(
-            "UPDATE sessions SET wt = ?2, wt_status = ?3, wt_put_away_at = ?4 WHERE id = ?1",
+            "UPDATE sessions SET wt = ?2, wt_status = ?3, wt_put_away_at = ?4,
+                 pr = CASE WHEN wt IS NULL THEN NULL ELSE pr END WHERE id = ?1",
             params![session_id, json, status, put_away_at],
         )
     }
 
     /// The chat no longer has a worktree, and will be asked again at its next edit.
+    /// Its pull request stays, so a finished chat keeps its mark (purple once
+    /// merged). It is no longer checked on GitHub after this.
     pub fn clear_worktree(&self, session_id: &str) -> Result<(), String> {
         self.exec(
-            "UPDATE sessions SET wt = NULL, wt_status = NULL, wt_put_away_at = NULL, pr = NULL,
+            "UPDATE sessions SET wt = NULL, wt_status = NULL, wt_put_away_at = NULL,
                  worktree_choice = NULL WHERE id = ?1",
             params![session_id],
         )
@@ -733,16 +738,22 @@ mod tests {
         let git = store.chat_git("a").unwrap().unwrap();
         assert_eq!(git.status.as_deref(), Some("put_away"));
         assert!(git.put_away_at.is_some());
-        assert_eq!(git.pr, Some(pr));
+        assert_eq!(git.pr, Some(pr.clone()));
         assert_eq!(git.worktree, Some(worktree()));
         assert_eq!((git.start_branch.as_deref(), git.start_commit.as_deref()), (Some("main"), Some("c1")));
         assert_eq!(store.sweep_list().unwrap().len(), 1);
 
         store.clear_worktree("a").unwrap();
         let git = store.chat_git("a").unwrap().unwrap();
-        assert_eq!((git.choice, git.status, git.worktree, git.pr), (None, None, None, None));
+        assert_eq!((git.choice, git.status, git.worktree), (None, None, None));
         assert!(store.session("a").unwrap().unwrap().work_path.is_none());
         assert!(store.sweep_list().unwrap().is_empty());
+        // The pull request outlives the worktree, so the sidebar keeps its mark...
+        assert_eq!(git.pr, Some(pr.clone()));
+        assert_eq!(store.session("a").unwrap().unwrap().pr, Some(pr));
+        // ...until the chat starts a new worktree, which gets its own.
+        store.set_worktree("a", &worktree(), "live").unwrap();
+        assert_eq!(store.chat_git("a").unwrap().unwrap().pr, None);
     }
 
     #[test]
