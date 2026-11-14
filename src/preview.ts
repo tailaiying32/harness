@@ -147,7 +147,7 @@ const savedChat: AgentEvent[] = [
   result("t3", "ok"),
   text(
     "m1",
-    "# The sidebar is in\n\nChats are grouped by **project folder**, newest first.\n\n## What changed\n\n- A small database holds projects, chats and their history.\n- Reopening a chat *replays* its saved events.\n- [ ] Still to do: the side panel.\n\n```ts\nconst chat = Chat.fromSaved(row, events, live);\napp.open(chat.sessionId);\n```\n\nRun `npm run tauri dev` to try it.",
+    "# The sidebar is in\n\nChats are grouped by **project folder**, newest first.\n\n## What changed\n\n- A small database holds projects, chats and their history.\n- Reopening a chat *replays* its saved events.\n- [ ] Still to do: the side panel.\n\n```ts\nconst chat = Chat.fromSaved(row, events, live);\napp.open(chat.sessionId);\n```\n\nRun `npm run tauri dev` to try it. The plan is in [PLAN.md](PLAN.md) and the look in [the notes](docs/look.md#colours); the [Tauri docs](https://tauri.app) have more. A [missing file](gone.md) shows an error.",
   ),
   ended,
   { kind: "user_message", text: "Run the tests too." },
@@ -403,6 +403,12 @@ const commands: Record<string, (args: Args) => unknown> = {
   "plugin:path|resolve_directory": () => home,
   "plugin:dialog|open": () => null,
   "plugin:opener|open_url": () => undefined,
+  "plugin:opener|reveal_item_in_dir": () => undefined,
+  read_doc: (args: Args) => {
+    const path = String(args.path);
+    if (path.endsWith("gone.md")) throw "That file doesn't exist.";
+    return `# ${path.split("/").pop()}\n\nRead from \`${path}\` on disk.\n\nA [link back](../PLAN.md) opens the plan file.`;
+  },
 };
 
 (window as any).__TAURI_INTERNALS__ = {

@@ -24,6 +24,14 @@ Added 2026-11-13 (quick wins): rename a chat (double-click its title), close a s
 "queued" mark on a message sent while Claude works, plans always opening in
 the side panel, and a chat that stays at its end when opened.
 
+Added 2026-11-13 (links, branch `panel-links`, merged 2026-11-14): a link to
+a markdown file in the chat or a document opens it as a side panel tab, read
+fresh from disk on each click (`read_doc` in `docs.rs`); relative links start
+from the folder Claude works in (its worktree, if any), or in a document from
+that document's folder. Web links open in the browser; other local files are
+shown in Finder, so a link never runs anything. Not yet clicked through in
+the real app.
+
 Added 2026-11-13 (worktrees, branch `worktrees`): when Claude judges a piece
 of work deserves its own branch, it asks for a worktree, and Harness shows a
 card ("new worktree" or "work here"); worktrees share
