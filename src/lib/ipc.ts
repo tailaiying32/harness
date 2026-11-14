@@ -84,6 +84,8 @@ export type SessionRow = {
   title: string;
   mode: string;
   model: string;
+  /** Effort level picked for this chat, or "default" for Claude Code's own default. */
+  effort: string;
   agent_session_id: string | null;
   last_used_at: number;
   /** Where the agent works when the chat has a worktree (live or put away). */
@@ -127,9 +129,10 @@ export const sendMessage = (
   projectPath: string,
   mode: Mode,
   model: string,
+  effort: string,
   text: string,
   messageId: string,
-) => invoke<void>("send_message", { sessionId, projectPath, mode, model, text, messageId });
+) => invoke<void>("send_message", { sessionId, projectPath, mode, model, effort, text, messageId });
 
 export const answerApproval = (
   sessionId: string,
@@ -151,13 +154,20 @@ export type ModelInfo = {
   /** What to show, e.g. "Opus 5.5" or "Default (Fable 5.2)". */
   name: string;
   detail: string | null;
+  /** Effort levels it takes, lowest first. Empty = no effort setting. (Missing in lists cached by older builds.) */
+  efforts?: string[];
+  /** The level it uses when none is picked, if known. */
+  default_effort?: string | null;
 };
 
-/** Asks Claude Code for its current models. Takes about a second. */
+/** Asks Claude Code for its current models and their effort levels. Takes about 7 seconds. */
 export const listModels = () => invoke<ModelInfo[]>("list_models");
 
 /** `model` is an alias ("opus"), a full name, or "default". */
 export const setModel = (sessionId: string, model: string) => invoke<void>("set_model", { sessionId, model });
+
+/** `effort` is a level such as "high"; it stays for this chat only. */
+export const setEffort = (sessionId: string, effort: string) => invoke<void>("set_effort", { sessionId, effort });
 
 export const closeSession = (sessionId: string) => invoke<void>("close_session", { sessionId });
 

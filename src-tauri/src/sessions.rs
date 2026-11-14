@@ -167,9 +167,9 @@ impl SessionManager {
     }
 
     /// Send a message, starting or resuming the agent if it isn't running.
-    /// `mode` and `model` are saved with the chat; they are passed to the agent
-    /// only when a process has to be started (a running one is switched with
-    /// `set_mode` and `set_model`).
+    /// `mode`, `model` and `effort` are saved with the chat; they are passed to
+    /// the agent only when a process has to be started (a running one is
+    /// switched with `set_mode`, `set_model` and `set_effort`).
     #[allow(clippy::too_many_arguments)]
     pub async fn send_message(
         &self,
@@ -178,10 +178,11 @@ impl SessionManager {
         project_path: PathBuf,
         mode: Option<String>,
         model: Option<String>,
+        effort: Option<String>,
         text: &str,
         message_id: &str,
     ) -> Result<(), String> {
-        self.send_inner(session_id, binary, project_path, mode, model, text, message_id, true)
+        self.send_inner(session_id, binary, project_path, mode, model, effort, text, message_id, true)
             .await
     }
 
@@ -195,6 +196,8 @@ impl SessionManager {
         project_path: PathBuf,
         mode: Option<String>,
         model: Option<String>,
+        // None keeps the saved one.
+        effort: Option<String>,
         text: &str,
         message_id: &str,
         show: bool,
@@ -226,6 +229,9 @@ impl SessionManager {
             mode.as_deref().unwrap_or("default"),
             model.as_deref().unwrap_or("default"),
         )?;
+        if let Some(effort) = &effort {
+            inner.store.set_effort(session_id, effort)?;
+        }
         // Recorded before any worktree is brought back, so the history reads
         // in the order it happened on screen.
         if show {
@@ -271,6 +277,7 @@ impl SessionManager {
                     resume_id,
                     mode,
                     model,
+                    effort: saved.map(|s| s.effort),
                 },
                 self.sink(session_id, run),
             );
@@ -516,6 +523,12 @@ impl SessionManager {
         self.agent(session_id)?.set_model(model)
     }
 
+    /// Saved either way; a running process is also told now.
+    pub fn set_effort(&self, session_id: &str, effort: &str) -> Result<(), String> {
+        let _ = self.0.store.set_effort(session_id, effort);
+        self.agent(session_id)?.set_effort(effort)
+    }
+
     /// Ask the chat's process to finish up and exit. The chat can be resumed later.
     pub fn close(&self, session_id: &str) {
         let agent = {
@@ -681,6 +694,10 @@ mod tests {
             self.told.lock().unwrap().push(format!("model {model}"));
             Ok(())
         }
+        fn set_effort(&self, effort: &str) -> Result<(), String> {
+            self.told.lock().unwrap().push(format!("effort {effort}"));
+            Ok(())
+        }
         fn close(&self) {
             self.told.lock().unwrap().push("close".into());
             // A real process exits once its input closes.
@@ -758,7 +775,7 @@ mod tests {
     impl Rig {
         async fn send(&self, text: &str) {
             self.manager
-                .send_message("s1", "claude".into(), "/work".into(), Some("plan".into()), None, text, "m1")
+                .send_message("s1", "claude".into(), "/work".into(), Some("plan".into()), None, None, text, "m1")
                 .await
                 .unwrap();
         }
@@ -1026,7 +1043,7 @@ mod tests {
     impl Rig {
         async fn send_at(&self, folder: &Path, mode: &str, text: &str) {
             self.manager
-                .send_message("s1", "claude".into(), folder.into(), Some(mode.into()), None, text, "m")
+                .send_message("s1", "claude".into(), folder.into(), Some(mode.into()), None, None, text, "m")
                 .await
                 .unwrap();
         }
@@ -1252,7 +1269,7 @@ mod tests {
         rig.background(1);
         rig.turn_ends();
         rig.manager
-            .send_message("s2", "claude".into(), "/work".into(), None, None, "hi", "m2")
+            .send_message("s2", "claude".into(), "/work".into(), None, None, None, "hi", "m2")
             .await
             .unwrap();
         rig.agent_says(AgentEvent::TurnEnded {

@@ -337,6 +337,7 @@ impl SessionManager {
             PathBuf::from(&saved.project_path),
             Some(saved.mode),
             Some(saved.model),
+            None,
             &note,
             &message_id,
             false,

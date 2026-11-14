@@ -24,6 +24,15 @@ Added 2026-11-13 (quick wins): rename a chat (double-click its title), close a s
 "queued" mark on a message sent while Claude works, plans always opening in
 the side panel, and a chat that stays at its end when opened.
 
+Added 2026-11-14 (effort, branch `harness/effort-picker-15a45f`): the model
+label is now an in-app menu (not a native one) listing the models, with one
+row of effort levels under them. A level picked is for that chat only and is
+saved with it (`effort` column, `--effort` on launch, `apply_flag_settings`
+live); new chats use Claude Code's own default for their model, which
+`list_models` reads per model with `set_model` + `get_settings` on its idle
+process (about 7 s, no settings file touched). The label shows "model level".
+Checked in the browser preview; not tried in the real app yet.
+
 Added 2026-11-13 (links, branch `panel-links`, merged 2026-11-14): a link to
 a markdown file in the chat or a document opens it as a side panel tab, read
 fresh from disk on each click (`read_doc` in `docs.rs`); relative links start

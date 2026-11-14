@@ -95,6 +95,9 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
     if let Some(model) = opts.model.as_deref().filter(|m| *m != "default") {
         args.extend(["--model".to_string(), model.to_string()]);
     }
+    if let Some(effort) = opts.effort.as_deref().filter(|e| *e != "default") {
+        args.extend(["--effort".to_string(), effort.to_string()]);
+    }
     args
 }
 
@@ -286,7 +289,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
     // Starts a short-lived process and sends the `initialize` request the Agent
     // SDK opens with. The reply lists the models; no chat message is sent, so
-    // nothing is spent. Takes about a second (tested on CLI 2.1.322).
+    // nothing is spent. The list takes about a second, the effort defaults below
+    // about 7 more (tested on CLI 2.1.322).
     fn list_models(&self, binary: &Path) -> Result<Vec<ModelInfo>, String> {
         use std::io::{BufRead, Write};
 
@@ -319,34 +323,56 @@ impl AgentAdapter for ClaudeCodeAdapter {
         let mut stdin = child.stdin.take().ok_or("Claude Code has no stdin")?;
         let stdout = child.stdout.take().ok_or("Claude Code has no stdout")?;
 
-        let request = json!({
-            "type": "control_request",
-            "request_id": "models",
-            "request": { "subtype": "initialize" },
-        });
-        let sent = writeln!(stdin, "{request}").and_then(|_| stdin.flush());
-
         // Read on another thread so a silent process can't hang the caller.
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                    if value["type"] == "control_response" {
-                        let _ = tx.send(value);
+                    if value["type"] == "control_response" && tx.send(value).is_err() {
                         return;
                     }
                 }
             }
         });
-        let reply = rx.recv_timeout(std::time::Duration::from_secs(15));
+        // Sends one request and waits for its reply.
+        let mut ask = |id: &str, request: Value, wait: Duration| -> Option<Value> {
+            let line = json!({ "type": "control_request", "request_id": id, "request": request });
+            writeln!(stdin, "{line}").and_then(|_| stdin.flush()).ok()?;
+            let until = std::time::Instant::now() + wait;
+            loop {
+                let reply = rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())).ok()?;
+                if reply["response"]["request_id"] == id {
+                    return Some(reply);
+                }
+            }
+        };
+
+        let reply = ask("models", json!({ "subtype": "initialize" }), Duration::from_secs(15));
+        let mut models = reply.as_ref().map(parse_models).unwrap_or_default();
+
+        // Each model's default effort: Claude Code doesn't list it, so switch
+        // the idle process to each model in turn and ask what it would use.
+        // Nothing is sent to a model and no settings file changes. About half
+        // a second per model (tested on CLI 2.1.322); stops at the first miss.
+        for (i, model) in models.iter_mut().enumerate() {
+            if model.efforts.is_empty() {
+                continue;
+            }
+            let wait = Duration::from_secs(5);
+            let switched = ask(&format!("m{i}"), json!({ "subtype": "set_model", "model": model.value }), wait);
+            let settings = switched.and_then(|_| ask(&format!("s{i}"), json!({ "subtype": "get_settings" }), wait));
+            let Some(settings) = settings else { break };
+            model.default_effort = settings["response"]["response"]["applied"]["effort"]
+                .as_str()
+                .map(str::to_owned);
+        }
 
         drop(stdin);
         let _ = child.kill();
         let _ = child.wait();
 
-        sent.map_err(|e| format!("Could not talk to Claude Code: {e}"))?;
-        let reply = reply.map_err(|_| "Claude Code didn't list its models in time".to_string())?;
-        Ok(parse_models(&reply))
+        reply.ok_or("Claude Code didn't list its models in time")?;
+        Ok(models)
     }
 
     // One headless turn on Haiku with no tools, kept out of Claude Code's saved
@@ -448,10 +474,18 @@ fn parse_models(reply: &Value) -> Vec<ModelInfo> {
                 ("default", Some(stands_for)) => (format!("Default ({stands_for})"), None),
                 _ => (display.to_string(), description.map(str::to_owned)),
             };
+            let efforts = m["supportedEffortLevels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.as_str().map(str::to_owned))
+                .collect();
             Some(ModelInfo {
                 value,
                 name,
                 detail,
+                efforts,
+                default_effort: None,
             })
         })
         .collect()
@@ -546,6 +580,17 @@ impl RunningAgent for ClaudeCodeProcess {
             "type": "control_request",
             "request_id": uuid::Uuid::new_v4().to_string(),
             "request": { "subtype": "set_model", "model": model },
+        }))
+    }
+
+    // Tested on CLI 2.1.322: takes effect at once and stays through later
+    // model switches. (Sending null does not bring back the per-model default,
+    // so the app never goes back to "default" on a running process.)
+    fn set_effort(&self, effort: &str) -> Result<(), String> {
+        self.send(json!({
+            "type": "control_request",
+            "request_id": uuid::Uuid::new_v4().to_string(),
+            "request": { "subtype": "apply_flag_settings", "settings": { "effortLevel": effort } },
         }))
     }
 
@@ -834,6 +879,25 @@ mod tests {
     }
 
     #[test]
+    fn a_picked_effort_is_passed_and_default_is_left_out() {
+        let with = |effort: Option<&str>| {
+            launch_args(&SpawnOptions {
+                binary: "claude".into(),
+                project_path: "/work".into(),
+                resume_id: None,
+                mode: None,
+                model: None,
+                effort: effort.map(str::to_owned),
+            })
+        };
+        let args = with(Some("max"));
+        let at = args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(args[at + 1], "max");
+        assert!(!with(Some("default")).contains(&"--effort".to_string()));
+        assert!(!with(None).contains(&"--effort".to_string()));
+    }
+
+    #[test]
     fn every_launch_asks_for_echoes_and_carries_the_plan_instruction() {
         let args = launch_args(&SpawnOptions {
             binary: "claude".into(),
@@ -841,6 +905,7 @@ mod tests {
             resume_id: Some("abc".into()),
             mode: Some("plan".into()),
             model: None,
+            effort: None,
         });
         assert!(args.contains(&"--replay-user-messages".to_string()));
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
@@ -970,7 +1035,7 @@ mod tests {
     fn models_are_read_from_the_initialize_reply() {
         let reply = json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "models", "response": { "models": [
             { "value": "default", "resolvedModel": "claude-fable-5-2", "displayName": "Default (recommended)", "description": "Fable 5.2" },
-            { "value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5", "description": "Best for everyday, complex tasks" },
+            { "value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5", "description": "Best for everyday, complex tasks", "supportedEffortLevels": ["low", "high"] },
             { "displayName": "No value, so skipped" },
         ]}}});
         assert_eq!(
@@ -980,11 +1045,15 @@ mod tests {
                     value: "default".into(),
                     name: "Default (Fable 5.2)".into(),
                     detail: None,
+                    efforts: vec![],
+                    default_effort: None,
                 },
                 ModelInfo {
                     value: "opus".into(),
                     name: "Opus 5.5".into(),
                     detail: Some("Best for everyday, complex tasks".into()),
+                    efforts: vec!["low".into(), "high".into()],
+                    default_effort: None,
                 },
             ]
         );

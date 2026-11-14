@@ -69,6 +69,37 @@
     savePrefs({ model: choice });
   }
 
+  // Effort lives in the model menu. A level picked here is for this chat only;
+  // new chats start on Claude Code's own default for their model.
+  const picked = $derived(modelOptions.find((m) => m.value === chat.modelChoice));
+  const efforts = $derived(picked?.efforts ?? []);
+  const effort = $derived(
+    efforts.includes(chat.effortChoice) ? chat.effortChoice : (picked?.default_effort ?? null),
+  );
+
+  let menuOpen = $state(false);
+  let menu = $state<HTMLElement>();
+
+  // Any click outside the menu, or Escape, closes it.
+  $effect(() => {
+    if (!menuOpen) return;
+    const away = (e: PointerEvent) => {
+      if (!menu?.contains(e.target as Node)) menuOpen = false;
+    };
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        menuOpen = false;
+        box.focus();
+      }
+    };
+    window.addEventListener("pointerdown", away, true);
+    window.addEventListener("keydown", escape);
+    return () => {
+      window.removeEventListener("pointerdown", away, true);
+      window.removeEventListener("keydown", escape);
+    };
+  });
+
   const usage = $derived.by(() => {
     if (!chat.usage) return "";
     // Claude Code names the limit that applies to the current model, e.g.
@@ -177,11 +208,37 @@
         {/if}
       {/if}
       <span class="spacer"></span>
-      <select value={chat.modelChoice} onchange={(e) => pickModel(e.currentTarget.value)} aria-label="Model">
-        {#each modelOptions as m (m.value)}
-          <option value={m.value} title={m.detail ?? ""}>{m.name}</option>
-        {/each}
-      </select>
+      <span class="picker" bind:this={menu}>
+        <button onclick={() => (menuOpen = !menuOpen)} title="Model and effort" aria-haspopup="menu" aria-expanded={menuOpen}>
+          {picked?.name ?? chat.modelChoice}{#if effort}&ensp;{effort}{/if}
+        </button>
+        {#if menuOpen}
+          <div class="menu" role="menu">
+            {#each modelOptions as m (m.value)}
+              <button
+                role="menuitemradio"
+                aria-checked={m.value === chat.modelChoice}
+                class:on={m.value === chat.modelChoice}
+                title={m.detail ?? ""}
+                onclick={() => pickModel(m.value)}>{m.name}</button
+              >
+            {/each}
+            {#if efforts.length}
+              <div class="efforts" role="group" aria-label="Effort">
+                <span>effort</span>
+                {#each efforts as level (level)}
+                  <button
+                    role="menuitemradio"
+                    aria-checked={level === effort}
+                    class:on={level === effort}
+                    onclick={() => chat.changeEffort(level)}>{level}</button
+                  >
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </span>
       <button onclick={nextMode} title="Switch mode">{modeLabel}</button>
       {#if usage}<span>{usage}</span>{/if}
     </div>
@@ -266,19 +323,44 @@
     flex: 1 1 0;
     min-width: 0;
   }
-  .meta button:not(:disabled):hover,
-  .meta select:hover {
+  .meta button:not(:disabled):hover {
     color: var(--fg);
   }
-  select {
-    appearance: none;
-    /* As wide as the chosen option, not the longest one. */
-    field-sizing: content;
-    border: 0;
-    outline: 0;
-    padding: 0;
-    background: transparent;
+  /* The model menu opens upward from its label, right-aligned with it. A model
+     click picks and leaves it open, so effort can be set in the same visit. */
+  .picker {
+    position: relative;
+  }
+  .menu {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + var(--gap) * 0.4);
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: calc(var(--gap) * 0.4) 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+  }
+  .menu button {
+    text-align: left;
+    padding: 0 2ch;
+    color: var(--dim);
+  }
+  .menu button.on {
+    color: var(--accent);
+  }
+  .efforts {
+    display: flex;
+    gap: 1.5ch;
+    margin-top: calc(var(--gap) * 0.4);
+    padding: calc(var(--gap) * 0.4) 2ch 0;
+    border-top: 1px solid var(--line);
     color: var(--faint);
-    cursor: pointer;
+  }
+  .efforts button {
+    padding: 0;
   }
 </style>
