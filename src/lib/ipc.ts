@@ -46,7 +46,19 @@ export type AgentEvent =
   | { kind: "turn_ended"; ok: boolean; duration_ms: number | null }
   | { kind: "usage_update"; window: string | null; utilization: number }
   | { kind: "background_work"; running: number }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string }
+  | { kind: "title_changed"; title: string }
+  | { kind: "worktree_ask"; request_id: string; repo_root: string; tool_id: string | null; name?: string | null }
+  | { kind: "worktree_chosen"; choice: WorktreeChoice }
+  | { kind: "worktree_changed"; status: WorktreeStatus; branch: string | null }
+  | { kind: "pr_changed"; pr: PrInfo | null };
+
+/** The answer to Claude's request for a worktree. */
+export type WorktreeChoice = "worktree" | "here";
+export type WorktreeStatus = "created" | "restored" | "put_away" | "merged" | "gone";
+
+/** A worktree branch's pull request. Mirrors `PrInfo` in src-tauri/src/worktree.rs. */
+export type PrInfo = { number: number; state: "open" | "draft" | "merged" | "closed"; url: string; head: string };
 
 export type Envelope = { session_id: string; event: AgentEvent };
 
@@ -74,6 +86,14 @@ export type SessionRow = {
   model: string;
   agent_session_id: string | null;
   last_used_at: number;
+  /** Where the agent works when the chat has a worktree (live or put away). */
+  work_path: string | null;
+  /** The worktree's branch. */
+  branch: string | null;
+  wt_status: "live" | "put_away" | null;
+  pr: PrInfo | null;
+  /** When the chat went to the trash (ms); null when it isn't there. */
+  trashed_at: number | null;
 };
 
 /** A project folder and its chats, newest first. */
@@ -86,10 +106,19 @@ export const sidebar = () => invoke<ProjectRow[]>("sidebar");
 export const loadSession = (sessionId: string) =>
   invoke<{ session: SessionRow; events: AgentEvent[]; live: boolean }>("load_session", { sessionId });
 
-/** Deletes a chat and its history for good. */
 export const renameSession = (sessionId: string, title: string) =>
   invoke<void>("rename_session", { sessionId, title });
+/** Moves a chat to the trash. */
 export const deleteSession = (sessionId: string) => invoke<void>("delete_session", { sessionId });
+/** Chats in the trash, most recently trashed first. */
+export const listTrash = () => invoke<SessionRow[]>("list_trash");
+export const restoreChat = (sessionId: string) => invoke<void>("restore_chat", { sessionId });
+/** Deletes every chat in the trash for good. */
+export const emptyTrash = () => invoke<void>("empty_trash");
+
+/** The answer to Claude's request for a worktree: a new one, or keep working here. */
+export const chooseWorktree = (sessionId: string, requestId: string, choice: WorktreeChoice) =>
+  invoke<void>("choose_worktree", { sessionId, requestId, choice });
 
 /** Saves the chat on its first message. `mode` and `model` are saved with it, and
  *  are passed to the agent when this message has to start the chat's process. */

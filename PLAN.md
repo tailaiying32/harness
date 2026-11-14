@@ -24,6 +24,21 @@ Added 2026-11-13 (quick wins): rename a chat (double-click its title), close a s
 "queued" mark on a message sent while Claude works, plans always opening in
 the side panel, and a chat that stays at its end when opened.
 
+Added 2026-11-13 (worktrees, branch `worktrees`): when Claude judges a piece
+of work deserves its own branch, it asks for a worktree, and Harness shows a
+card ("new worktree" or "work here"); worktrees share
+build files with the main folder as copy-on-write copies; idle ones are put
+away (edits kept in a hidden git ref) and come back with the next message;
+merged ones (by git or a merged pull request) are removed with their branch;
+deleting a chat moves it to a trash for 30 days. Pull request status shows as
+a branch mark in the sidebar and in the bottom bar. New chats get a title
+written by Haiku. **Tested** live with the self-test (Haiku, scratch repo):
+Claude asking by itself for real work (a module with tests) and not for a
+one-line fix, the move with resume, put away and restore with an uncommitted
+file, a hand merge cleaned up at startup, the trash and its purge. Checked in the preview page: the card, the sidebar marks, the trash
+list, the bottom bar. Not tested live: a real pull request going through its
+states (the lookup command was run read-only against pookie). See "Worktrees".
+
 Added 2026-11-13 (background work): a chat running a background command or
 agent is never closed for being idle, a message to a closing chat no longer
 fails, and delete and quit stop background commands. **Tested** live: stays
@@ -118,7 +133,7 @@ the login itself.
 
 ## What it doesn't cover
 
-- Worktrees, a skills editor, a screen for managing app connections, and
+- A skills editor, a screen for managing app connections, and
   browser use. Skills, instructions and connections you already have still
   work; there is just no UI for editing them yet.
 - Codex, Cursor or other agents. The design leaves room; nothing is built.
@@ -416,6 +431,68 @@ RunningAgent:
 The adapter keeps each pending approval's original `input` and
 `permission_suggestions` keyed by `request_id`, because the answer must echo
 them back.
+
+### Worktrees (`worktree.rs`, `sessions/worktrees.rs`, `github.rs`)
+
+Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-rolling-whale.md`.
+
+- **The request.** Every launch adds a line to Claude's instructions (call
+  Claude Code's `EnterWorktree` before starting real changes in a repo; not
+  for tiny edits, questions, reviews or plans, nor once in a worktree) and
+  `--settings {"permissions":{"ask":["EnterWorktree"]}}`. Without that rule
+  the tool runs without asking and makes its own worktree under
+  `.claude/worktrees/` (tested on CLI 2.1.322); with it, the call reaches the
+  approval channel in every mode. The session manager catches it
+  (`screen_worktree_call`) and shows `WorktreeAsk`, with the name Claude gave
+  the work. The call waits in Claude Code, which has no timeout. A call from
+  a chat already in a worktree, or outside a git repo, is turned down at once
+  with the reason. An earlier version asked before the first file edit (a
+  PreToolUse hook); it was dropped 2026-11-14 because edits made with shell
+  commands slipped past it, and the user wanted Claude to judge which work
+  deserves a worktree.
+- **"Work here"**: the call is turned down with "carry on here"; Claude may
+  ask again later for other work. **"New worktree"**: the call is turned
+  down (Harness makes its own worktree, not Claude Code's), the turn
+  interrupted, the process stopped; `worktree::create` makes
+  `harness/<Claude's name for the work>-<6 hex>` at
+  `<data>/worktrees/<repo>-<6 hex>` from the latest commit of the branch the
+  main folder was on when the chat began (`start_branch`, saved on the first
+  message); then the chat resumes there (same session ID: `--resume` works
+  from any folder) with a hidden note telling Claude where it is.
+- **Ignored files** (builds, packages, `.env`) are copied from the main folder
+  with `clonefile` (copy-on-write, no space until changed); off APFS, files
+  are copied plainly and folders skipped. Folders holding a `.git` (nested
+  repos and worktrees) are never copied.
+- **Put away** = uncommitted edits (not ignored files) saved as a commit under
+  `refs/harness/saved/<chat>` (a temporary index; branch untouched), then
+  `git worktree remove --force`. **Restore** = `worktree add` at the same
+  path, `git restore --source=<ref> --worktree -- .`, ref deleted, ignored
+  files copied again. Sending a message to a put-away (or trashed) chat
+  restores it first.
+- **Merged** = the branch has commits of its own, no uncommitted edits (in
+  the folder or saved), and its tip is in the start branch, `origin/HEAD`,
+  `main` or `master`; or its pull request is merged with the same head commit
+  (covers squash merges).
+- **Sweep** (`SessionManager::sweep`): at start, hourly, and after any
+  process exits; never touches a chat whose process runs. Merged → folder and
+  branch removed, chat asks again at its next edit. No message for 14 days
+  (`worktree_idle_days`) → put away. Put away for 30 days (`trash_days`) →
+  branch and saved edits deleted. Trashed for 30 days → chat purged.
+  `HARNESS_WORKTREE_IDLE_SECONDS` and `HARNESS_TRASH_SECONDS` override both
+  for tests.
+- **Pull requests** via `gh pr list --head <branch> --state all --json
+  number,state,isDraft,url,headRefOid` (`github.rs`), after a turn (at most
+  once a minute per chat) and in the sweep (at most every 10 minutes). A repo
+  `gh` can't answer for isn't asked again until restart.
+- **Titles**: on a chat's first message, `claude -p --model haiku
+  --no-session-persistence --tools "" --system-prompt <name the chat>` writes
+  a title (about 1.5 s). Without its own system prompt Haiku answered "use
+  your Write tool…" with a tool call. A renamed chat (`title_source = 'user'`)
+  is never retitled.
+- **If Claude doesn't ask**, its changes go into the main folder, as
+  before worktrees existed.
+- **Self-test steps**: `@worktree <worktree|here|none>` answers the worktree card,
+  `@moved` waits for a turn to end in the worktree, `@turn` for any turn end.
 
 ### Session lifecycle (`sessions.rs`)
 

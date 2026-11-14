@@ -10,6 +10,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::events::AgentEvent;
+use crate::worktree::{PrInfo, Worktree};
 
 /// A chat's title is its first message, cut to this many characters.
 const TITLE_CHARS: usize = 60;
@@ -32,6 +33,36 @@ pub struct SessionRow {
     pub agent_session_id: Option<String>,
     /// Milliseconds since 1970.
     pub last_used_at: i64,
+    /// Where the chat's agent works when it has a worktree (live or put away).
+    pub work_path: Option<String>,
+    /// The worktree's branch.
+    pub branch: Option<String>,
+    /// "live" or "put_away"; None without a worktree.
+    pub wt_status: Option<String>,
+    /// The branch's pull request, as last seen.
+    pub pr: Option<PrInfo>,
+    /// When the chat was moved to the trash (ms); None when it isn't there.
+    pub trashed_at: Option<i64>,
+}
+
+/// Everything about a chat's git state, for the session manager and the sweep.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatGit {
+    pub id: String,
+    pub project_path: String,
+    pub title: String,
+    pub last_used_at: i64,
+    /// None = not asked yet; "worktree" or "here".
+    pub choice: Option<String>,
+    /// "live" or "put_away".
+    pub status: Option<String>,
+    pub worktree: Option<Worktree>,
+    pub put_away_at: Option<i64>,
+    pub pr: Option<PrInfo>,
+    /// The main folder's branch and commit when the chat began.
+    pub start_branch: Option<String>,
+    pub start_commit: Option<String>,
+    pub trashed_at: Option<i64>,
 }
 
 /// A project folder and its chats, newest first.
@@ -42,7 +73,7 @@ pub struct ProjectRow {
     pub sessions: Vec<SessionRow>,
 }
 
-fn now_ms() -> i64 {
+pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -63,10 +94,19 @@ fn title_from(text: &str) -> String {
     title
 }
 
-const SESSION_COLUMNS: &str =
-    "s.id, p.path, s.title, s.mode, s.model, s.agent_session_id, s.last_used_at";
+const SESSION_COLUMNS: &str = "s.id, p.path, s.title, s.mode, s.model, s.agent_session_id, \
+     s.last_used_at, s.wt, s.wt_status, s.pr, s.trashed_at";
+
+/// A JSON column read leniently: unreadable means absent.
+fn json_col<T: serde::de::DeserializeOwned>(row: &rusqlite::Row, i: usize) -> rusqlite::Result<Option<T>> {
+    let text: Option<String> = row.get(i)?;
+    Ok(text.and_then(|t| serde_json::from_str(&t).ok()))
+}
 
 fn session_from(row: &rusqlite::Row) -> rusqlite::Result<SessionRow> {
+    let worktree: Option<Worktree> = json_col(row, 7)?;
+    let wt_status: Option<String> = row.get(8)?;
+    let worktree = worktree.filter(|_| wt_status.is_some());
     Ok(SessionRow {
         id: row.get(0)?,
         project_path: row.get(1)?,
@@ -75,7 +115,69 @@ fn session_from(row: &rusqlite::Row) -> rusqlite::Result<SessionRow> {
         model: row.get(4)?,
         agent_session_id: row.get(5)?,
         last_used_at: row.get(6)?,
+        work_path: worktree.as_ref().map(|w| w.work_path().to_string_lossy().into_owned()),
+        branch: worktree.map(|w| w.branch),
+        wt_status,
+        pr: json_col(row, 9)?,
+        trashed_at: row.get(10)?,
     })
+}
+
+const GIT_COLUMNS: &str = "s.id, p.path, s.title, s.last_used_at, s.worktree_choice, s.wt_status, \
+     s.wt, s.wt_put_away_at, s.pr, s.start_branch, s.start_commit, s.trashed_at";
+
+fn git_from(row: &rusqlite::Row) -> rusqlite::Result<ChatGit> {
+    Ok(ChatGit {
+        id: row.get(0)?,
+        project_path: row.get(1)?,
+        title: row.get(2)?,
+        last_used_at: row.get(3)?,
+        choice: row.get(4)?,
+        status: row.get(5)?,
+        worktree: json_col(row, 6)?,
+        put_away_at: row.get(7)?,
+        pr: json_col(row, 8)?,
+        start_branch: row.get(9)?,
+        start_commit: row.get(10)?,
+        trashed_at: row.get(11)?,
+    })
+}
+
+/// Columns added after the first release, as (name, definition). Missing ones
+/// are added on open, so an older store upgrades in place.
+const ADDED_SESSION_COLUMNS: &[(&str, &str)] = &[
+    // "auto" (cut from the first message), "generated" or "user".
+    ("title_source", "TEXT NOT NULL DEFAULT 'auto'"),
+    // The main folder's branch (None when detached) and commit when the chat began.
+    ("start_branch", "TEXT"),
+    ("start_commit", "TEXT"),
+    // None = not asked yet; "worktree" or "here".
+    ("worktree_choice", "TEXT"),
+    // The chat's worktree as JSON (`worktree::Worktree`), kept while put away.
+    ("wt", "TEXT"),
+    // "live" or "put_away"; None = no worktree.
+    ("wt_status", "TEXT"),
+    ("wt_put_away_at", "INTEGER"),
+    // The branch's pull request as JSON (`worktree::PrInfo`).
+    ("pr", "TEXT"),
+    ("trashed_at", "INTEGER"),
+];
+
+fn migrate(conn: &Connection) -> Result<(), String> {
+    let existing: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('sessions')")
+        .map_err(err)?
+        .query_map([], |row| row.get(0))
+        .map_err(err)?
+        .collect::<Result<_, _>>()
+        .map_err(err)?;
+    for (name, definition) in ADDED_SESSION_COLUMNS {
+        if !existing.iter().any(|c| c == name) {
+            conn.execute_batch(&format!("ALTER TABLE sessions ADD COLUMN {name} {definition}"))
+                .map_err(err)?;
+        }
+    }
+    Ok(())
 }
 
 impl Store {
@@ -124,6 +226,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )
         .map_err(err)?;
+        migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -150,7 +253,7 @@ impl Store {
         let mut by_project = conn
             .prepare(&format!(
                 "SELECT {SESSION_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id
-                 WHERE s.project_id = ?1 ORDER BY s.last_used_at DESC"
+                 WHERE s.project_id = ?1 AND s.trashed_at IS NULL ORDER BY s.last_used_at DESC"
             ))
             .map_err(err)?;
         for project in &mut projects {
@@ -182,6 +285,7 @@ impl Store {
 
     /// Called for every message sent. Creates the project and the chat the first
     /// time (titled after `first_message`), and marks both as just used.
+    /// Returns true when the chat was created by this call.
     pub fn touch_session(
         &self,
         session_id: &str,
@@ -189,7 +293,7 @@ impl Store {
         first_message: &str,
         mode: &str,
         model: &str,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let now = now_ms();
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().map_err(err)?;
@@ -202,6 +306,11 @@ impl Store {
         let project_id: String = tx
             .query_row("SELECT id FROM projects WHERE path = ?1", [project_path], |r| r.get(0))
             .map_err(err)?;
+        let created = tx
+            .query_row("SELECT 1 FROM sessions WHERE id = ?1", [session_id], |_| Ok(()))
+            .optional()
+            .map_err(err)?
+            .is_none();
         // A chat stays in the folder it started in; later sends don't move it.
         tx.execute(
             "INSERT INTO sessions (id, project_id, title, mode, model, created_at, last_used_at)
@@ -210,7 +319,132 @@ impl Store {
             params![session_id, project_id, title_from(first_message), mode, model, now],
         )
         .map_err(err)?;
-        tx.commit().map_err(err)
+        tx.commit().map_err(err)?;
+        Ok(created)
+    }
+
+    /// Replaces the title cut from the first message with a written one. A chat
+    /// the user renamed keeps its name. Returns whether the title changed.
+    pub fn set_generated_title(&self, session_id: &str, title: &str) -> Result<bool, String> {
+        let title: String = title.trim().chars().take(TITLE_CHARS).collect();
+        if title.is_empty() {
+            return Ok(false);
+        }
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET title = ?2, title_source = 'generated'
+                 WHERE id = ?1 AND title_source = 'auto'",
+                params![session_id, title],
+            )
+            .map(|changed| changed > 0)
+            .map_err(err)
+    }
+
+    /// Chats in the trash, most recently trashed first.
+    pub fn trash(&self) -> Result<Vec<SessionRow>, String> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id
+                 WHERE s.trashed_at IS NOT NULL ORDER BY s.trashed_at DESC"
+            ))
+            .map_err(err)?
+            .query_map([], session_from)
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err);
+        rows
+    }
+
+    /// A chat's git state. None if the chat doesn't exist.
+    pub fn chat_git(&self, session_id: &str) -> Result<Option<ChatGit>, String> {
+        self.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                &format!(
+                    "SELECT {GIT_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id
+                     WHERE s.id = ?1"
+                ),
+                [session_id],
+                git_from,
+            )
+            .optional()
+            .map_err(err)
+    }
+
+    /// Every chat the cleanup sweep may act on: with a worktree, or in the trash.
+    pub fn sweep_list(&self) -> Result<Vec<ChatGit>, String> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .prepare(&format!(
+                "SELECT {GIT_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id
+                 WHERE s.wt_status IS NOT NULL OR s.trashed_at IS NOT NULL"
+            ))
+            .map_err(err)?
+            .query_map([], git_from)
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err);
+        rows
+    }
+
+    /// Where the main folder was when the chat began. Set once.
+    pub fn set_start(&self, session_id: &str, branch: Option<&str>, commit: &str) -> Result<(), String> {
+        self.exec(
+            "UPDATE sessions SET start_branch = ?2, start_commit = ?3 WHERE id = ?1",
+            params![session_id, branch, commit],
+        )
+    }
+
+    pub fn set_choice(&self, session_id: &str, choice: Option<&str>) -> Result<(), String> {
+        self.exec(
+            "UPDATE sessions SET worktree_choice = ?2 WHERE id = ?1",
+            params![session_id, choice],
+        )
+    }
+
+    /// Saves a chat's worktree as live (its folder exists) or put away.
+    pub fn set_worktree(&self, session_id: &str, worktree: &Worktree, status: &str) -> Result<(), String> {
+        let json = serde_json::to_string(worktree).map_err(|e| e.to_string())?;
+        let put_away_at = (status == "put_away").then(now_ms);
+        self.exec(
+            "UPDATE sessions SET wt = ?2, wt_status = ?3, wt_put_away_at = ?4 WHERE id = ?1",
+            params![session_id, json, status, put_away_at],
+        )
+    }
+
+    /// The chat no longer has a worktree, and will be asked again at its next edit.
+    pub fn clear_worktree(&self, session_id: &str) -> Result<(), String> {
+        self.exec(
+            "UPDATE sessions SET wt = NULL, wt_status = NULL, wt_put_away_at = NULL, pr = NULL,
+                 worktree_choice = NULL WHERE id = ?1",
+            params![session_id],
+        )
+    }
+
+    pub fn set_pr(&self, session_id: &str, pr: Option<&PrInfo>) -> Result<(), String> {
+        let json = pr.map(|p| serde_json::to_string(p).unwrap_or_default());
+        self.exec("UPDATE sessions SET pr = ?2 WHERE id = ?1", params![session_id, json])
+    }
+
+    /// Moves a chat to the trash (`Some(now)`) or back out (`None`).
+    pub fn set_trashed(&self, session_id: &str, at: Option<i64>) -> Result<(), String> {
+        self.exec(
+            "UPDATE sessions SET trashed_at = ?2 WHERE id = ?1",
+            params![session_id, at],
+        )
+    }
+
+    fn exec(&self, sql: &str, params: impl rusqlite::Params) -> Result<(), String> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(sql, params)
+            .map(|_| ())
+            .map_err(err)
     }
 
     pub fn set_agent_session_id(&self, session_id: &str, agent_session_id: &str) -> Result<(), String> {
@@ -294,7 +528,10 @@ impl Store {
         self.conn
             .lock()
             .unwrap()
-            .execute("UPDATE sessions SET title = ?2 WHERE id = ?1", params![session_id, title])
+            .execute(
+                "UPDATE sessions SET title = ?2, title_source = 'user' WHERE id = ?1",
+                params![session_id, title],
+            )
             .map(|_| ())
             .map_err(err)
     }
@@ -418,6 +655,100 @@ mod tests {
         assert_eq!(store.sidebar().unwrap()[0].sessions.len(), 1);
         store.delete_session("b").unwrap();
         assert!(store.sidebar().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_written_title_replaces_the_cut_one_but_never_a_rename() {
+        let store = Store::in_memory();
+        assert!(store.touch_session("a", "/p", "fix the thing please", "default", "default").unwrap());
+        assert!(!store.touch_session("a", "/p", "again", "default", "default").unwrap());
+        assert!(store.set_generated_title("a", " Fix the thing ").unwrap());
+        assert_eq!(store.session("a").unwrap().unwrap().title, "Fix the thing");
+        // Only once: a second written title doesn't replace the first.
+        assert!(!store.set_generated_title("a", "Other").unwrap());
+
+        store.touch_session("b", "/p", "hello", "default", "default").unwrap();
+        store.rename_session("b", "Mine").unwrap();
+        assert!(!store.set_generated_title("b", "Written").unwrap());
+        assert_eq!(store.session("b").unwrap().unwrap().title, "Mine");
+        assert!(!store.set_generated_title("b", "  ").unwrap());
+    }
+
+    #[test]
+    fn an_older_store_gains_the_new_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE projects (id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE,
+                 created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL);
+             CREATE TABLE sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+                 agent TEXT NOT NULL DEFAULT 'claude-code', agent_session_id TEXT,
+                 title TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'default',
+                 model TEXT NOT NULL DEFAULT 'default', created_at INTEGER NOT NULL,
+                 last_used_at INTEGER NOT NULL);
+             INSERT INTO projects VALUES ('p', '/old', 0, 0);
+             INSERT INTO sessions (id, project_id, title, created_at, last_used_at)
+                 VALUES ('s', 'p', 'Old chat', 0, 0);",
+        )
+        .unwrap();
+        let store = Store::with(conn).unwrap();
+        assert!(store.set_generated_title("s", "New name").unwrap());
+        assert_eq!(store.session("s").unwrap().unwrap().title, "New name");
+    }
+
+    fn worktree() -> Worktree {
+        Worktree {
+            repo_root: "/one".into(),
+            subpath: "web".into(),
+            path: "/wts/one-abc".into(),
+            branch: "harness/x-abc".into(),
+            base_commit: "c1".into(),
+            base_branch: Some("main".into()),
+        }
+    }
+
+    #[test]
+    fn a_worktree_is_saved_shown_and_cleared() {
+        let store = Store::in_memory();
+        store.touch_session("a", "/one/web", "A", "default", "default").unwrap();
+        store.set_start("a", Some("main"), "c1").unwrap();
+        store.set_choice("a", Some("worktree")).unwrap();
+        store.set_worktree("a", &worktree(), "live").unwrap();
+        let row = store.session("a").unwrap().unwrap();
+        assert_eq!(row.work_path.as_deref(), Some("/wts/one-abc/web"));
+        assert_eq!(row.branch.as_deref(), Some("harness/x-abc"));
+        assert_eq!(row.project_path, "/one/web");
+
+        let pr = PrInfo { number: 4, state: "open".into(), url: "u".into(), head: "h".into() };
+        store.set_pr("a", Some(&pr)).unwrap();
+        store.set_worktree("a", &worktree(), "put_away").unwrap();
+        let git = store.chat_git("a").unwrap().unwrap();
+        assert_eq!(git.status.as_deref(), Some("put_away"));
+        assert!(git.put_away_at.is_some());
+        assert_eq!(git.pr, Some(pr));
+        assert_eq!(git.worktree, Some(worktree()));
+        assert_eq!((git.start_branch.as_deref(), git.start_commit.as_deref()), (Some("main"), Some("c1")));
+        assert_eq!(store.sweep_list().unwrap().len(), 1);
+
+        store.clear_worktree("a").unwrap();
+        let git = store.chat_git("a").unwrap().unwrap();
+        assert_eq!((git.choice, git.status, git.worktree, git.pr), (None, None, None, None));
+        assert!(store.session("a").unwrap().unwrap().work_path.is_none());
+        assert!(store.sweep_list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn trashed_chats_leave_the_sidebar_and_can_come_back() {
+        let store = Store::in_memory();
+        store.touch_session("a", "/one", "A", "default", "default").unwrap();
+        store.touch_session("b", "/two", "B", "default", "default").unwrap();
+        store.set_trashed("b", Some(5)).unwrap();
+        let sidebar = store.sidebar().unwrap();
+        assert_eq!(sidebar.len(), 1, "a project with only trashed chats is hidden");
+        assert_eq!(store.trash().unwrap()[0].id, "b");
+        assert_eq!(store.sweep_list().unwrap().len(), 1);
+        store.set_trashed("b", None).unwrap();
+        assert_eq!(store.sidebar().unwrap().len(), 2);
+        assert!(store.trash().unwrap().is_empty());
     }
 
     #[test]

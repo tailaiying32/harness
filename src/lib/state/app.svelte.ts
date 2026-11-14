@@ -3,12 +3,16 @@
 
 import {
   deleteSession,
+  emptyTrash,
+  listTrash,
   loadSession,
   renameSession,
+  restoreChat,
   sidebar,
   type Envelope,
   type Mode,
   type ProjectRow,
+  type SessionRow,
   type SessionState,
 } from "../ipc";
 import { loadPrefs } from "../themes";
@@ -27,6 +31,8 @@ export type Dot = "working" | "waiting" | "unseen" | "idle";
 export class AppState {
   /** Every project that has chats, most recently used first. */
   projects = $state<ProjectRow[]>([]);
+  /** Chats in the trash, most recently trashed first. */
+  trash = $state<SessionRow[]>([]);
   /** The chat on screen. A new one isn't in the sidebar until its first message. */
   current = $state<Chat>(fresh());
   /** What each chat's process is doing, for chats used since the app started. */
@@ -61,8 +67,18 @@ export class AppState {
   route(envelope: Envelope): void {
     const { session_id: id, event } = envelope;
     if (event.kind === "status") this.statuses[id] = event.state;
+    // These change the chat's row (title, worktree, pull request).
+    if (
+      event.kind === "title_changed" ||
+      event.kind === "worktree_changed" ||
+      event.kind === "worktree_chosen" ||
+      event.kind === "pr_changed"
+    ) {
+      void this.refresh();
+    }
     this.chats.get(id)?.handle(event);
-    if (id !== this.current.sessionId && (event.kind === "turn_ended" || event.kind === "approval_request")) {
+    const needsYou = event.kind === "approval_request" || event.kind === "worktree_ask";
+    if (id !== this.current.sessionId && (event.kind === "turn_ended" || needsYou)) {
       this.unseen[id] = true;
     }
   }
@@ -76,9 +92,14 @@ export class AppState {
 
   async refresh(): Promise<void> {
     try {
-      this.projects = await sidebar();
+      [this.projects, this.trash] = await Promise.all([sidebar(), listTrash()]);
     } catch (e) {
       this.problem = String(e);
+      return;
+    }
+    // Open chats follow their rows: a worktree made, put away or merged, a PR.
+    for (const row of [...this.projects.flatMap((p) => p.sessions), ...this.trash]) {
+      this.chats.get(row.id)?.syncRow(row);
     }
   }
 
@@ -130,7 +151,33 @@ export class AppState {
     await this.refresh();
   }
 
-  /** Deletes a chat and its history for good. */
+  /** Takes a chat out of the trash. */
+  async restore(sessionId: string): Promise<void> {
+    this.problem = "";
+    try {
+      await restoreChat(sessionId);
+    } catch (e) {
+      this.problem = String(e);
+    }
+    await this.refresh();
+  }
+
+  /** Deletes every chat in the trash for good. */
+  async emptyTrash(): Promise<void> {
+    this.problem = "";
+    try {
+      await emptyTrash();
+    } catch (e) {
+      this.problem = String(e);
+    }
+    for (const row of this.trash) {
+      if (row.id !== this.current.sessionId) this.chats.delete(row.id);
+    }
+    if (this.trash.some((row) => row.id === this.current.sessionId)) this.newChat();
+    await this.refresh();
+  }
+
+  /** Moves a chat to the trash. */
   async remove(sessionId: string): Promise<void> {
     this.problem = "";
     try {

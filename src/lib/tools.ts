@@ -74,6 +74,8 @@ function wording(tool: ToolCall): [string, string, string] {
       return [`asked a question`, `Asking a question`, `ask a question`];
     case "ToolSearch":
       return [`looked up a tool`, `Looking up a tool`, `look up a tool`];
+    case "EnterWorktree":
+      return [`asked for a worktree`, `Asking for a worktree`, `ask for a worktree`];
     default:
       return [`used ${name}`, `Using ${name}`, `use ${name}`];
   }
@@ -83,8 +85,9 @@ function wording(tool: ToolCall): [string, string, string] {
 export const showsOutput = (tool: ToolCall) =>
   !tool.declined && (Boolean(tool.isError) || ["Bash", "Grep", "Glob", "WebSearch"].includes(tool.name));
 
-/** Plans and questions have their own card, which says how they went. */
-const hasOwnCard = (tool: ToolCall) => tool.name === "ExitPlanMode" || tool.name === "AskUserQuestion";
+/** Plans, questions and worktree requests have their own card, which says how they went. */
+const hasOwnCard = (tool: ToolCall) =>
+  tool.name === "ExitPlanMode" || tool.name === "AskUserQuestion" || tool.name === "EnterWorktree";
 
 /** True when the call never ran because the user said no. */
 export const skipped = (tool: ToolCall) => Boolean(tool.declined) && !hasOwnCard(tool);

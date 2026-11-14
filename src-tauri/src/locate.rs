@@ -30,10 +30,10 @@ fn existing(path: impl AsRef<Path>) -> Option<PathBuf> {
 /// Ask the user's login shell. Apps started from Finder don't get the terminal's
 /// PATH, so a plain PATH lookup misses anything set up in shell config files.
 #[cfg(unix)]
-fn from_login_shell() -> Option<PathBuf> {
+fn from_login_shell(name: &str) -> Option<PathBuf> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let output = Command::new(shell)
-        .args(["-lc", "command -v claude"])
+        .args(["-lc", &format!("command -v {name}")])
         .output()
         .ok()?;
     // Shell config files may print their own lines; the answer is the last one.
@@ -46,10 +46,10 @@ fn from_login_shell() -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
-fn from_login_shell() -> Option<PathBuf> {
+fn from_login_shell(name: &str) -> Option<PathBuf> {
     use std::os::windows::process::CommandExt;
     let output = Command::new("where")
-        .arg("claude")
+        .arg(name)
         .creation_flags(0x0800_0000)
         .output()
         .ok()?;
@@ -68,9 +68,35 @@ fn from_path() -> Option<PathBuf> {
 pub fn find_claude() -> Option<PathBuf> {
     std::env::var_os("HARNESS_CLAUDE_PATH")
         .and_then(existing)
-        .or_else(from_login_shell)
+        .or_else(|| from_login_shell("claude"))
         .or_else(|| home().and_then(|h| existing(h.join(".local").join("bin").join(BINARY))))
         .or_else(from_path)
+}
+
+/// A helper program (git, gh): its usual install spots first, then the login
+/// shell. Looked up once per run.
+fn find_tool(name: &str, usual: &[&str]) -> Option<PathBuf> {
+    usual
+        .iter()
+        .find_map(existing)
+        .or_else(|| from_login_shell(name))
+}
+
+/// git. On a Mac `/usr/bin/git` is always there (it offers to install the
+/// command line tools if they are missing).
+pub fn git() -> &'static Path {
+    static GIT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    GIT.get_or_init(|| {
+        find_tool("git", &["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"])
+            .unwrap_or_else(|| PathBuf::from("git"))
+    })
+}
+
+/// GitHub's command line tool, if installed. Without it, pull request status is off.
+pub fn gh() -> Option<&'static Path> {
+    static GH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    GH.get_or_init(|| find_tool("gh", &["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]))
+        .as_deref()
 }
 
 pub fn check_setup() -> SetupInfo {

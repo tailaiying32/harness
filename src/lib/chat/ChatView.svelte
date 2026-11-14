@@ -136,7 +136,7 @@
         <div class="block">
           <WorkRun
             tools={group.tools}
-            root={chat.projectPath}
+            root={chat.root}
             active={working && group === lastGroup}
             spinner={working && group === lastGroup ? spinner : ""}
             elapsed={working && group === lastGroup ? elapsed : 0}

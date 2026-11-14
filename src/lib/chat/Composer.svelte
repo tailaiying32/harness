@@ -2,8 +2,10 @@
   // The message box: a prompt marker, a plain text area, and one faint line of
   // context under it. Enter sends; Shift+Enter adds a line.
   import { onMount, tick } from "svelte";
+  import { openUrl } from "@tauri-apps/plugin-opener";
+  import BranchMark from "../BranchMark.svelte";
   import { pickFolder, type Mode, type ModelInfo } from "../ipc";
-  import { shortPath } from "../paths";
+  import { prLabel, shortPath } from "../paths";
   import type { Chat } from "../state/chat.svelte";
   import { savePrefs } from "../themes";
   import { indent, newLine, outdent, renumbered, type Edit } from "./editing";
@@ -159,6 +161,20 @@
         <button class="folder" onclick={changeFolder} title="Choose the folder this chat works in">
           {folder}
         </button>
+      {:else if chat.branch}
+        <!-- A chat with its own worktree: its branch, and its pull request if any. -->
+        <span class="folder branch" title="This chat works in its own worktree: {chat.workPath ?? ''}">
+          <BranchMark pr={chat.pr} />
+          {chat.branch}
+        </span>
+        {#if chat.pr}
+          {@const pr = chat.pr}
+          <button class="pr {pr.state}" onclick={() => openUrl(pr.url)} title="Open the pull request">
+            #{pr.number} {pr.state}
+          </button>
+        {:else}
+          <span title={prLabel(null)}>no PR</span>
+        {/if}
       {/if}
       <span class="spacer"></span>
       <select value={chat.modelChoice} onchange={(e) => pickModel(e.currentTarget.value)} aria-label="Model">
@@ -228,6 +244,23 @@
     min-width: 6ch;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .meta .branch {
+    display: flex;
+    align-items: center;
+    gap: 1ch;
+  }
+  .pr.open {
+    color: var(--ok);
+  }
+  .pr.draft {
+    color: var(--dim);
+  }
+  .pr.merged {
+    color: var(--purple);
+  }
+  .pr.closed {
+    color: var(--bad);
   }
   .meta .spacer {
     flex: 1 1 0;

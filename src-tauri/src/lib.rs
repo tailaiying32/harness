@@ -1,8 +1,10 @@
 mod agent;
 mod events;
+mod github;
 mod locate;
 mod sessions;
 mod store;
+mod worktree;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -63,10 +65,50 @@ async fn load_session(state: State<'_, AppState>, session_id: String) -> Result<
     })
 }
 
-/// Deletes a chat and its history for good.
+/// Moves a chat to the trash.
 #[tauri::command]
-fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    state.sessions.delete(&session_id)
+async fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let sessions = state.sessions.clone();
+    sessions.delete(&session_id).await
+}
+
+/// Chats in the trash, most recently trashed first.
+#[tauri::command]
+fn list_trash(state: State<'_, AppState>) -> Result<Vec<SessionRow>, String> {
+    state.sessions.list_trash()
+}
+
+/// Takes a chat out of the trash.
+#[tauri::command]
+fn restore_chat(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    state.sessions.restore_chat(&session_id)
+}
+
+/// Deletes every chat in the trash for good.
+#[tauri::command]
+async fn empty_trash(state: State<'_, AppState>) -> Result<(), String> {
+    let sessions = state.sessions.clone();
+    sessions.empty_trash().await
+}
+
+/// The answer to Claude's request for a worktree: "worktree" or "here".
+#[tauri::command]
+async fn choose_worktree(
+    state: State<'_, AppState>,
+    session_id: String,
+    request_id: String,
+    choice: String,
+) -> Result<(), String> {
+    let binary = state
+        .binary
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Claude Code couldn't be found")?;
+    let sessions = state.sessions.clone();
+    sessions
+        .choose_worktree(&session_id, &request_id, &choice, binary)
+        .await
 }
 
 /// Gives a chat a new title.
@@ -180,6 +222,8 @@ fn close_session(state: State<'_, AppState>, session_id: String) {
 /// Two more variables help tests without touching real data:
 ///   HARNESS_DATA_DIR           where the saved chats live (default: the app data folder)
 ///   HARNESS_IDLE_SECONDS       idle time before a chat's process is closed
+///   HARNESS_WORKTREE_IDLE_SECONDS  time without a message before a worktree is put away
+///   HARNESS_TRASH_SECONDS      how long put-away branches and trashed chats are kept
 #[derive(serde::Serialize)]
 struct AutoTest {
     folder: String,
@@ -240,8 +284,19 @@ pub fn run() {
                     }
                 })
             };
+            let sessions = SessionManager::new(Arc::new(ClaudeCodeAdapter), store.clone(), out, dir);
+            // The worktree cleanup pass: at start, then every hour.
+            {
+                let sessions = sessions.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        sessions.sweep().await;
+                        tokio::time::sleep(sessions::SWEEP_EVERY).await;
+                    }
+                });
+            }
             app.manage(AppState {
-                sessions: SessionManager::new(Arc::new(ClaudeCodeAdapter), store.clone(), out),
+                sessions,
                 store,
                 channel,
                 binary: Mutex::new(None),
@@ -254,6 +309,10 @@ pub fn run() {
             sidebar,
             load_session,
             delete_session,
+            list_trash,
+            restore_chat,
+            empty_trash,
+            choose_worktree,
             rename_session,
             send_message,
             answer_approval,

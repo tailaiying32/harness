@@ -3,7 +3,7 @@
 // look only. It is not part of the built app (the build starts from index.html).
 
 import { mount } from "svelte";
-import type { AgentEvent, ProjectRow, SessionRow } from "./lib/ipc";
+import type { AgentEvent, PrInfo, ProjectRow, SessionRow } from "./lib/ipc";
 import App from "./App.svelte";
 
 type Callback = (message: unknown) => void;
@@ -19,7 +19,14 @@ function emit(session_id: string, event: AgentEvent) {
 
 const home = "/Users/you";
 const now = Date.now();
-const row = (id: string, project_path: string, title: string, minutesAgo: number): SessionRow => ({
+const row = (
+  id: string,
+  project_path: string,
+  title: string,
+  minutesAgo: number,
+  branch: string | null = null,
+  pr: PrInfo["state"] | null = null,
+): SessionRow => ({
   id,
   project_path,
   title,
@@ -27,7 +34,18 @@ const row = (id: string, project_path: string, title: string, minutesAgo: number
   model: "default",
   agent_session_id: "agent-" + id,
   last_used_at: now - minutesAgo * 60_000,
+  work_path: branch ? `${home}/Library/Application Support/harness/worktrees/${id}` : null,
+  branch,
+  wt_status: branch ? "live" : null,
+  pr: pr ? { number: 40 + minutesAgo, state: pr, url: "https://github.com/you/harness/pull/1", head: "abc" } : null,
+  trashed_at: null,
 });
+
+/** Chats in the trash, for the sidebar's trash list. */
+let trash: SessionRow[] = [
+  { ...row("trashed1", `${home}/code/harness`, "Try a blur on the side panel", 4000), trashed_at: now - 3 * 86_400_000 },
+  { ...row("trashed2", `${home}/code/harness`, "Old spike: Electron comparison", 9000, "harness/old-spike-1a2b3c"), trashed_at: now - 29.5 * 86_400_000 },
+];
 
 let projects: ProjectRow[] = [
   {
@@ -35,18 +53,18 @@ let projects: ProjectRow[] = [
     path: `${home}/code/harness`,
     sessions: [
       row("planning", `${home}/code/harness`, "Idle timeout for chat processes", 1),
-      row("saved", `${home}/code/harness`, "Add a sidebar with saved chats", 2),
-      row("working", `${home}/code/harness`, "Why is the idle timer late when hidden?", 9),
+      row("saved", `${home}/code/harness`, "Add a sidebar with saved chats", 2, "harness/add-a-sidebar-9f2c1e", "open"),
+      row("working", `${home}/code/harness`, "Why is the idle timer late when hidden?", 9, "harness/idle-timer-late-4be0a1"),
       row("waiting", `${home}/code/harness`, "Bump dependencies and run the tests", 30),
-      row("unseen", `${home}/code/harness`, "Tidy the footer so it stays on one line", 55),
-      row("looks", `${home}/code/harness`, "Move the idle timer to the core", 70),
+      row("unseen", `${home}/code/harness`, "Tidy the footer so it stays on one line", 55, "harness/tidy-the-footer-77d3aa", "merged"),
+      row("looks", `${home}/code/harness`, "Move the idle timer to the core", 70, "harness/idle-timer-core-c01d5e", "draft"),
     ],
   },
   {
     id: "p2",
     path: `${home}/code/a-rather-long-folder-name/website`,
     sessions: [
-      row("old1", `${home}/code/a-rather-long-folder-name/website`, "Fix the broken image links on the pricing page", 600),
+      row("old1", `${home}/code/a-rather-long-folder-name/website`, "Fix the broken image links on the pricing page", 600, "harness/fix-the-broken-image-0aa1b2", "closed"),
       row("old2", `${home}/code/a-rather-long-folder-name/website`, "Draft the launch post", 2000),
       row("long", `${home}/code/a-rather-long-folder-name/website`, "A very long chat (300 turns)", 3000),
     ],
@@ -73,6 +91,34 @@ const result = (tool_id: string, content: string, is_error = false): AgentEvent 
   parent_tool_id: null,
 });
 const ended: AgentEvent = { kind: "turn_ended", ok: true, duration_ms: 4200 };
+
+/** A chat where Claude asked for a worktree, waiting for the answer. */
+const askingChat: AgentEvent[] = [
+  { kind: "user_message", text: "Bump dependencies and run the tests." },
+  { kind: "session_started", agent_session_id: "agent-waiting", model: "claude-fable-5-2", mode: "auto" },
+  tool("w1", "Read", { file_path: `${home}/code/harness/package.json` }),
+  result("w1", "…"),
+  tool("w2", "EnterWorktree", { name: "bump dependencies" }),
+  { kind: "worktree_ask", request_id: "wt-1", repo_root: `${home}/code/harness`, tool_id: "w2", name: "bump dependencies" },
+];
+
+/** A chat that moved to a worktree, then was put away and brought back. */
+const movedChat: AgentEvent[] = [
+  { kind: "user_message", text: "Why is the idle timer late when hidden?" },
+  { kind: "session_started", agent_session_id: "agent-working", model: "claude-fable-5-2", mode: "auto" },
+  tool("v1", "EnterWorktree", { name: "idle timer late" }),
+  { kind: "worktree_ask", request_id: "wt-2", repo_root: `${home}/code/harness`, tool_id: "v1", name: "idle timer late" },
+  { kind: "worktree_chosen", choice: "worktree" },
+  { kind: "worktree_changed", status: "created", branch: "harness/idle-timer-late-4be0a1" },
+  result("v1", "Harness is making this chat's worktree itself. Stop here; you will be told where to continue.", true),
+  text("v2", "Moved. The timer runs in the window, which the system slows down when hidden."),
+  ended,
+  { kind: "worktree_changed", status: "put_away", branch: "harness/idle-timer-late-4be0a1" },
+  { kind: "user_message", text: "Move it to the core then." },
+  { kind: "worktree_changed", status: "restored", branch: "harness/idle-timer-late-4be0a1" },
+  text("v3", "Done: the core now times it."),
+  ended,
+];
 
 const savedChat: AgentEvent[] = [
   { kind: "user_message", text: "Add a sidebar with saved chats. Keep the look." },
@@ -292,15 +338,36 @@ const commands: Record<string, (args: Args) => unknown> = {
   },
   check_setup: () => ({ binary: "claude", logged_in: true, subscription: "max", problem: null }),
   sidebar: () => projects,
+  list_trash: () => trash,
+  restore_chat: (args) => {
+    const chat = trash.find((s) => s.id === args.sessionId);
+    trash = trash.filter((s) => s.id !== args.sessionId);
+    if (chat) projects[0].sessions.unshift({ ...chat, trashed_at: null });
+  },
+  empty_trash: () => {
+    trash = [];
+  },
+  choose_worktree: (args) => {
+    emit(args.sessionId, { kind: "worktree_chosen", choice: args.choice });
+    if (args.choice === "worktree") {
+      emit(args.sessionId, { kind: "worktree_changed", status: "created", branch: "harness/bump-dependencies-5e6f7a" });
+      for (const p of projects)
+        for (const s of p.sessions)
+          if (s.id === args.sessionId) Object.assign(s, row(s.id, s.project_path, s.title, 0, "harness/bump-dependencies-5e6f7a"));
+    }
+    finish(args.sessionId);
+  },
   load_session: (args) => ({
-    session: projects.flatMap((p) => p.sessions).find((s) => s.id === args.sessionId),
-    events: args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : args.sessionId === "looks" ? looksChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
-    live: args.sessionId === "planning",
+    session: [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === args.sessionId),
+    events: args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : args.sessionId === "looks" ? looksChat : args.sessionId === "waiting" ? askingChat : args.sessionId === "working" ? movedChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
+    live: args.sessionId === "planning" || args.sessionId === "waiting",
   }),
   rename_session: (args) => {
     for (const p of projects) for (const s of p.sessions) if (s.id === args.sessionId) s.title = args.title.trim();
   },
   delete_session: (args) => {
+    const chat = projects.flatMap((p) => p.sessions).find((s) => s.id === args.sessionId);
+    if (chat) trash = [{ ...chat, trashed_at: Date.now() }, ...trash];
     projects = projects
       .map((p) => ({ ...p, sessions: p.sessions.filter((s) => s.id !== args.sessionId) }))
       .filter((p) => p.sessions.length > 0);
@@ -355,3 +422,16 @@ const commands: Record<string, (args: Args) => unknown> = {
 };
 
 mount(App, { target: document.getElementById("app")! });
+
+// For screenshots: `#open=<chat id>` opens that chat, and `&trash` opens the
+// sidebar's trash list.
+const wanted = new URLSearchParams(location.hash.slice(1));
+setTimeout(() => {
+  const title = [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === wanted.get("open"))?.title;
+  if (wanted.has("trash")) document.querySelector<HTMLButtonElement>("aside .trash button")?.click();
+  setTimeout(() => {
+    if (!title) return;
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>("aside button.open")];
+    buttons.find((b) => b.textContent?.includes(title))?.click();
+  }, 100);
+}, 400);

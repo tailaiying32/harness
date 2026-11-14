@@ -10,7 +10,9 @@
 
   const call = $derived({ toolId: "", name: item.toolName, input: item.input });
   const diff = $derived(diffLines(call));
-  const target = $derived(title(call, chat.projectPath).target);
+  const target = $derived(title(call, chat.root).target);
+  /** For the worktree question: the repo's folder name. */
+  const repoName = $derived((item.repoRoot ?? "").split(/[\\/]/).filter(Boolean).pop() ?? "this repo");
 
   type Question = {
     question: string;
@@ -69,7 +71,29 @@
   const closed = $derived(Boolean(item.answered) || Boolean(item.cancelled));
 </script>
 
-{#if closed && item.approval === "tool"}
+{#if item.approval === "worktree"}
+  {#if closed}
+    <!-- "New worktree" is followed by the chat's own note naming the branch. -->
+    {#if item.cancelled}
+      <div class="done">cancelled · worktree question</div>
+    {:else if item.choice === "here"}
+      <div class="done">working here in {repoName}</div>
+    {/if}
+  {:else}
+    <!-- Claude asked to do this work in a worktree; it waits for the answer. -->
+    <div class="approval">
+      <div class="head"><span class="accent">Worktree</span> · Claude wants a separate worktree for this work</div>
+      {#if item.workName}<div class="bright command">{item.workName}</div>{/if}
+      <div class="dim">
+        A new branch in its own folder, so other chats in {repoName} aren't touched. Or keep working here.
+      </div>
+      <div class="actions">
+        <button class="primary" onclick={() => chat.chooseWorktree(item, "worktree")}>New worktree</button>
+        <button onclick={() => chat.chooseWorktree(item, "here")}>Work here</button>
+      </div>
+    </div>
+  {/if}
+{:else if closed && item.approval === "tool"}
   <!-- Once answered, a tool approval shrinks to one line; the folded run shows the work. -->
   <div class="done">
     <span class:denied={item.answered === "deny"}>{outcome}</span> · {item.toolName}

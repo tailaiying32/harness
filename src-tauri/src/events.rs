@@ -134,6 +134,35 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    /// The chat got a written title. Not saved: the store holds the title.
+    TitleChanged {
+        title: String,
+    },
+    /// The agent asked to work in a worktree, and waits while the user picks:
+    /// a new worktree, or this folder.
+    WorktreeAsk {
+        request_id: String,
+        repo_root: String,
+        /// The request's tool call, so the chat can fold it away.
+        tool_id: Option<String>,
+        /// The name the agent suggested, used for the branch.
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// The user's pick: "worktree" or "here".
+    WorktreeChosen {
+        choice: String,
+    },
+    /// The chat's worktree changed: "created", "restored", "put_away",
+    /// "merged" or "gone".
+    WorktreeChanged {
+        status: String,
+        branch: Option<String>,
+    },
+    /// The worktree branch's pull request changed. Not saved: the store holds it.
+    PrChanged {
+        pr: Option<crate::worktree::PrInfo>,
+    },
 }
 
 impl AgentEvent {
@@ -146,6 +175,8 @@ impl AgentEvent {
                 | AgentEvent::UsageUpdate { .. }
                 | AgentEvent::Status { .. }
                 | AgentEvent::BackgroundWork { .. }
+                | AgentEvent::TitleChanged { .. }
+                | AgentEvent::PrChanged { .. }
         )
     }
 

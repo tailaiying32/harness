@@ -19,6 +19,7 @@
     subscribe,
     type Decision,
     type Mode,
+    type WorktreeChoice,
     type SetupInfo,
   } from "./lib/ipc";
   import { loadCachedModels, saveCachedModels } from "./lib/models";
@@ -105,6 +106,7 @@
     const modelsUsed: (string | null)[] = [];
     const modesAfter: string[] = [];
     let answer: Decision | null = "allow";
+    let worktreeAnswer: WorktreeChoice | null = null;
     let stopAfter = 0;
     let background = false;
     // Timed by the core: a hidden window's own timers run late.
@@ -127,6 +129,10 @@
       // Lines starting with `@` steer the test instead of being sent:
       //   @model <name>, @mode <mode>
       //   @answer <allow|always_allow|deny|none>  how approvals are answered from here on
+      //   @worktree <worktree|here|none>  how the worktree card is answered
+      //   @turn          wait for the open chat's next turn to end (after a move to a
+      //                  worktree, the chat carries on in a new turn by itself)
+      //   @moved         wait for a turn to end with the chat in its worktree
       //   @stop <ms>     press stop that long into the next message
       //   @background    send the next message without waiting for its answer
       //   @new           start a new chat in the same folder
@@ -138,11 +144,25 @@
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
-        message.match(/^@(model|mode|answer|stop|background|new|open|delete|close|exited|wait)(?:\s+(\S+))?$/) ?? [];
+        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait)(?:\s+(\S+))?$/) ??
+        [];
       const current = app.current;
       if (directive === "model") await current.changeModel(value);
       if (directive === "mode") await current.changeMode(value as Mode);
       if (directive === "answer") answer = value === "none" ? null : (value as Decision);
+      if (directive === "worktree") worktreeAnswer = value === "none" ? null : (value as WorktreeChoice);
+      if (directive === "moved") {
+        await new Promise<void>((resolve) => {
+          current.onTurnEnd = () => {
+            if (current.workPath) resolve();
+          };
+        });
+        current.onTurnEnd = null;
+      }
+      if (directive === "turn") {
+        await new Promise<void>((resolve) => (current.onTurnEnd = resolve));
+        current.onTurnEnd = null;
+      }
       if (directive === "stop") stopAfter = Number(value);
       if (directive === "background") background = true;
       if (directive === "new") app.newChat();
@@ -157,6 +177,7 @@
       }
 
       current.autoAnswer = answer;
+      current.autoWorktree = worktreeAnswer;
       const done = new Promise<void>((resolve) => (current.onTurnEnd = resolve));
       await current.send(message);
       if (stopAfter) void pause(stopAfter).then(() => current.stop());
@@ -187,6 +208,8 @@
           statuses: app.statuses,
           dots: app.projects.flatMap((p) => p.sessions).map((s) => [s.title, app.dot(s.id)]),
           status: current.status,
+          worktree: { branch: current.branch, workPath: current.workPath, pr: current.pr },
+          trash: app.trash.map((s) => s.title),
           modelsOffered: models.map((m) => m.name),
           usage: current.usage,
           panel: {

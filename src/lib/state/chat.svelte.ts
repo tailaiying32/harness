@@ -2,6 +2,7 @@
 
 import {
   answerApproval,
+  chooseWorktree,
   interrupt,
   sendMessage,
   setMode,
@@ -10,8 +11,11 @@ import {
   type ApprovalKind,
   type Decision,
   type Mode,
+  type PrInfo,
   type SessionRow,
   type SessionState,
+  type WorktreeChoice,
+  type WorktreeStatus,
 } from "../ipc";
 import { docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
 
@@ -31,7 +35,8 @@ export type ApprovalItem = {
   id: number;
   type: "approval";
   requestId: string;
-  approval: ApprovalKind;
+  /** "worktree": Claude asked for a worktree; the app shows it as its own card. */
+  approval: ApprovalKind | "worktree";
   toolName: string;
   title: string;
   input: unknown;
@@ -44,6 +49,10 @@ export type ApprovalItem = {
   answers?: Record<string, string>;
   /** Withdrawn before it was answered, e.g. the turn was stopped. */
   cancelled?: boolean;
+  /** For the worktree question: the repo, the agent's name for the work, and what was picked. */
+  repoRoot?: string;
+  workName?: string;
+  choice?: WorktreeChoice;
 };
 export type ErrorItem = { id: number; type: "error"; text: string };
 /** A faint one-line remark from the app, e.g. "stopped". */
@@ -65,6 +74,22 @@ type NewItem =
   | Omit<ApprovalItem, "id">
   | Omit<ErrorItem, "id">
   | Omit<NoteItem, "id">;
+
+/** What the chat says when its worktree changes. */
+function worktreeNote(status: WorktreeStatus, branch: string | null): string {
+  switch (status) {
+    case "created":
+      return `working in a new worktree · ${branch ?? ""}`;
+    case "restored":
+      return "worktree brought back";
+    case "put_away":
+      return "worktree put away while idle · edits kept; your next message brings it back";
+    case "merged":
+      return "branch merged · worktree and branch removed";
+    case "gone":
+      return "put-away worktree deleted";
+  }
+}
 
 /** How an answered plan went, in a few words. */
 export function planOutcome(item: ApprovalItem): string {
@@ -106,6 +131,7 @@ export class Chat {
   static fromSaved(row: SessionRow, events: AgentEvent[], live: boolean): Chat {
     const chat = new Chat(row.id);
     chat.projectPath = row.project_path;
+    chat.syncRow(row);
     chat.replaying = true;
     for (const event of events) chat.handle(event);
     chat.replaying = false;
@@ -133,6 +159,21 @@ export class Chat {
   mode = $state<Mode>("default");
   usage = $state<{ window: string | null; utilization: number } | null>(null);
   projectPath = $state("");
+  /** Where the agent works when the chat has a worktree; null otherwise. */
+  workPath = $state<string | null>(null);
+  /** The worktree's branch, and its pull request as last seen. */
+  branch = $state<string | null>(null);
+  pr = $state<PrInfo | null>(null);
+  /** The folder paths are shown relative to: the worktree if there is one. */
+  get root(): string {
+    return this.workPath ?? this.projectPath;
+  }
+  /** Takes the saved row's worktree details (they change outside the chat's events). */
+  syncRow(row: SessionRow): void {
+    this.workPath = row.work_path;
+    this.branch = row.branch;
+    this.pr = row.pr;
+  }
   /** When the current turn began, for the elapsed-time counter. */
   turnStartedAt = $state<number | null>(null);
 
@@ -213,6 +254,8 @@ export class Chat {
   onSent: (() => void) | null = null;
   /** Answer every approval this way. Used by the self-test only. */
   autoAnswer: Decision | null = null;
+  /** Answer the worktree question this way. Used by the self-test only. */
+  autoWorktree: WorktreeChoice | null = null;
 
   private nextId = 0;
   // Live text arrives in many small pieces. They are collected here and applied
@@ -356,6 +399,40 @@ export class Chat {
         break;
       }
 
+      case "worktree_ask": {
+        const item = this.push<ApprovalItem>({
+          type: "approval",
+          requestId: event.request_id,
+          approval: "worktree",
+          toolName: "",
+          title: "",
+          input: null,
+          toolId: event.tool_id,
+          alwaysLabel: null,
+          repoRoot: event.repo_root,
+          workName: event.name ?? undefined,
+        });
+        if (this.autoWorktree) void this.chooseWorktree(item, this.autoWorktree);
+        break;
+      }
+
+      // The core's record of the pick. Live, the card already shows it.
+      case "worktree_chosen": {
+        const item = [...this.items]
+          .reverse()
+          .find((i): i is ApprovalItem => i.type === "approval" && i.approval === "worktree");
+        if (item && !item.answered) this.markChosen(item, event.choice);
+        break;
+      }
+
+      case "worktree_changed":
+        this.push({ type: "note", text: worktreeNote(event.status, event.branch) });
+        break;
+
+      case "pr_changed":
+        this.pr = event.pr;
+        break;
+
       case "approval_cancelled": {
         const item = this.items.find(
           (i): i is ApprovalItem => i.type === "approval" && i.requestId === event.request_id,
@@ -444,6 +521,23 @@ export class Chat {
     } catch (e) {
       this.push({ type: "error", text: String(e) });
     }
+  }
+
+  /** The answer to the worktree question. */
+  async chooseWorktree(item: ApprovalItem, choice: WorktreeChoice): Promise<void> {
+    try {
+      await chooseWorktree(this.sessionId, item.requestId, choice);
+      if (!item.answered) this.markChosen(item, choice);
+    } catch (e) {
+      this.push({ type: "error", text: String(e) });
+    }
+  }
+
+  private markChosen(item: ApprovalItem, choice: WorktreeChoice): void {
+    item.answered = "allow";
+    item.choice = choice;
+    // Either way Claude Code's own worktree tool doesn't run.
+    this.markDeclined(item);
   }
 
   private cancel(item: ApprovalItem): void {

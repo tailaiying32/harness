@@ -1,6 +1,9 @@
 //! Keeps track of chats and their live agent processes: start on the first
 //! message, resume after an exit, shut a process down once its chat has been
 //! idle for a while, and save what happens. See PLAN.md, "Session lifecycle".
+//! Worktrees and the trash are in `sessions/worktrees.rs`.
+
+mod worktrees;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -10,6 +13,9 @@ use std::time::{Duration, Instant};
 use crate::agent::{AgentAdapter, EventSink, RunningAgent, SpawnOptions};
 use crate::events::{AgentEvent, Decision, Envelope, SessionState};
 use crate::store::Store;
+use crate::worktree;
+
+pub use worktrees::{PrLookup, SWEEP_EVERY};
 
 /// Where every chat's events go once saved: the window.
 pub type Out = Arc<dyn Fn(Envelope) + Send + Sync>;
@@ -31,6 +37,9 @@ struct Timings {
     /// Fixed idle time. None = the environment or the settings decide.
     idle: Option<Duration>,
     close_grace: Duration,
+    /// Fixed worktree idle limit and keep time. None = environment or settings.
+    worktree_idle: Option<Duration>,
+    keep: Option<Duration>,
 }
 
 #[derive(Default)]
@@ -52,6 +61,21 @@ struct Session {
     /// The process has background commands or agents running. An idle chat
     /// with any is kept open: closing it would end them.
     background: bool,
+    /// The repo the chat's process runs in; None outside one.
+    repo_root: Option<PathBuf>,
+    /// The agent's request for a worktree, while it waits for the user.
+    ask: Option<Ask>,
+}
+
+/// The agent asked for a worktree, and waits for the user's answer.
+struct Ask {
+    repo_root: PathBuf,
+    /// Requests waiting for the answer, as (request ID, the request).
+    held: Vec<(String, AgentEvent)>,
+    /// The request ID naming the question on screen.
+    card: String,
+    /// The name the agent suggested, used for the branch.
+    name: Option<String>,
 }
 
 struct Inner {
@@ -62,21 +86,39 @@ struct Inner {
     /// Starting a process is not instant; two sends must not both start one.
     start_lock: tokio::sync::Mutex<()>,
     timings: Timings,
+    /// The app's data folder; worktrees are kept in it.
+    data_dir: PathBuf,
+    /// Finds a branch's pull request (GitHub in the app, a stand-in in tests).
+    pr_lookup: PrLookup,
+    /// One cleanup sweep at a time.
+    sweep_lock: tokio::sync::Mutex<()>,
+    /// When each chat's pull request was last looked up.
+    pr_checked: Mutex<HashMap<String, Instant>>,
 }
 
 #[derive(Clone)]
 pub struct SessionManager(Arc<Inner>);
 
 impl SessionManager {
-    pub fn new(adapter: Arc<dyn AgentAdapter>, store: Arc<Store>, out: Out) -> Self {
+    pub fn new(adapter: Arc<dyn AgentAdapter>, store: Arc<Store>, out: Out, data_dir: PathBuf) -> Self {
         let timings = Timings {
             idle: None,
             close_grace: CLOSE_GRACE,
+            worktree_idle: None,
+            keep: None,
         };
-        Self::build(adapter, store, out, timings)
+        let pr_lookup: PrLookup = Arc::new(crate::github::pr_for);
+        Self::build(adapter, store, out, timings, data_dir, pr_lookup)
     }
 
-    fn build(adapter: Arc<dyn AgentAdapter>, store: Arc<Store>, out: Out, timings: Timings) -> Self {
+    fn build(
+        adapter: Arc<dyn AgentAdapter>,
+        store: Arc<Store>,
+        out: Out,
+        timings: Timings,
+        data_dir: PathBuf,
+        pr_lookup: PrLookup,
+    ) -> Self {
         Self(Arc::new(Inner {
             adapter,
             store,
@@ -84,6 +126,10 @@ impl SessionManager {
             sessions: Mutex::default(),
             start_lock: tokio::sync::Mutex::default(),
             timings,
+            data_dir,
+            pr_lookup,
+            sweep_lock: tokio::sync::Mutex::default(),
+            pr_checked: Mutex::default(),
         }))
     }
 
@@ -124,6 +170,7 @@ impl SessionManager {
     /// `mode` and `model` are saved with the chat; they are passed to the agent
     /// only when a process has to be started (a running one is switched with
     /// `set_mode` and `set_model`).
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_message(
         &self,
         session_id: &str,
@@ -133,6 +180,24 @@ impl SessionManager {
         model: Option<String>,
         text: &str,
         message_id: &str,
+    ) -> Result<(), String> {
+        self.send_inner(session_id, binary, project_path, mode, model, text, message_id, true)
+            .await
+    }
+
+    /// `show` false sends a note from the app to the agent that the chat
+    /// doesn't show or save as a user message.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_inner(
+        &self,
+        session_id: &str,
+        binary: PathBuf,
+        project_path: PathBuf,
+        mode: Option<String>,
+        model: Option<String>,
+        text: &str,
+        message_id: &str,
+        show: bool,
     ) -> Result<(), String> {
         let inner = &self.0;
 
@@ -148,25 +213,37 @@ impl SessionManager {
             .and_then(|s| s.agent.clone());
         if let Some(agent) = closing {
             agent.stop();
-            let deadline = Instant::now() + STOP_WAIT;
-            while self.is_live(session_id) {
-                if Instant::now() > deadline {
-                    return Err("This chat's old process didn't stop. Try again in a moment.".to_string());
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
+            self.wait_for_exit(session_id).await?;
         }
 
         let _starting = inner.start_lock.lock().await;
 
         // Save the chat first, so its events have somewhere to go.
-        inner.store.touch_session(
+        let created = inner.store.touch_session(
             session_id,
             &project_path.to_string_lossy(),
             text,
             mode.as_deref().unwrap_or("default"),
             model.as_deref().unwrap_or("default"),
         )?;
+        // Recorded before any worktree is brought back, so the history reads
+        // in the order it happened on screen.
+        if show {
+            self.record(
+                session_id,
+                AgentEvent::UserMessage {
+                    text: text.to_string(),
+                    id: Some(message_id.to_string()),
+                },
+            );
+        }
+        if created {
+            let folder = project_path.clone();
+            if let Some((branch, commit)) = blocking(move || worktree::head_of(&folder)).await {
+                let _ = inner.store.set_start(session_id, branch.as_deref(), &commit);
+            }
+            self.write_title(session_id, binary.clone(), text);
+        }
 
         let (running, run) = {
             let mut sessions = inner.sessions.lock().unwrap();
@@ -179,22 +256,33 @@ impl SessionManager {
         };
 
         if !running {
-            let resume_id = inner
-                .store
-                .session(session_id)?
-                .and_then(|s| s.agent_session_id);
+            let saved = inner.store.session(session_id)?;
+            let resume_id = saved.as_ref().and_then(|s| s.agent_session_id.clone());
+            // A saved chat runs where its row says: its worktree if it has one,
+            // brought back first if it was put away.
+            let folder = self.work_folder(session_id, &project_path).await;
+            self.note_repo(session_id, &folder).await;
             // Not under the sessions lock: starting reports "starting" through
             // the sink, which takes that lock.
             let agent = inner.adapter.spawn(
                 SpawnOptions {
                     binary,
-                    project_path,
+                    project_path: folder,
                     resume_id,
                     mode,
                     model,
                 },
                 self.sink(session_id, run),
-            )?;
+            );
+            let agent = match agent {
+                Ok(agent) => agent,
+                Err(e) => {
+                    if let Some(session) = inner.sessions.lock().unwrap().get_mut(session_id) {
+                        session.busy = false;
+                    }
+                    return Err(e);
+                }
+            };
             let mut sessions = inner.sessions.lock().unwrap();
             if let Some(session) = sessions.get_mut(session_id) {
                 // If it already died, its exit was reported; don't keep a dead handle.
@@ -204,22 +292,54 @@ impl SessionManager {
             }
         }
 
-        self.record(
-            session_id,
-            AgentEvent::UserMessage {
-                text: text.to_string(),
-                id: Some(message_id.to_string()),
-            },
-        );
         self.agent(session_id)?.send_user_message(text, message_id)
+    }
+
+    /// Waits for the chat's process to be gone, after a stop.
+    async fn wait_for_exit(&self, session_id: &str) -> Result<(), String> {
+        let deadline = Instant::now() + STOP_WAIT;
+        while self.is_live(session_id) {
+            if Instant::now() > deadline {
+                return Err("This chat's old process didn't stop. Try again in a moment.".to_string());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok(())
+    }
+
+    /// Asks the agent for a short title in the background. Until it arrives, or
+    /// if it fails, the chat keeps the title cut from its first message.
+    fn write_title(&self, session_id: &str, binary: PathBuf, first_message: &str) {
+        let manager = self.clone();
+        let id = session_id.to_string();
+        let message = first_message.to_string();
+        tokio::spawn(async move {
+            let adapter = manager.0.adapter.clone();
+            let title = tokio::task::spawn_blocking(move || adapter.make_title(&binary, &message)).await;
+            let Ok(Ok(title)) = title else {
+                return;
+            };
+            if manager.0.store.set_generated_title(&id, &title).unwrap_or(false) {
+                manager.record(&id, AgentEvent::TitleChanged { title });
+            }
+        });
     }
 
     /// What a process's events pass through: bookkeeping, saving, then the window.
     fn sink(&self, session_id: &str, run: u64) -> EventSink {
         let manager = self.clone();
         let id = session_id.to_string();
-        Arc::new(move |mut event: AgentEvent| {
+        Arc::new(move |event: AgentEvent| {
             let store = &manager.0.store;
+            // A deleted chat's process may still talk while it stops; drop that.
+            if !manager.0.sessions.lock().unwrap().contains_key(&id) {
+                return;
+            }
+            // The agent's request for a worktree waits for the user's answer.
+            let Some(event) = manager.screen_worktree_call(&id, event) else {
+                return;
+            };
+            let mut event = event;
             match &event {
                 // Saved at once, so a crash before the turn ends can still resume.
                 AgentEvent::SessionStarted {
@@ -237,6 +357,7 @@ impl SessionManager {
                 }
                 AgentEvent::Status { state } => manager.on_state(&id, run, state),
                 AgentEvent::BackgroundWork { running } => manager.on_background(&id, run, *running > 0),
+                AgentEvent::TurnEnded { .. } => manager.after_turn(&id),
                 _ => {}
             }
             event.cap_tool_result(TOOL_RESULT_MAX_CHARS);
@@ -261,6 +382,13 @@ impl SessionManager {
                 session.closing = false;
                 session.busy = false;
                 session.background = false;
+                // A waiting request went with the process; close its question.
+                let card = session.ask.take().map(|a| a.card);
+                drop(sessions);
+                if let Some(request_id) = card {
+                    self.record(session_id, AgentEvent::ApprovalCancelled { request_id });
+                }
+                self.sweep_soon();
             }
             SessionState::Idle => {
                 session.busy = false;
@@ -415,20 +543,24 @@ impl SessionManager {
             .is_some_and(|s| s.agent.is_some())
     }
 
-    /// Removes a chat for good: its process is stopped (with any background
-    /// work) and its history deleted.
-    pub fn delete(&self, session_id: &str) -> Result<(), String> {
+    /// Moves a chat to the trash: its process is stopped (with any background
+    /// work) and its worktree put away. Its history stays until the trash is
+    /// emptied (see `worktrees.rs`).
+    pub async fn delete(&self, session_id: &str) -> Result<(), String> {
         let agent = self
             .0
             .sessions
             .lock()
             .unwrap()
-            .remove(session_id)
-            .and_then(|s| s.agent);
+            .get(session_id)
+            .and_then(|s| s.agent.clone());
         if let Some(agent) = agent {
             agent.stop();
+            // Its folder may be put away next; let the process finish first.
+            let _ = self.wait_for_exit(session_id).await;
         }
-        self.0.store.delete_session(session_id)
+        self.0.sessions.lock().unwrap().remove(session_id);
+        self.trash(session_id).await
     }
 
     pub fn rename(&self, session_id: &str, title: &str) -> Result<(), String> {
@@ -483,10 +615,16 @@ impl SessionManager {
     }
 }
 
+/// Runs blocking work (git, files) off the async threads.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::task::spawn_blocking(work).await.expect("background work failed")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::events::ModelInfo;
+    use crate::worktree::PrInfo;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -495,6 +633,8 @@ mod tests {
     #[derive(Default)]
     struct Fake {
         spawns: Mutex<Vec<(Option<String>, Option<String>)>>, // (resume id, mode)
+        /// Each start's folder.
+        folders: Mutex<Vec<PathBuf>>,
         sinks: Mutex<Vec<EventSink>>,
         told: Arc<Mutex<Vec<String>>>,
         /// Plays a process that ignores being asked to exit.
@@ -518,11 +658,12 @@ mod tests {
         fn answer_approval(
             &self,
             request_id: &str,
-            _: Decision,
+            decision: Decision,
             _: Option<String>,
             _: Option<BTreeMap<String, String>>,
         ) -> Result<(), String> {
-            self.told.lock().unwrap().push(format!("answer {request_id}"));
+            let decision = format!("{decision:?}").to_lowercase();
+            self.told.lock().unwrap().push(format!("answer {request_id} {decision}"));
             (self.sink)(AgentEvent::Status {
                 state: SessionState::Working,
             });
@@ -560,6 +701,7 @@ mod tests {
     impl AgentAdapter for Fake {
         fn spawn(&self, opts: SpawnOptions, sink: EventSink) -> Result<Box<dyn RunningAgent>, String> {
             self.spawns.lock().unwrap().push((opts.resume_id, opts.mode));
+            self.folders.lock().unwrap().push(opts.project_path);
             self.sinks.lock().unwrap().push(sink.clone());
             sink(AgentEvent::Status {
                 state: SessionState::Starting,
@@ -573,6 +715,9 @@ mod tests {
         fn list_models(&self, _: &Path) -> Result<Vec<ModelInfo>, String> {
             Ok(Vec::new())
         }
+        fn make_title(&self, _: &Path, first_message: &str) -> Result<String, String> {
+            Ok(format!("Written: {first_message}"))
+        }
     }
 
     struct Rig {
@@ -583,6 +728,10 @@ mod tests {
     }
 
     fn rig(idle: Duration) -> Rig {
+        rig_with(idle, LONG, LONG, Arc::new(|_: &Path, _: &str| Ok(None)))
+    }
+
+    fn rig_with(idle: Duration, worktree_idle: Duration, keep: Duration, lookup: PrLookup) -> Rig {
         let fake = Arc::new(Fake::default());
         let dir = std::env::temp_dir().join(format!("harness-test-{}", uuid::Uuid::new_v4()));
         let store = Arc::new(Store::open(&dir).unwrap());
@@ -594,8 +743,10 @@ mod tests {
         let timings = Timings {
             idle: Some(idle),
             close_grace: Duration::from_millis(100),
+            worktree_idle: Some(worktree_idle),
+            keep: Some(keep),
         };
-        let manager = SessionManager::build(fake.clone(), store.clone(), out, timings);
+        let manager = SessionManager::build(fake.clone(), store.clone(), out, timings, dir, lookup);
         Rig {
             fake,
             store,
@@ -645,7 +796,9 @@ mod tests {
         assert_eq!(*rig.fake.spawns.lock().unwrap(), vec![(None, Some("plan".to_string()))]);
         assert_eq!(rig.told(), vec!["say Hello there"]);
         let chat = rig.store.session("s1").unwrap().unwrap();
-        assert_eq!((chat.title.as_str(), chat.mode.as_str()), ("Hello there", "plan"));
+        // The cut title, or the written one if it already arrived.
+        assert!(chat.title.ends_with("Hello there"));
+        assert_eq!(chat.mode, "plan");
         assert_eq!(
             rig.store.events("s1").unwrap(),
             vec![AgentEvent::UserMessage {
@@ -656,6 +809,19 @@ mod tests {
         // A second message goes to the same process.
         rig.send("And again").await;
         assert_eq!(rig.fake.spawns.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_new_chat_gets_a_written_title_once() {
+        let rig = rig(LONG);
+        rig.send("Hello there").await;
+        rig.send("Second").await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(rig.store.session("s1").unwrap().unwrap().title, "Written: Hello there");
+        let told = rig.seen.lock().unwrap().iter().filter(|e| matches!(e, AgentEvent::TitleChanged { .. })).count();
+        assert_eq!(told, 1);
+        // Not saved in the history: the store holds the title.
+        assert!(!rig.store.events("s1").unwrap().iter().any(|e| matches!(e, AgentEvent::TitleChanged { .. })));
     }
 
     #[tokio::test]
@@ -728,14 +894,20 @@ mod tests {
     async fn deleting_a_chat_forgets_it() {
         let rig = rig(LONG);
         rig.send("hi").await;
-        rig.manager.delete("s1").unwrap();
+        rig.manager.delete("s1").await.unwrap();
         assert!(!rig.manager.is_live("s1"));
         assert!(rig.store.sidebar().unwrap().is_empty());
+        // In the trash, with its history, until the trash is emptied.
+        assert_eq!(rig.manager.list_trash().unwrap()[0].id, "s1");
         // Stopped, so background work it had doesn't run on unseen.
         assert_eq!(rig.count("kill"), 1);
         // Late events from its process are dropped, not saved.
+        let before = rig.store.events("s1").unwrap().len();
         rig.agent_says(AgentEvent::Interrupted);
-        assert!(rig.store.events("s1").unwrap().is_empty());
+        assert_eq!(rig.store.events("s1").unwrap().len(), before);
+        rig.manager.empty_trash().await.unwrap();
+        assert!(rig.manager.list_trash().unwrap().is_empty());
+        assert!(rig.store.session("s1").unwrap().is_none());
     }
 
     #[tokio::test]
@@ -802,6 +974,273 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert_eq!(rig.count("kill"), 1);
         assert!(!rig.manager.is_live("s1"));
+    }
+
+
+    // ---- Worktrees ----
+
+    use crate::events::ApprovalKind;
+    use std::process::Command;
+
+    /// A scratch git repo with one commit on main.
+    fn scratch_repo() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("harness-repo-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git").arg("-C").arg(&root).args(args).output().unwrap().status.success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("app.py"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]);
+        root
+    }
+
+    /// The agent asking for a worktree (Claude Code's own tool, which asks).
+    fn worktree_call(id: &str, name: &str) -> AgentEvent {
+        AgentEvent::ApprovalRequest {
+            request_id: id.into(),
+            approval: ApprovalKind::Tool,
+            tool_name: "EnterWorktree".into(),
+            title: "EnterWorktree".into(),
+            input: serde_json::json!({ "name": name }),
+            tool_id: Some(format!("t-{id}")),
+            always_label: None,
+        }
+    }
+
+    fn edit(id: &str, path: &Path) -> AgentEvent {
+        AgentEvent::ApprovalRequest {
+            request_id: id.into(),
+            approval: ApprovalKind::Tool,
+            tool_name: "Edit".into(),
+            title: "Edit".into(),
+            input: serde_json::json!({ "file_path": path }),
+            tool_id: None,
+            always_label: None,
+        }
+    }
+
+    impl Rig {
+        async fn send_at(&self, folder: &Path, mode: &str, text: &str) {
+            self.manager
+                .send_message("s1", "claude".into(), folder.into(), Some(mode.into()), None, text, "m")
+                .await
+                .unwrap();
+        }
+        fn saw(&self, pick: impl Fn(&AgentEvent) -> bool) -> usize {
+            self.seen.lock().unwrap().iter().filter(|e| pick(e)).count()
+        }
+        fn worktree(&self) -> Option<worktree::Worktree> {
+            let git = self.store.chat_git("s1").unwrap().unwrap();
+            git.worktree.filter(|_| git.status.is_some())
+        }
+        /// Runs a full sweep, after any one already started.
+        async fn sweep(&self) {
+            drop(self.manager.0.sweep_lock.lock().await);
+            self.manager.sweep().await;
+        }
+        /// Starts a chat in `repo`, asks for an edit, and picks a new worktree.
+        async fn into_worktree(&self, repo: &Path) -> worktree::Worktree {
+            self.send_at(repo, "auto", "fix it").await;
+            self.agent_says(AgentEvent::SessionStarted {
+                agent_session_id: "agent-9".into(),
+                model: None,
+                mode: Some("auto".into()),
+            });
+            self.agent_says(worktree_call("r1", "fix it"));
+            self.manager
+                .choose_worktree("s1", "r1", "worktree", "claude".into())
+                .await
+                .unwrap();
+            self.worktree().expect("a worktree")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_worktree_request_waits_and_work_here_turns_it_down() {
+        let rig = rig(LONG);
+        let repo = scratch_repo();
+        rig.send_at(&repo, "default", "fix it").await;
+        let shown = |r: &Rig| r.saw(|e| matches!(e, AgentEvent::ApprovalRequest { .. }));
+
+        // Ordinary edits are not held.
+        rig.agent_says(edit("e1", &repo.join("app.py")));
+        assert_eq!(shown(&rig), 1);
+
+        rig.agent_says(worktree_call("r1", "fix it"));
+        rig.agent_says(worktree_call("r2", "fix it"));
+        let asks = |r: &Rig| r.saw(|e| matches!(e, AgentEvent::WorktreeAsk { .. }));
+        assert_eq!(asks(&rig), 1, "one question for both requests");
+        assert_eq!(shown(&rig), 1, "requests aren't shown as approvals");
+        assert!(rig.saw(|e| matches!(e, AgentEvent::WorktreeAsk { name, .. } if name.as_deref() == Some("fix it"))) == 1);
+
+        // A wrong ID is refused.
+        assert!(rig.manager.choose_worktree("s1", "r2", "here", "claude".into()).await.is_err());
+        rig.manager.choose_worktree("s1", "r1", "here", "claude".into()).await.unwrap();
+        assert!(rig.told().contains(&"answer r1 deny".to_string()));
+        assert!(rig.told().contains(&"answer r2 deny".to_string()));
+        assert!(rig.worktree().is_none());
+        assert_eq!(rig.store.chat_git("s1").unwrap().unwrap().choice.as_deref(), Some("here"));
+
+        // The agent may ask again later, for other work.
+        rig.agent_says(worktree_call("r3", "other"));
+        assert_eq!(asks(&rig), 2);
+    }
+
+    #[tokio::test]
+    async fn a_request_outside_a_repo_is_turned_down_at_once() {
+        let rig = rig(LONG);
+        let folder = std::env::temp_dir().join(format!("harness-plain-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&folder).unwrap();
+        rig.send_at(&folder, "auto", "hi").await;
+        rig.agent_says(worktree_call("r1", "x"));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(rig.told().contains(&"answer r1 deny".to_string()));
+        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::WorktreeAsk { .. })), 0);
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[tokio::test]
+    async fn stopping_while_asked_closes_the_question() {
+        let rig = rig(LONG);
+        let repo = scratch_repo();
+        rig.send_at(&repo, "auto", "fix it").await;
+        rig.agent_says(worktree_call("r1", "x"));
+        rig.agent_says(AgentEvent::ApprovalCancelled { request_id: "r1".into() });
+        assert_eq!(
+            rig.saw(|e| matches!(e, AgentEvent::ApprovalCancelled { request_id } if request_id == "r1")),
+            1
+        );
+        // A later request asks again.
+        rig.agent_says(worktree_call("r2", "x"));
+        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::WorktreeAsk { .. })), 2);
+    }
+
+    #[tokio::test]
+    async fn a_new_worktree_moves_the_chat_and_resumes_it_there() {
+        let rig = rig(LONG);
+        let repo = scratch_repo();
+        let wt = rig.into_worktree(&repo).await;
+
+        let told = rig.told();
+        let at = |what: &str| told.iter().position(|t| t.starts_with(what)).unwrap_or_else(|| panic!("{what} in {told:?}"));
+        assert!(at("answer r1 deny") < at("stop") && at("stop") < at("kill") && at("kill") < at("say You now work"));
+        // Named after the agent's suggestion.
+        assert!(wt.branch.starts_with("harness/fix-it-"), "{}", wt.branch);
+        let note = &told[at("say You now work")];
+        assert!(note.contains(&wt.work_path().display().to_string()) && note.contains(&wt.branch));
+
+        // Resumed, as the same chat, in the worktree, without the check.
+        assert_eq!(rig.fake.spawns.lock().unwrap()[1].0.as_deref(), Some("agent-9"));
+        assert_eq!(rig.fake.folders.lock().unwrap()[1], wt.work_path());
+        assert!(wt.path.join("app.py").exists());
+
+        assert_eq!(wt.base_branch.as_deref(), Some("main"));
+        // The note isn't shown as a message from the user.
+        let saved = rig.store.events("s1").unwrap();
+        assert!(!saved.iter().any(|e| matches!(e, AgentEvent::UserMessage { text, .. } if text.starts_with("You now"))));
+        assert!(saved.iter().any(|e| matches!(e, AgentEvent::WorktreeChanged { status, .. } if status == "created")));
+        let row = rig.store.session("s1").unwrap().unwrap();
+        assert_eq!(row.work_path, Some(wt.work_path().to_string_lossy().into_owned()));
+        assert_eq!(row.project_path, repo.to_string_lossy());
+
+        // Asking again inside the worktree is turned down without a question.
+        rig.agent_says(worktree_call("r9", "again"));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(rig.told().contains(&"answer r9 deny".to_string()));
+        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::WorktreeAsk { .. })), 1);
+
+        // Its next start is in the worktree too.
+        rig.manager.close("s1");
+        rig.send_at(&repo, "auto", "more").await;
+        assert_eq!(rig.fake.folders.lock().unwrap()[2], wt.work_path());
+    }
+
+    #[tokio::test]
+    async fn an_idle_worktree_is_put_away_and_comes_back_with_its_edits() {
+        let rig = rig_with(LONG, Duration::ZERO, LONG, Arc::new(|_: &Path, _: &str| Ok(None)));
+        let repo = scratch_repo();
+        let wt = rig.into_worktree(&repo).await;
+        std::fs::write(wt.path.join("app.py"), "half done\n").unwrap();
+
+        // Not while its process runs.
+        rig.sweep().await;
+        assert!(wt.path.exists());
+        rig.manager.close("s1");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        rig.sweep().await;
+        assert!(!wt.path.exists(), "folder put away");
+        assert_eq!(rig.store.chat_git("s1").unwrap().unwrap().status.as_deref(), Some("put_away"));
+
+        rig.send_at(&repo, "auto", "back to it").await;
+        assert_eq!(std::fs::read_to_string(wt.path.join("app.py")).unwrap(), "half done\n");
+        assert_eq!(rig.store.chat_git("s1").unwrap().unwrap().status.as_deref(), Some("live"));
+        assert_eq!(*rig.fake.folders.lock().unwrap().last().unwrap(), wt.work_path());
+        assert!(rig.saw(|e| matches!(e, AgentEvent::WorktreeChanged { status, .. } if status == "restored")) == 1);
+    }
+
+    #[tokio::test]
+    async fn a_merged_pull_request_removes_the_worktree_and_branch() {
+        let found: Arc<Mutex<Option<PrInfo>>> = Arc::default();
+        let lookup: PrLookup = {
+            let found = found.clone();
+            Arc::new(move |_: &Path, _: &str| Ok(found.lock().unwrap().clone()))
+        };
+        let rig = rig_with(LONG, LONG, LONG, lookup);
+        let repo = scratch_repo();
+        let wt = rig.into_worktree(&repo).await;
+        std::fs::write(wt.path.join("app.py"), "done\n").unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&wt.path, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "work"]);
+        let tip = git(&wt.path, &["rev-parse", "HEAD"]);
+
+        // An open PR is shown, and nothing is removed.
+        *found.lock().unwrap() = Some(PrInfo { number: 3, state: "open".into(), url: "u".into(), head: tip.clone() });
+        rig.turn_ends();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(rig.store.session("s1").unwrap().unwrap().pr.unwrap().state, "open");
+        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::PrChanged { .. })), 1);
+
+        // Squash-merged on GitHub: gone after the next sweep once the process is closed.
+        *found.lock().unwrap() = Some(PrInfo { number: 3, state: "merged".into(), url: "u".into(), head: tip });
+        rig.manager.close("s1");
+        rig.manager.0.pr_checked.lock().unwrap().clear();
+        rig.sweep().await;
+        assert!(!wt.path.exists());
+        assert!(git(&repo, &["branch", "--list", &wt.branch]).is_empty(), "branch deleted");
+        let row = rig.store.chat_git("s1").unwrap().unwrap();
+        assert_eq!((row.status, row.choice, row.pr), (None, None, None));
+        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::WorktreeChanged { status, .. } if status == "merged")), 1);
+    }
+
+    #[tokio::test]
+    async fn a_trashed_worktree_chat_is_restorable_then_purged_with_its_branch() {
+        let rig = rig_with(LONG, LONG, Duration::ZERO, Arc::new(|_: &Path, _: &str| Ok(None)));
+        let repo = scratch_repo();
+        let wt = rig.into_worktree(&repo).await;
+        std::fs::write(wt.path.join("app.py"), "unsaved\n").unwrap();
+
+        rig.manager.delete("s1").await.unwrap();
+        assert!(!wt.path.exists(), "folder put away on delete");
+        assert_eq!(rig.manager.list_trash().unwrap().len(), 1);
+        // Restored, then brought back by a message.
+        rig.manager.restore_chat("s1").unwrap();
+        rig.send_at(&repo, "auto", "again").await;
+        assert_eq!(std::fs::read_to_string(wt.path.join("app.py")).unwrap(), "unsaved\n");
+
+        // Deleted again; with no keep time the sweep purges it.
+        rig.manager.delete("s1").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        rig.sweep().await;
+        assert!(rig.store.session("s1").unwrap().is_none());
+        let branches = Command::new("git").arg("-C").arg(&repo).args(["branch", "--list", &wt.branch]).output().unwrap();
+        assert!(branches.stdout.is_empty());
     }
 
     #[tokio::test]
