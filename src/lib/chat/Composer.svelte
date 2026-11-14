@@ -100,16 +100,6 @@
     };
   });
 
-  const usage = $derived.by(() => {
-    if (!chat.usage) return "";
-    // Claude Code names the limit that applies to the current model, e.g.
-    // "seven_day", "seven_day_overage_included" or "five_hour".
-    const window = chat.usage.window ?? "";
-    const name = window.startsWith("seven_day") ? "weekly" : window.startsWith("five_hour") ? "5-hour" : "";
-    const percent = Math.round(chat.usage.utilization * 100);
-    return name ? `${percent}% of ${name} limit` : `${percent}% of limit`;
-  });
-
   // The box is measured by letting it collapse for a moment. The composer's
   // own height is held meanwhile: otherwise the chat above would stretch into
   // the freed space and back, and lose its place at the end on every key.
@@ -187,7 +177,7 @@
     <div class="meta">
       <!-- Laid out like the Claude desktop app: on a new chat the folder picker
            sits at the left; once the chat has started it is gone (the sidebar
-           shows the folder). Model, mode and usage sit at the right. -->
+           shows the folder). Model and mode sit at the right. -->
       {#if !chat.started}
         <button class="folder" onclick={changeFolder} title="Choose the folder this chat works in">
           {folder}
@@ -240,7 +230,6 @@
         {/if}
       </span>
       <button onclick={nextMode} title="Switch mode">{modeLabel}</button>
-      {#if usage}<span>{usage}</span>{/if}
     </div>
   </div>
 </div>

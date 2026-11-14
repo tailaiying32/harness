@@ -30,6 +30,18 @@
     savePrefs({ size: value });
   }
 
+  // Before any reply since the app started, the open chat's last reading stands in.
+  const usage = $derived.by(() => {
+    const reading = app.usage ?? app.current.usage;
+    if (!reading) return "";
+    // Claude Code names the limit that applies to the current model, e.g.
+    // "seven_day", "seven_day_overage_included" or "five_hour".
+    const window = reading.window ?? "";
+    const name = window.startsWith("seven_day") ? "weekly" : window.startsWith("five_hour") ? "5-hour" : "";
+    const percent = Math.round(reading.utilization * 100);
+    return name ? `${percent}% of ${name} limit` : `${percent}% of limit`;
+  });
+
   /** How long a trashed chat has left before it is deleted for good. */
   const TRASH_DAYS = 30;
   function daysLeft(trashedAt: number | null): string {
@@ -96,11 +108,15 @@
     </section>
 
     <section>
+      <div class="label">Usage</div>
+      <div class="sub">{usage || "unknown"}</div>
+    </section>
+
+    <section>
       <div class="label">Trash</div>
       {#if app.trash.length === 0}
-        <div class="sub">empty. Deleted chats stay here {TRASH_DAYS} days.</div>
+        <div class="sub">empty</div>
       {:else}
-        <div class="sub">Deleted chats stay here {TRASH_DAYS} days. Open one to read it; send a message to restore it.</div>
         <div class="trash">
           {#each app.trash as session (session.id)}
             <div class="row">
