@@ -17,6 +17,27 @@
   /** The chat waiting for a second click before it is deleted. */
   let deleting = $state<string | null>(null);
 
+  /** The chat being renamed, and the text typed so far. */
+  let renaming = $state<string | null>(null);
+  let draft = $state("");
+
+  function startRename(id: string, title: string) {
+    draft = title;
+    renaming = id;
+  }
+
+  async function finishRename(save: boolean) {
+    const id = renaming;
+    renaming = null;
+    if (save && id) await app.rename(id, draft);
+  }
+
+  /** Puts the cursor in the box with the whole name selected. */
+  function focusAll(node: HTMLInputElement) {
+    node.focus();
+    node.select();
+  }
+
   async function remove(id: string) {
     deleting = null;
     await app.remove(id);
@@ -38,11 +59,24 @@
               <span class="ask">delete?</span>
               <button class="danger" onclick={() => remove(session.id)}>yes</button>
               <button onclick={() => (deleting = null)}>no</button>
+            {:else if renaming === session.id}
+              <span class="dot {dot}">{glyph[dot]}</span>
+              <input
+                class="rename"
+                use:focusAll
+                bind:value={draft}
+                onblur={() => finishRename(true)}
+                onkeydown={(e) => {
+                  if (e.key === "Enter") finishRename(true);
+                  else if (e.key === "Escape") finishRename(false);
+                }}
+              />
             {:else}
-              <button class="open" onclick={() => app.open(session.id)} title={session.title}>
+              <button class="open" ondblclick={() => startRename(session.id, session.title)} onclick={() => app.open(session.id)} title={session.title}>
                 <span class="dot {dot}" title={meaning[dot]}>{glyph[dot]}</span>
                 <span class="title">{session.title || "untitled"}</span>
               </button>
+              <button class="quiet" title="Rename (or double-click the title)" onclick={() => startRename(session.id, session.title)}>✎</button>
               <button class="quiet" title="Delete this chat" onclick={() => (deleting = session.id)}>×</button>
             {/if}
           </div>
@@ -153,6 +187,12 @@
   }
   .chat button.danger {
     color: var(--bad);
+  }
+  .rename {
+    flex: 1;
+    min-width: 0;
+    color: var(--bright);
+    border-bottom: 1px solid var(--faint);
   }
   .problem {
     color: var(--bad);

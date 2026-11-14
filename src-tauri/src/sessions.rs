@@ -369,6 +369,10 @@ impl SessionManager {
         self.0.store.delete_session(session_id)
     }
 
+    pub fn rename(&self, session_id: &str, title: &str) -> Result<(), String> {
+        self.0.store.rename_session(session_id, title)
+    }
+
     /// On app quit: ask every process to exit and give them a moment. Any still
     /// running after that lose their input when the app goes, and exit then.
     pub fn shutdown(&self, wait: Duration) {

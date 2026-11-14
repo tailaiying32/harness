@@ -4,6 +4,7 @@
 import {
   deleteSession,
   loadSession,
+  renameSession,
   sidebar,
   type Envelope,
   type ProjectRow,
@@ -101,6 +102,19 @@ export class AppState {
     if (!this.current.started) this.chats.delete(this.current.sessionId);
     this.current = chat;
     delete this.unseen[sessionId];
+  }
+
+  /** Gives a chat a new name; an empty name changes nothing. */
+  async rename(sessionId: string, title: string): Promise<void> {
+    if (!title.trim()) return;
+    this.problem = "";
+    try {
+      await renameSession(sessionId, title);
+    } catch (e) {
+      this.problem = String(e);
+      return;
+    }
+    await this.refresh();
   }
 
   /** Deletes a chat and its history for good. */

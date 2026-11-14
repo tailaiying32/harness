@@ -85,6 +85,8 @@ export const loadSession = (sessionId: string) =>
   invoke<{ session: SessionRow; events: AgentEvent[]; live: boolean }>("load_session", { sessionId });
 
 /** Deletes a chat and its history for good. */
+export const renameSession = (sessionId: string, title: string) =>
+  invoke<void>("rename_session", { sessionId, title });
 export const deleteSession = (sessionId: string) => invoke<void>("delete_session", { sessionId });
 
 /** Saves the chat on its first message. `mode` and `model` are saved with it, and
