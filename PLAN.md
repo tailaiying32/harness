@@ -26,9 +26,10 @@ the side panel, and a chat that stays at its end when opened.
 
 Added 2026-11-13 (background work): a chat running a background command or
 agent is never closed for being idle, a message to a closing chat no longer
-fails, and delete and quit stop background commands. **Tested** live (stays
-open, closes after, delete); quit is unit-tested only. See "Session
-lifecycle". **Tested** live
+fails, and delete and quit stop background commands. **Tested** live: stays
+open (also a real `caffeinate` idle for 14 minutes), closes after, delete,
+quit. Also checked by the user: the new sidebar dot colours and the rename
+field. See "Session lifecycle". **Tested** live
 with the self-test: the queued mark (also with stop), and a plan asked for in
 `default` and in `auto` mode. Not checked by eye: tab closing, Cmd+N and the
 scroll fix (type check only; the scroll bug was not reproduced first).
@@ -459,10 +460,9 @@ can't close a chat that has been used since.
   emits `Error` with the tail of stderr. The next send resumes.
 - **App quit (`RunEvent::Exit`):** `stop()` chats with background work,
   `close()` the rest, and wait up to 3 seconds; then `stop()` anything still
-  live and wait up to 2 more. **Tested** before background handling: no chat
-  processes are left after the app is killed. The background part is
-  unit-tested only (a real quit can't be sent to a test copy without
-  reaching the user's own window).
+  live and wait up to 2 more. **Tested** live by the user: a chat running a
+  background `caffeinate`, then Cmd+Q; no `caffeinate` and no chat process
+  were left, and the reopened chat resumed.
 - **`agent_session_id`** comes from every turn's `init` and is saved at once,
   so a crash before the first `result` can still resume.
 - **Locks:** no lock is held while calling an agent method or `spawn`. Both
@@ -820,6 +820,24 @@ Mocked up on the same board:
     planning. Keep planning sends the feedback as the denial message
     ("Keep planning." when empty). Enter in the box adds a line; it never
     answers. Once answered the foot shows the outcome.
+  - **Links in chat text and in tabs** (added 2026-11-13, so plans kept as
+    project files can be reopened in any chat). `contentClick` in
+    `clicks.ts` reads the link as written (`getAttribute("href")`, not
+    `link.href`, which would turn a bare file name into a page of the app).
+    `http(s)`, `mailto` and `tel` open in the browser. Anything else goes
+    through `localPath` in `paths.ts`: plain paths and `file:` links,
+    `~` for home, relative paths from the chat's project folder (in a
+    document tab, from that document's folder; in the plan tab, the
+    project folder); `#heading`, `?query` and a `:12` line number are
+    dropped. A `.md` / `.markdown` path opens as a tab via `Chat.openFile`,
+    which reads it fresh from disk with the core command `read_doc`
+    (`docs.rs`: absolute markdown paths only, up to 2 MB) and refreshes an
+    existing tab's text; a link to the plan's own file opens the plan tab;
+    a file that can't be read adds an error line to the chat. Any other
+    local file is shown in Finder or Explorer, never opened, so a link
+    can't run a script. `markdown.ts` lets `file:` links through, which
+    markdown-it refuses by default. Tabs opened this way aren't saved; a
+    reloaded chat doesn't bring them back.
   - **Width:** 46% of the window by default. Its left edge drags to resize
     (the chat keeps at least 360 px, the panel 280 px); a double-click on the
     edge goes back to 46%. The width is one saved setting for every chat.
