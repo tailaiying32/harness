@@ -4,7 +4,7 @@
   import type { AppState, Dot } from "./state/app.svelte";
   import { shortPath } from "./paths";
 
-  let { app }: { app: AppState } = $props();
+  let { app, onsettings }: { app: AppState; onsettings: () => void } = $props();
 
   const glyph: Record<Dot, string> = { working: "●", waiting: "●", unseen: "●", idle: "○" };
   const meaning: Record<Dot, string> = {
@@ -24,8 +24,6 @@
 </script>
 
 <aside>
-  <div class="name">harness</div>
-
   <div class="list">
     {#each app.projects as project (project.id)}
       <div>
@@ -54,7 +52,10 @@
     {#if app.problem}<div class="problem">{app.problem}</div>{/if}
   </div>
 
-  <button class="new" onclick={() => app.newChat()}>+ new chat</button>
+  <div class="foot">
+    <button onclick={() => app.newChat()}>+ new chat</button>
+    <button onclick={onsettings}>settings</button>
+  </div>
 </aside>
 
 <style>
@@ -67,14 +68,10 @@
     border-right: 1px solid var(--line);
     min-height: 0;
   }
-  .name {
-    color: var(--dim);
-  }
   .list {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    margin-top: calc(var(--gap) * 2);
     display: flex;
     flex-direction: column;
     gap: calc(var(--gap) * 1.6);
@@ -161,12 +158,15 @@
     color: var(--bad);
     overflow-wrap: anywhere;
   }
-  .new {
-    text-align: left;
-    color: var(--faint);
+  .foot {
+    display: flex;
+    justify-content: space-between;
     margin-top: var(--gap);
   }
-  .new:hover {
+  .foot button {
+    color: var(--faint);
+  }
+  .foot button:hover {
     color: var(--fg);
   }
   /* A narrow window is all chat. */

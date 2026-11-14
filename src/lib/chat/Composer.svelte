@@ -5,16 +5,9 @@
   import { pickFolder, type Mode, type ModelInfo } from "../ipc";
   import { shortPath } from "../paths";
   import type { Chat } from "../state/chat.svelte";
-  import { applySize, applyTheme, savePrefs, sizes, themes, type Size } from "../themes";
+  import { savePrefs } from "../themes";
 
-  let {
-    chat,
-    ready,
-    home,
-    models,
-    theme = $bindable(),
-    size = $bindable(),
-  }: { chat: Chat; ready: boolean; home: string; models: ModelInfo[]; theme: string; size: Size } = $props();
+  let { chat, ready, home, models }: { chat: Chat; ready: boolean; home: string; models: ModelInfo[] } = $props();
 
   let box: HTMLTextAreaElement;
 
@@ -54,7 +47,7 @@
 
   function pickModel(choice: string) {
     void chat.changeModel(choice);
-    savePrefs({ theme, size, model: choice });
+    savePrefs({ model: choice });
   }
 
   const usage = $derived.by(() => {
@@ -87,18 +80,6 @@
       void send();
     }
   }
-
-  function pickTheme(id: string) {
-    theme = id;
-    applyTheme(id);
-    savePrefs({ theme, size, model: chat.modelChoice });
-  }
-
-  function pickSize(value: Size) {
-    size = value;
-    applySize(value);
-    savePrefs({ theme, size, model: chat.modelChoice });
-  }
 </script>
 
 <div class="composer">
@@ -119,28 +100,23 @@
     </div>
 
     <div class="meta">
+      <!-- Where the chat runs comes first; it can be changed until the first message. -->
+      <button
+        class="folder"
+        onclick={changeFolder}
+        disabled={chat.started}
+        title={chat.started ? chat.projectPath : "Choose the folder this chat works in"}
+      >
+        {folder}
+      </button>
       <button onclick={nextMode} title="Switch mode">{modeLabel}</button>
       <select value={chat.modelChoice} onchange={(e) => pickModel(e.currentTarget.value)} aria-label="Model">
         {#each modelOptions as m (m.value)}
           <option value={m.value} title={m.detail ?? ""}>{m.name}</option>
         {/each}
       </select>
-      <button class="folder" onclick={changeFolder} disabled={chat.started} title={chat.started ? chat.projectPath : "Choose the folder"}>
-        {folder}
-      </button>
       <span class="spacer"></span>
       {#if usage}<span>{usage}</span>{/if}
-      <!-- Theme and size live here until there is a settings page. -->
-      <select value={theme} onchange={(e) => pickTheme(e.currentTarget.value)} aria-label="Theme">
-        {#each themes as t (t.id)}
-          <option value={t.id}>{t.name}</option>
-        {/each}
-      </select>
-      <select value={size} onchange={(e) => pickSize(e.currentTarget.value as Size)} aria-label="Size">
-        {#each sizes as s (s)}
-          <option value={s}>{s}</option>
-        {/each}
-      </select>
     </div>
   </div>
 </div>

@@ -16,9 +16,8 @@ picking a different folder inside the native picker, and the sidebar in the
 real window by eye (the screen was locked; it was checked in the browser
 preview instead, see "Preview page").
 
-Not built yet: showing subagent work, the side panel (step 6), a settings
-page. The theme and size selectors sit in the line under the message box
-until there is one.
+Not built yet: showing subagent work, the side panel (step 6). The settings
+page holds only theme and size so far.
 
 ## What it does
 
@@ -603,9 +602,15 @@ Mocked up on the same board:
   waiting is marked cancelled. A tool call the user denied, or that was
   cancelled, reads "Skipped ..." in its folded run and is not counted as a
   failure.
-- **Settings page: later, not v1.** It will hold theme, size, font, idle
-  timeout, the "Always allow" default and the path to Claude Code. Until then
-  these are constants or a config file.
+- **Settings page: started 2026-11-13** (the user wanted theme and size out of
+  the bottom bar). "settings" at the bottom of the sidebar, or Cmd+, / Ctrl+,
+  opens it over the chat; "close" or Escape closes it. It holds size and theme
+  (dark and light lists); a click applies at once and is remembered. Still to
+  add: font, idle timeout, the "Always allow" default and the path to Claude
+  Code, which are constants until then.
+- **The line under the message box** (the user's layout, 2026-11-13): the
+  folder first, at the left, then mode, then model; usage at the right. The
+  folder can be changed until the chat's first message.
 - **Slash commands: deferred.** The user uses `/btw` and `/compact`. v1 has no
   slash menu; whether typed slash commands work through the headless input is
   untested. `/btw` (a side question) will want its own floating view later.
@@ -630,9 +635,10 @@ Mocked up on the same board:
 
 - **Layout:** sidebar left (projects, each with its chats, newest first, a
   status dot per chat), chat in the middle, side panel right (collapsible).
-- **Sidebar, as built:** width 204 / 228 / 256 px by size. "harness" at the
-  top, then each project's folder (faint, home as `~`, the end kept when
-  long), its chats under it, "+ new chat" at the bottom. A mark before each
+- **Sidebar, as built:** width 204 / 228 / 256 px by size. Each project's
+  folder (faint, home as `~`, the end kept when long) with its chats under
+  it; "+ new chat" and "settings" at the bottom. No app name at the top (the
+  user removed it for room). A mark before each
   title: `●` green = working, `●` accent = needs your answer, `●` plain =
   finished since you last looked, `○` = nothing going on. The open chat is
   bright. On hover a folder shows `+` (new chat there) and a chat shows `×`;

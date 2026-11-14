@@ -6,6 +6,7 @@
   import "./app.css";
   import ChatView from "./lib/chat/ChatView.svelte";
   import Composer from "./lib/chat/Composer.svelte";
+  import Settings from "./lib/Settings.svelte";
   import Sidebar from "./lib/Sidebar.svelte";
   import {
     autotest,
@@ -36,6 +37,17 @@
   let theme = $state(prefs.theme);
   let size = $state<Size>(prefs.size);
   let setup = $state<SetupInfo | null>(null);
+  let showSettings = $state(false);
+
+  // Cmd+, (Ctrl+, on Windows) opens settings, as in most apps; Escape closes them.
+  function onKey(e: KeyboardEvent) {
+    if (e.key === "," && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      showSettings = !showSettings;
+    } else if (e.key === "Escape" && showSettings) {
+      showSettings = false;
+    }
+  }
   // Last known list first; refreshed from Claude Code once it has been found.
   let models = $state(loadCachedModels());
 
@@ -180,14 +192,20 @@
   }
 </script>
 
+<svelte:window onkeydown={onKey} />
+
 <div class="app">
-  <Sidebar {app} />
+  <Sidebar {app} onsettings={() => (showSettings = !showSettings)} />
   <main>
     <!-- Each chat gets its own view, so scroll position and open folds don't leak between chats. -->
     {#key chat.sessionId}
       <ChatView {chat} problem={setup?.problem ?? null} />
-      <Composer {chat} ready={!!setup?.logged_in} home={app.home} {models} bind:theme bind:size />
+      <Composer {chat} ready={!!setup?.logged_in} home={app.home} {models} />
     {/key}
+    <!-- Drawn over the chat, which stays as it is underneath. -->
+    {#if showSettings}
+      <Settings bind:theme bind:size onclose={() => (showSettings = false)} />
+    {/if}
   </main>
 </div>
 
@@ -201,5 +219,6 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
+    position: relative;
   }
 </style>

@@ -205,9 +205,10 @@ export function loadPrefs(): Prefs {
   }
 }
 
-export function savePrefs(prefs: Prefs): void {
+/** Saves the given choices, leaving the others as they were. */
+export function savePrefs(changed: Partial<Prefs>): void {
   try {
-    localStorage.setItem("harness.prefs", JSON.stringify(prefs));
+    localStorage.setItem("harness.prefs", JSON.stringify({ ...loadPrefs(), ...changed }));
   } catch {
     // Storage can be unavailable; the choice then lasts for this run only.
   }
