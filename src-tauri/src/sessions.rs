@@ -18,8 +18,20 @@ pub type Out = Arc<dyn Fn(Envelope) + Send + Sync>;
 const DEFAULT_IDLE_SECONDS: u64 = 300;
 /// Longest tool result kept, in characters. See `AgentEvent::cap_tool_result`.
 const TOOL_RESULT_MAX_CHARS: usize = 20_000;
-/// How long a new message waits for a process that is shutting down.
-const CLOSING_WAIT: Duration = Duration::from_secs(30);
+/// How long a process asked to exit may take before it is stopped.
+const CLOSE_GRACE: Duration = Duration::from_secs(30);
+/// How long a new message waits for a stopped process to exit.
+const STOP_WAIT: Duration = Duration::from_secs(10);
+/// On quit, how long processes that had to be stopped get to exit.
+const QUIT_STOP_WAIT: Duration = Duration::from_secs(2);
+
+/// Timer lengths. Fixed in tests; the real ones otherwise.
+#[derive(Clone, Copy)]
+struct Timings {
+    /// Fixed idle time. None = the environment or the settings decide.
+    idle: Option<Duration>,
+    close_grace: Duration,
+}
 
 #[derive(Default)]
 struct Session {
@@ -37,6 +49,9 @@ struct Session {
     idle_round: u64,
     /// Asked to exit; waiting for the process to finish up.
     closing: bool,
+    /// The process has background commands or agents running. An idle chat
+    /// with any is kept open: closing it would end them.
+    background: bool,
 }
 
 struct Inner {
@@ -46,8 +61,7 @@ struct Inner {
     sessions: Mutex<HashMap<String, Session>>,
     /// Starting a process is not instant; two sends must not both start one.
     start_lock: tokio::sync::Mutex<()>,
-    /// Fixed idle time, for tests. Otherwise the environment or the settings decide.
-    idle_override: Option<Duration>,
+    timings: Timings,
 }
 
 #[derive(Clone)]
@@ -55,22 +69,21 @@ pub struct SessionManager(Arc<Inner>);
 
 impl SessionManager {
     pub fn new(adapter: Arc<dyn AgentAdapter>, store: Arc<Store>, out: Out) -> Self {
-        Self::build(adapter, store, out, None)
+        let timings = Timings {
+            idle: None,
+            close_grace: CLOSE_GRACE,
+        };
+        Self::build(adapter, store, out, timings)
     }
 
-    fn build(
-        adapter: Arc<dyn AgentAdapter>,
-        store: Arc<Store>,
-        out: Out,
-        idle_override: Option<Duration>,
-    ) -> Self {
+    fn build(adapter: Arc<dyn AgentAdapter>, store: Arc<Store>, out: Out, timings: Timings) -> Self {
         Self(Arc::new(Inner {
             adapter,
             store,
             out,
             sessions: Mutex::default(),
             start_lock: tokio::sync::Mutex::default(),
-            idle_override,
+            timings,
         }))
     }
 
@@ -83,7 +96,7 @@ impl SessionManager {
     /// Order: test override, `HARNESS_IDLE_SECONDS`, the `idle_seconds` setting,
     /// then the default. Zero means never.
     fn idle_time(&self) -> Option<Duration> {
-        if let Some(fixed) = self.0.idle_override {
+        if let Some(fixed) = self.0.timings.idle {
             return Some(fixed);
         }
         let seconds = std::env::var("HARNESS_IDLE_SECONDS")
@@ -123,25 +136,25 @@ impl SessionManager {
     ) -> Result<(), String> {
         let inner = &self.0;
 
-        // A process that was asked to exit can't take messages. Wait for it to
-        // go, then start a fresh one that resumes the chat.
-        let deadline = Instant::now() + CLOSING_WAIT;
-        loop {
-            let closing = inner
-                .sessions
-                .lock()
-                .unwrap()
-                .get(session_id)
-                .is_some_and(|s| s.closing && s.agent.is_some());
-            if !closing {
-                break;
+        // A process that was asked to exit can't take messages. Stop it now
+        // rather than wait: chats are only closed with nothing running in the
+        // background, so nothing is lost. Then start a fresh one that resumes.
+        let closing = inner
+            .sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .filter(|s| s.closing)
+            .and_then(|s| s.agent.clone());
+        if let Some(agent) = closing {
+            agent.stop();
+            let deadline = Instant::now() + STOP_WAIT;
+            while self.is_live(session_id) {
+                if Instant::now() > deadline {
+                    return Err("This chat's old process didn't stop. Try again in a moment.".to_string());
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            if Instant::now() > deadline {
-                return Err(
-                    "This chat is still finishing background work. Try again in a moment.".to_string(),
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         let _starting = inner.start_lock.lock().await;
@@ -223,6 +236,7 @@ impl SessionManager {
                     let _ = store.set_mode(&id, mode);
                 }
                 AgentEvent::Status { state } => manager.on_state(&id, run, state),
+                AgentEvent::BackgroundWork { running } => manager.on_background(&id, run, *running > 0),
                 _ => {}
             }
             event.cap_tool_result(TOOL_RESULT_MAX_CHARS);
@@ -246,6 +260,7 @@ impl SessionManager {
                 session.agent = None;
                 session.closing = false;
                 session.busy = false;
+                session.background = false;
             }
             SessionState::Idle => {
                 session.busy = false;
@@ -258,8 +273,29 @@ impl SessionManager {
         }
     }
 
+    /// Background work started or ended. When the last of it ends between
+    /// turns, the idle timer starts: it was skipped while work was running.
+    fn on_background(&self, session_id: &str, run: u64, running: bool) {
+        let mut sessions = self.0.sessions.lock().unwrap();
+        let Some(session) = sessions.get_mut(session_id) else {
+            return;
+        };
+        if session.run != run {
+            return; // from an earlier process
+        }
+        let ended = session.background && !running;
+        session.background = running;
+        if ended && !session.busy && !session.closing {
+            session.idle_round += 1;
+            let round = session.idle_round;
+            drop(sessions);
+            self.close_when_idle(session_id.to_string(), run, round);
+        }
+    }
+
     /// After the idle time, ask the process to exit unless the chat was used
-    /// again. It is asked, never killed: it finishes background work first.
+    /// again or has background work running. If it hasn't exited after
+    /// `close_grace`, it is stopped.
     fn close_when_idle(&self, session_id: String, run: u64, round: u64) {
         let Some(wait) = self.idle_time() else {
             return;
@@ -272,16 +308,31 @@ impl SessionManager {
                 let Some(session) = sessions.get_mut(&session_id) else {
                     return;
                 };
-                let still_idle =
-                    session.run == run && session.idle_round == round && !session.busy && !session.closing;
+                let still_idle = session.run == run
+                    && session.idle_round == round
+                    && !session.busy
+                    && !session.closing
+                    && !session.background;
                 if !still_idle {
                     return;
                 }
                 session.closing = true;
                 session.agent.clone()
             };
-            if let Some(agent) = agent {
-                agent.close();
+            let Some(agent) = agent else {
+                return;
+            };
+            agent.close();
+            tokio::time::sleep(manager.0.timings.close_grace).await;
+            let stuck = manager
+                .0
+                .sessions
+                .lock()
+                .unwrap()
+                .get(&session_id)
+                .is_some_and(|s| s.run == run && s.closing && s.agent.is_some());
+            if stuck {
+                agent.stop();
             }
         });
     }
@@ -364,10 +415,19 @@ impl SessionManager {
             .is_some_and(|s| s.agent.is_some())
     }
 
-    /// Removes a chat for good: its process is let go and its history deleted.
+    /// Removes a chat for good: its process is stopped (with any background
+    /// work) and its history deleted.
     pub fn delete(&self, session_id: &str) -> Result<(), String> {
-        // Dropping the handle closes the process's input, so it exits on its own.
-        self.0.sessions.lock().unwrap().remove(session_id);
+        let agent = self
+            .0
+            .sessions
+            .lock()
+            .unwrap()
+            .remove(session_id)
+            .and_then(|s| s.agent);
+        if let Some(agent) = agent {
+            agent.stop();
+        }
         self.0.store.delete_session(session_id)
     }
 
@@ -375,23 +435,50 @@ impl SessionManager {
         self.0.store.rename_session(session_id, title)
     }
 
-    /// On app quit: ask every process to exit and give them a moment. Any still
-    /// running after that lose their input when the app goes, and exit then.
+    /// On app quit: ask every process to exit and give them a moment. Ones with
+    /// background work, and any still running after the wait, are stopped, so
+    /// their background commands end too instead of running on unseen.
     pub fn shutdown(&self, wait: Duration) {
-        let live: Vec<String> = {
+        let live: Vec<(String, bool)> = {
             let sessions = self.0.sessions.lock().unwrap();
             sessions
                 .iter()
                 .filter(|(_, s)| s.agent.is_some())
-                .map(|(id, _)| id.clone())
+                .map(|(id, s)| (id.clone(), s.background))
                 .collect()
         };
-        for id in &live {
-            self.close(id);
+        for (id, background) in &live {
+            if *background {
+                self.stop(id);
+            } else {
+                self.close(id);
+            }
         }
+        let any_live = || live.iter().any(|(id, _)| self.is_live(id));
         let deadline = Instant::now() + wait;
-        while Instant::now() < deadline && live.iter().any(|id| self.is_live(id)) {
+        while Instant::now() < deadline && any_live() {
             std::thread::sleep(Duration::from_millis(50));
+        }
+        for (id, _) in &live {
+            self.stop(id);
+        }
+        let deadline = Instant::now() + QUIT_STOP_WAIT;
+        while Instant::now() < deadline && any_live() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// End the chat's process now, if it has one.
+    fn stop(&self, session_id: &str) {
+        let agent = self
+            .0
+            .sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .and_then(|s| s.agent.clone());
+        if let Some(agent) = agent {
+            agent.stop();
         }
     }
 }
@@ -401,6 +488,7 @@ mod tests {
     use super::*;
     use crate::events::ModelInfo;
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A stand-in agent: remembers how it was started and what it was told, and
     /// lets the test play the agent's side through `sink`.
@@ -409,11 +497,14 @@ mod tests {
         spawns: Mutex<Vec<(Option<String>, Option<String>)>>, // (resume id, mode)
         sinks: Mutex<Vec<EventSink>>,
         told: Arc<Mutex<Vec<String>>>,
+        /// Plays a process that ignores being asked to exit.
+        hang_on_close: Arc<AtomicBool>,
     }
 
     struct FakeAgent {
         sink: EventSink,
         told: Arc<Mutex<Vec<String>>>,
+        hang_on_close: Arc<AtomicBool>,
     }
 
     impl RunningAgent for FakeAgent {
@@ -452,6 +543,14 @@ mod tests {
         fn close(&self) {
             self.told.lock().unwrap().push("close".into());
             // A real process exits once its input closes.
+            if !self.hang_on_close.load(Ordering::SeqCst) {
+                (self.sink)(AgentEvent::Status {
+                    state: SessionState::Exited,
+                });
+            }
+        }
+        fn stop(&self) {
+            self.told.lock().unwrap().push("kill".into());
             (self.sink)(AgentEvent::Status {
                 state: SessionState::Exited,
             });
@@ -468,6 +567,7 @@ mod tests {
             Ok(Box::new(FakeAgent {
                 sink,
                 told: self.told.clone(),
+                hang_on_close: self.hang_on_close.clone(),
             }))
         }
         fn list_models(&self, _: &Path) -> Result<Vec<ModelInfo>, String> {
@@ -491,7 +591,11 @@ mod tests {
             let seen = seen.clone();
             Arc::new(move |envelope: Envelope| seen.lock().unwrap().push(envelope.event))
         };
-        let manager = SessionManager::build(fake.clone(), store.clone(), out, Some(idle));
+        let timings = Timings {
+            idle: Some(idle),
+            close_grace: Duration::from_millis(100),
+        };
+        let manager = SessionManager::build(fake.clone(), store.clone(), out, timings);
         Rig {
             fake,
             store,
@@ -523,6 +627,12 @@ mod tests {
         }
         fn told(&self) -> Vec<String> {
             self.fake.told.lock().unwrap().clone()
+        }
+        fn background(&self, running: u32) {
+            self.agent_says(AgentEvent::BackgroundWork { running });
+        }
+        fn count(&self, what: &str) -> usize {
+            self.told().iter().filter(|t| *t == what).count()
         }
     }
 
@@ -621,8 +731,99 @@ mod tests {
         rig.manager.delete("s1").unwrap();
         assert!(!rig.manager.is_live("s1"));
         assert!(rig.store.sidebar().unwrap().is_empty());
+        // Stopped, so background work it had doesn't run on unseen.
+        assert_eq!(rig.count("kill"), 1);
         // Late events from its process are dropped, not saved.
         rig.agent_says(AgentEvent::Interrupted);
         assert!(rig.store.events("s1").unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_idle_chat_with_background_work_stays_open() {
+        let rig = rig(Duration::from_millis(40));
+        rig.send("start a dev server").await;
+        rig.background(1);
+        rig.turn_ends();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(rig.manager.is_live("s1"), "closed while background work ran");
+        assert_eq!(rig.count("close"), 0);
+        // Still takes messages as usual.
+        rig.send("is it up?").await;
+        assert_eq!(rig.fake.spawns.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn background_work_ending_starts_the_idle_timer() {
+        let rig = rig(Duration::from_millis(40));
+        rig.send("caffeinate").await;
+        rig.background(1);
+        rig.turn_ends();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(rig.manager.is_live("s1"));
+        // Ends with no follow-up turn: the timer must still start.
+        rig.background(0);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(!rig.manager.is_live("s1"), "not closed after background work ended");
+        assert_eq!(rig.count("close"), 1);
+    }
+
+    #[tokio::test]
+    async fn a_message_while_closing_stops_the_old_process_and_resumes() {
+        let rig = rig(Duration::from_millis(20));
+        rig.fake.hang_on_close.store(true, Ordering::SeqCst);
+        rig.send("one").await;
+        rig.agent_says(AgentEvent::SessionStarted {
+            agent_session_id: "agent-7".into(),
+            model: None,
+            mode: None,
+        });
+        rig.turn_ends();
+        // Idle close fires; the process ignores it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(rig.count("close"), 1);
+        assert!(rig.manager.is_live("s1"));
+        // A message now doesn't wait out the grace or fail.
+        rig.send("two").await;
+        assert_eq!(rig.told(), vec!["say one", "close", "kill", "say two"]);
+        let spawns = rig.fake.spawns.lock().unwrap();
+        assert_eq!(spawns.len(), 2);
+        assert_eq!(spawns[1].0.as_deref(), Some("agent-7"));
+    }
+
+    #[tokio::test]
+    async fn a_closing_process_that_hangs_is_stopped_after_the_grace() {
+        let rig = rig(Duration::from_millis(20));
+        rig.fake.hang_on_close.store(true, Ordering::SeqCst);
+        rig.send("one").await;
+        rig.turn_ends();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(rig.manager.is_live("s1"), "stopped before the grace was up");
+        assert_eq!(rig.count("kill"), 0);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(rig.count("kill"), 1);
+        assert!(!rig.manager.is_live("s1"));
+    }
+
+    #[tokio::test]
+    async fn quitting_stops_chats_with_background_work_and_closes_the_rest() {
+        let rig = rig(LONG);
+        rig.send("caffeinate").await;
+        rig.background(1);
+        rig.turn_ends();
+        rig.manager
+            .send_message("s2", "claude".into(), "/work".into(), None, None, "hi", "m2")
+            .await
+            .unwrap();
+        rig.agent_says(AgentEvent::TurnEnded {
+            ok: true,
+            duration_ms: None,
+        });
+        rig.agent_says(AgentEvent::Status {
+            state: SessionState::Idle,
+        });
+        rig.manager.shutdown(Duration::from_millis(50));
+        assert!(!rig.manager.is_live("s1") && !rig.manager.is_live("s2"));
+        assert_eq!(rig.count("kill"), 1, "the background chat is stopped");
+        assert_eq!(rig.count("close"), 1, "the plain chat is closed");
     }
 }

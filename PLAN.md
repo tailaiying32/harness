@@ -22,7 +22,13 @@ holds only theme and size so far.
 
 Added 2026-11-13 (quick wins): rename a chat (double-click its title), close a single side panel tab, Cmd+N for a new chat, a
 "queued" mark on a message sent while Claude works, plans always opening in
-the side panel, and a chat that stays at its end when opened. **Tested** live
+the side panel, and a chat that stays at its end when opened.
+
+Added 2026-11-13 (background work): a chat running a background command or
+agent is never closed for being idle, a message to a closing chat no longer
+fails, and delete and quit stop background commands. **Tested** live (stays
+open, closes after, delete); quit is unit-tested only. See "Session
+lifecycle". **Tested** live
 with the self-test: the queued mark (also with stop), and a plan asked for in
 `default` and in `auto` mode. Not checked by eye: tab closing, Cmd+N and the
 scroll fix (type check only; the scroll bug was not reproduced first).
@@ -119,6 +125,10 @@ the login itself.
   this app appear in the sidebar.
 - Images and file attachments in messages.
 - Sharing the app with other people. It is for personal use only.
+- On Windows, stopping a chat (delete, quit, a hung close) kills its process
+  outright, so its background commands keep running. Fix in the Windows pass
+  (for example with a job object).
+- Showing which chats have background work, or how much memory each uses.
 
 ---
 
@@ -333,6 +343,10 @@ between CLI versions and must never crash the reader.
 | `control_cancel_request` | An approval request was withdrawn | `request_id` |
 | `system`, subtype `post_turn_summary` | One-line summary of the turn | `status_detail` |
 | `rate_limit_event` | Subscription usage | `rate_limit_info.unifiedWindows.*.utilization`, `resetsAt` |
+| `system`, subtype `background_tasks_changed` | The full list of running background commands and agents, sent whenever it changes; `[]` when all are done | `tasks[]` (`task_id`, `task_type` such as `local_bash`, `description`) |
+
+When background work ends, Claude Code starts a turn on its own (`init`, a
+short reply, `result`) to report it. Tested on CLI 2.1.322.
 
 Details that matter:
 
@@ -417,16 +431,38 @@ can't close a chat that has been used since.
   is running.
 - **Turn ends (`Idle`):** start the idle timer. Its length is, in order:
   `HARNESS_IDLE_SECONDS`, the `idle_seconds` setting, 300. Zero means never.
-- **Idle timer fires:** if nothing happened since, mark `closing` and call
-  `close()` (close stdin). Never kill; the process finishes background work,
-  then exits. **Tested** live at 5 and 45 seconds, with the window hidden.
-- **Send while `closing`:** wait up to 30 seconds for the exit, then spawn
-  with `--resume`. After 30 seconds return an error asking to try again.
+- **Background work** (`BackgroundWork { running }`, from Claude Code's
+  `background_tasks_changed`): while any runs, the chat is never closed for
+  being idle, with no time limit. This keeps a dev server watcher or a
+  `caffeinate` alive. When the last one ends between turns, the idle timer
+  starts (Claude Code's own follow-up turn usually restarts it anyway).
+  Added after a chat running a 2-hour `caffeinate` was asked to close: Claude
+  Code waits for background work before exiting, so the chat was locked for
+  hours. **Tested** live: a chat with a 45-second background `sleep` stayed
+  open with a 5-second idle time, then closed about 5 seconds after its
+  follow-up reply.
+- **Idle timer fires:** if nothing happened since and nothing runs in the
+  background, mark `closing` and call `close()` (close stdin). If it hasn't
+  exited 30 seconds later, `stop()` it.
+- **`stop()`:** SIGTERM on Mac and Linux, which Claude Code answers by ending
+  its background commands; killed 5 seconds later if still running. On
+  Windows it is a kill, which leaves background commands running (see
+  "What it doesn't cover"). A stopped process's non-zero exit is not
+  reported as an error.
+- **Send while `closing`:** `stop()` the old process at once (safe: chats are
+  only closed with nothing in the background), wait up to 10 seconds for it
+  to exit, then spawn with `--resume`.
+- **Delete:** the chat's process is `stop()`ped, background work included.
+  **Tested** live: the process and its background `sleep` were gone within
+  2 seconds.
 - **Process exits:** `Exited` clears the process. An unexpected exit also
   emits `Error` with the tail of stderr. The next send resumes.
-- **App quit (`RunEvent::Exit`):** `close()` every live process and wait up to
-  3 seconds. Anything still running loses its stdin when the app goes, and
-  exits then. **Tested**: no chat processes are left after the app is killed.
+- **App quit (`RunEvent::Exit`):** `stop()` chats with background work,
+  `close()` the rest, and wait up to 3 seconds; then `stop()` anything still
+  live and wait up to 2 more. **Tested** before background handling: no chat
+  processes are left after the app is killed. The background part is
+  unit-tested only (a real quit can't be sent to a test copy without
+  reaching the user's own window).
 - **`agent_session_id`** comes from every turn's `init` and is saved at once,
   so a crash before the first `result` can still resume.
 - **Locks:** no lock is held while calling an agent method or `spawn`. Both

@@ -10,17 +10,20 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::{AgentAdapter, EventSink, RunningAgent, SpawnOptions};
 use crate::events::{AgentEvent, ApprovalKind, Block, Decision, ModelInfo, SessionState};
 
 /// How many stderr lines to keep for an error message when the process dies.
 const STDERR_TAIL_LINES: usize = 30;
+/// How long a stopped process gets to end its background commands before it is killed.
+const STOP_GRACE: Duration = Duration::from_secs(5);
 
 pub struct ClaudeCodeAdapter;
 
@@ -107,6 +110,24 @@ struct ClaudeCodeProcess {
     pending: Pending,
     sent: Sent,
     sink: EventSink,
+    /// Taken by the first `stop()`.
+    stop_tx: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+/// Ask a process to end. On Unix that is SIGTERM, which Claude Code answers by
+/// ending its background commands (seen with a background `caffeinate`).
+/// Windows has no such signal, so the process is killed and its background
+/// commands are left running.
+fn terminate(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: plain signal send to our own child's pid.
+        unsafe {
+            libc::kill(pid as i32, libc::SIGTERM);
+        }
+    }
+    #[cfg(windows)]
+    let _ = child.start_kill();
 }
 
 impl AgentAdapter for ClaudeCodeAdapter {
@@ -135,6 +156,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
         let pending: Pending = Arc::default();
         let sent: Sent = Arc::default();
+        let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
         sink(AgentEvent::Status {
             state: SessionState::Starting,
         });
@@ -178,7 +200,29 @@ impl AgentAdapter for ClaudeCodeAdapter {
             let sink = sink.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
+                // After a stop: when to kill if it hasn't exited.
+                let mut kill_at: Option<tokio::time::Instant> = None;
+                let mut killed = false;
+                loop {
+                    let line = tokio::select! {
+                        line = lines.next_line() => match line {
+                            Ok(Some(line)) => line,
+                            _ => break,
+                        },
+                        // A stop, or the handle dropped (a deleted chat).
+                        _ = &mut stop_rx, if kill_at.is_none() => {
+                            kill_at = Some(tokio::time::Instant::now() + STOP_GRACE);
+                            terminate(&mut child);
+                            continue;
+                        },
+                        _ = tokio::time::sleep_until(kill_at.unwrap_or_else(tokio::time::Instant::now)),
+                            if kill_at.is_some() && !killed =>
+                        {
+                            killed = true;
+                            let _ = child.start_kill();
+                            continue;
+                        },
+                    };
                     let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
                         continue;
                     };
@@ -194,7 +238,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 }
                 let clean_exit = matches!(child.wait().await, Ok(status) if status.success());
                 pending.lock().unwrap().clear();
-                if !clean_exit {
+                // A stopped process exits with an error on purpose.
+                if !clean_exit && kill_at.is_none() {
                     let tail: Vec<String> = stderr_tail.lock().unwrap().iter().cloned().collect();
                     let detail = if tail.is_empty() {
                         "no error output".to_string()
@@ -216,6 +261,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             pending,
             sent,
             sink,
+            stop_tx: Mutex::new(Some(stop_tx)),
         }))
     }
 
@@ -405,6 +451,12 @@ impl RunningAgent for ClaudeCodeProcess {
     fn close(&self) {
         let _ = self.tx.send(Out::Close);
     }
+
+    fn stop(&self) {
+        if let Some(stop) = self.stop_tx.lock().unwrap().take() {
+            let _ = stop.send(());
+        }
+    }
 }
 
 /// Claude Code's suggested permission changes, limited to the current chat.
@@ -485,6 +537,13 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
                     mode: mode.to_string(),
                 });
             }
+        }
+
+        // The full list of background commands and agents, sent whenever it
+        // changes; empty once all are done (tested on CLI 2.1.322).
+        "system" if v["subtype"] == "background_tasks_changed" => {
+            let running = v["tasks"].as_array().map_or(0, |tasks| tasks.len() as u32);
+            out.events.push(AgentEvent::BackgroundWork { running });
         }
 
         // Claude Code withdrew a request, e.g. the turn was stopped while it waited.
@@ -707,6 +766,20 @@ mod tests {
         // The same echo again, or one for a message this process never sent
         // (history replayed by a resume), is dropped.
         assert!(acknowledge(events(echo, &Pending::default()), &sent).is_empty());
+    }
+
+    #[test]
+    fn background_list_gives_a_count() {
+        let two = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a","task_type":"local_bash"},{"task_id":"b","task_type":"local_agent"}]}"#;
+        assert_eq!(
+            events(two, &Pending::default()),
+            vec![AgentEvent::BackgroundWork { running: 2 }]
+        );
+        let none = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#;
+        assert_eq!(
+            events(none, &Pending::default()),
+            vec![AgentEvent::BackgroundWork { running: 0 }]
+        );
     }
 
     #[test]

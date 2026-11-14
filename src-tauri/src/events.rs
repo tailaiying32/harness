@@ -126,6 +126,11 @@ pub enum AgentEvent {
         /// 0.0 to 1.0.
         utilization: f64,
     },
+    /// How many background commands and agents the agent has running. Sent
+    /// whenever that changes. A chat with any running is not closed when idle.
+    BackgroundWork {
+        running: u32,
+    },
     Error {
         message: String,
     },
@@ -137,7 +142,10 @@ impl AgentEvent {
     pub fn is_saved(&self) -> bool {
         !matches!(
             self,
-            AgentEvent::TextDelta { .. } | AgentEvent::UsageUpdate { .. } | AgentEvent::Status { .. }
+            AgentEvent::TextDelta { .. }
+                | AgentEvent::UsageUpdate { .. }
+                | AgentEvent::Status { .. }
+                | AgentEvent::BackgroundWork { .. }
         )
     }
 
@@ -233,6 +241,7 @@ mod tests {
             AgentEvent::UserMessage { text: "hi".into(), id: None }
         );
         assert!(!AgentEvent::Status { state: SessionState::Idle }.is_saved());
+        assert!(!AgentEvent::BackgroundWork { running: 1 }.is_saved());
         assert!(
             !AgentEvent::TextDelta {
                 message_id: "m".into(),

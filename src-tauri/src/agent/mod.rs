@@ -45,6 +45,10 @@ pub trait RunningAgent: Send + Sync {
     fn set_model(&self, model: &str) -> Result<(), String>;
     /// Ask the process to finish up and exit on its own.
     fn close(&self);
+    /// End the process now. On Mac and Linux it is asked to terminate first, so
+    /// it can end its own background commands; it is killed if still running
+    /// 5 seconds later.
+    fn stop(&self);
 }
 
 pub trait AgentAdapter: Send + Sync {

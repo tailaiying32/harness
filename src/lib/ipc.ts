@@ -45,6 +45,7 @@ export type AgentEvent =
   | { kind: "message_seen"; id: string }
   | { kind: "turn_ended"; ok: boolean; duration_ms: number | null }
   | { kind: "usage_update"; window: string | null; utilization: number }
+  | { kind: "background_work"; running: number }
   | { kind: "error"; message: string };
 
 export type Envelope = { session_id: string; event: AgentEvent };
