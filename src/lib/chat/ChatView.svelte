@@ -132,8 +132,7 @@
           />
         </div>
       {:else if group.item.type === "user"}
-        <div class="row block">
-          <span class="marker accent">&gt;</span>
+        <div class="row block mine">
           <div class="body user">{group.item.text}</div>
         </div>
       {:else if group.item.type === "text"}
@@ -237,10 +236,30 @@
     min-width: 0;
     flex: 1;
   }
+  /* The user's messages: a block in the panel colour on the right, so they
+     are easy to find when scrolling back. The text stays left aligned and may
+     take most of the column, since the background already sets it apart. */
+  .mine {
+    justify-content: flex-end;
+  }
   .user {
+    flex: 0 1 auto;
+    max-width: 85%;
+    padding: 0.7em 1.8ch;
+    border-radius: 6px;
+    background: var(--panel);
     color: var(--bright);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  /* More air around them than between Claude's blocks (this adds to the
+     normal gap), so each one opens a new turn. Two in a row stay together. */
+  .mine:not(:first-child),
+  .mine + :not(.mine) {
+    margin-top: 1.2em;
+  }
+  .mine + .mine {
+    margin-top: 0;
   }
   .pre {
     white-space: pre-wrap;

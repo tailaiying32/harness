@@ -519,9 +519,13 @@ https://www.magicpatterns.com/os/tWmrW2q43Q7sWofaHnFJVj?file=2oZgfpBgi1cedNPY3NJ
 - **Sidebar:** bare chat titles under each project's path, one status dot per
   chat (accent = waiting on the user, ok = working, hollow = idle). No preview
   line, no time.
-- **Chat:** a centred column, about 800px wide. The user's message starts with
-  an accent `>` in bright text; Claude's text is indented under it, no bubble.
-  Code blocks use style D (see "Appearance settings").
+- **Chat:** a centred column, about 800px wide. The user's message is a block
+  on the right in the theme's `panel` colour: bright text, left aligned, at
+  most 85% of the column, nearly square corners, with about twice the normal
+  gap above and below. This is the one place the look follows a chat app
+  rather than a terminal: with only a `>` marker, the user's messages were
+  hard to find when scrolling back. Claude's text has no bubble. Code blocks
+  use style D (see "Appearance settings").
 - **Claude's work:** a run of tool calls folds into one dim line ("Read
   sessions.rs, searched for SessionState::Idle ▸"), with +/- counts when it
   includes edits. Clicking opens it to one line per tool call, with the diff

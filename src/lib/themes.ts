@@ -8,7 +8,7 @@ export type Theme = {
   dark: boolean;
   /** Window background. */
   bg: string;
-  /** Background of code blocks, diffs and the terminal. Must be clearly visible against `bg`. */
+  /** Background of code blocks, diffs, the terminal and the user's messages. Must be clearly visible against `bg`. */
   panel: string;
   /** Body text. */
   fg: string;

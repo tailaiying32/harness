@@ -39,6 +39,7 @@ let projects: ProjectRow[] = [
       row("working", `${home}/code/harness`, "Why is the idle timer late when hidden?", 9),
       row("waiting", `${home}/code/harness`, "Bump dependencies and run the tests", 30),
       row("unseen", `${home}/code/harness`, "Tidy the footer so it stays on one line", 55),
+      row("looks", `${home}/code/harness`, "Move the idle timer to the core", 70),
     ],
   },
   {
@@ -189,6 +190,41 @@ async function afterPlan(id: string, decision: string) {
   emit(id, { kind: "status", state: "idle" });
 }
 
+/** Short and long messages from both sides, for judging how the user's messages stand out. */
+const looksChat: AgentEvent[] = [
+  { kind: "user_message", text: "Why is the idle timer late when the window is hidden?" },
+  tool("k1", "Grep", { pattern: "setTimeout" }),
+  result("k1", "src/lib/state/app.svelte.ts:112"),
+  tool("k2", "Read", { file_path: `${home}/code/harness/src/lib/state/app.svelte.ts` }),
+  result("k2", "…"),
+  text(
+    "k-m1",
+    "The timer runs in the window, and a hidden window's timers are slowed down by the system.\n\n## What happens\n\n- The chat goes quiet and a 10 minute timer starts in the page.\n- The window is hidden, so the system only lets the timer fire about once a minute, sometimes less.\n- The shutdown lands late, or not until the window is shown again.\n\nThe fix is to keep the clock in the core, which is never slowed down, and have it tell the window when time is up.",
+  ),
+  ended,
+  {
+    kind: "user_message",
+    text: "ok, move it to the core. last time a change like this broke the approvals flow and it took most of an evening to work out why, so please go slowly and check each step before moving on. a few things to keep in mind:\n\n- the timer should restart on any activity, not just my messages\n- an approval that is waiting on me should never be shut down\n- keep the 10 minutes as a setting we can change later\n\nalso here is the log from last night in case it helps:\n\n22:14:03 idle timer armed (600s)\n22:31:47 idle timer fired, 1064s after arming\n22:31:47 closing session agent-working",
+  },
+  tool("k3", "Edit", { file_path: `${home}/code/harness/src-tauri/src/sessions.rs`, old_string: "a", new_string: "b" }),
+  result("k3", "ok"),
+  tool("k4", "Edit", { file_path: `${home}/code/harness/src/lib/state/app.svelte.ts`, old_string: "a", new_string: "b" }),
+  result("k4", "ok"),
+  text(
+    "k-m2",
+    "The clock now lives in the core.\n\n- Any event from the agent or from you restarts it.\n- A chat waiting on an approval is skipped.\n- The length is one constant, `IDLE_AFTER`, ready to become a setting.\n\nYour log matches the cause: 1064 seconds instead of 600.",
+  ),
+  ended,
+  { kind: "user_message", text: "nice. run the tests" },
+  tool("k5", "Bash", { command: "cargo test", description: "Run the core's tests" }),
+  result("k5", "test result: ok. 31 passed; 0 failed"),
+  text("k-m3", "All 31 tests pass, including two new ones for the idle clock."),
+  ended,
+  { kind: "user_message", text: "and the window side?" },
+  text("k-m4", "Nothing to run there yet: the window has no tests of its own. I checked by hand that a hidden window now shuts down on time."),
+  ended,
+];
+
 /** Three hundred short turns, for checking that a long chat stays light. */
 const longChat: AgentEvent[] = Array.from({ length: 300 }, (_, n) => [
   { kind: "user_message", text: `Question ${n + 1}` } as AgentEvent,
@@ -249,7 +285,7 @@ const commands: Record<string, (args: Args) => unknown> = {
   sidebar: () => projects,
   load_session: (args) => ({
     session: projects.flatMap((p) => p.sessions).find((s) => s.id === args.sessionId),
-    events: args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
+    events: args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : args.sessionId === "looks" ? looksChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
     live: args.sessionId === "planning",
   }),
   delete_session: (args) => {
