@@ -60,6 +60,14 @@
       showSettings = false;
     }
   }
+  // Opening a chat, from the sidebar or the trash, puts settings away.
+  let shownChat = app.current.sessionId;
+  $effect(() => {
+    if (chat.sessionId !== shownChat) {
+      shownChat = chat.sessionId;
+      showSettings = false;
+    }
+  });
   // Last known list first; refreshed from Claude Code once it has been found.
   let models = $state(loadCachedModels());
 
@@ -241,6 +249,8 @@
 
 <div class="app" class:paneled={panelOpen}>
   <Sidebar {app} onsettings={() => (showSettings = !showSettings)} />
+  <!-- Chat and side panel; settings are drawn over both, never the sidebar. -->
+  <div class="work">
   <main>
     <!-- Each chat gets its own view, so scroll position and open folds don't leak between chats. -->
     {#key chat.sessionId}
@@ -254,22 +264,29 @@
       <ChatView {chat} problem={setup?.problem ?? null} />
       <Composer {chat} ready={!!setup?.logged_in} home={app.home} {models} focus={app.focusBox} />
     {/key}
-    <!-- Drawn over the chat, which stays as it is underneath. -->
-    {#if showSettings}
-      <Settings bind:theme bind:size bind:fontSize onclose={() => (showSettings = false)} />
-    {/if}
   </main>
   {#if panelOpen}
     {#key chat.sessionId}
       <SidePanel {chat} />
     {/key}
   {/if}
+  <!-- Drawn over the chat and panel, which stay as they are underneath. -->
+  {#if showSettings}
+    <Settings {app} bind:theme bind:size bind:fontSize onclose={() => (showSettings = false)} />
+  {/if}
+  </div>
 </div>
 
 <style>
   .app {
     height: 100%;
     display: flex;
+  }
+  .work {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    position: relative;
   }
   main {
     flex: 1;

@@ -762,12 +762,17 @@ Mocked up on the same board:
   failure.
 - **Settings page: started 2026-11-13** (the user wanted theme and size out of
   the bottom bar). "settings" at the bottom of the sidebar, or Cmd+, / Ctrl+,
-  opens it over the chat; "close" or Escape closes it. It holds spacing
+  opens it over the chat and side panel (never the sidebar); "close", Escape
+  or opening a chat closes it. It holds spacing
   (compact, regular, roomy: line height, gaps and margins), font size (11 to
   16 px) and theme (dark and light lists). Spacing and font size were one
   "size" setting until 2026-11-13; they are separate now, and a saved size
   with no saved font size keeps the text size it used to give (11.5, 12.5,
-  13.5); a click applies at once and is remembered. Still to
+  13.5); a click applies at once and is remembered. Since 2026-11-14 it also
+  holds the trash (moved out of the sidebar: small lists that don't help the
+  work at hand belong in settings): each chat with its days left and
+  "restore"; clicking one opens it; "empty trash" asks before deleting for
+  good. Deleting a chat (× in the sidebar) asks "delete? yes / no" first. Still to
   add: font, idle timeout, the "Always allow" default and the path to Claude
   Code, which are constants until then.
 - **The line under the message box** follows the Claude desktop app (the

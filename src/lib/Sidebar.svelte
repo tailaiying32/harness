@@ -15,16 +15,6 @@
     idle: "",
   };
 
-  /** The trash list is showing. */
-  let trashOpen = $state(false);
-
-  /** How long a trashed chat has left before it is deleted for good. */
-  const TRASH_DAYS = 30;
-  function daysLeft(trashedAt: number | null): string {
-    const left = Math.ceil(TRASH_DAYS - (Date.now() - (trashedAt ?? Date.now())) / 86_400_000);
-    return left <= 1 ? "last day" : `${left}d left`;
-  }
-
   /** The chat being renamed, and the text typed so far. */
   let renaming = $state<string | null>(null);
   let draft = $state("");
@@ -46,8 +36,12 @@
     node.select();
   }
 
-  // One click: the trash is the safety net.
+  /** The chat asking "delete? yes / no" before it goes to the trash. */
+  let deleting = $state<string | null>(null);
+
+  // Asks first: the trash is tucked away in settings, so a misclick is hard to spot.
   async function remove(id: string) {
+    deleting = null;
     await app.remove(id);
   }
 </script>
@@ -63,7 +57,11 @@
         {#each project.sessions as session (session.id)}
           {@const dot = app.dot(session.id)}
           <div class="row chat" class:active={session.id === app.current.sessionId}>
-            {#if renaming === session.id}
+            {#if deleting === session.id}
+              <span class="ask">delete?</span>
+              <button class="danger" onclick={() => remove(session.id)}>yes</button>
+              <button class="no" onclick={() => (deleting = null)}>no</button>
+            {:else if renaming === session.id}
               <span class="dot {dot}">{glyph[dot]}</span>
               <input
                 class="rename"
@@ -86,39 +84,13 @@
                 {#if session.branch}
                   <span class="branch" title={prLabel(session.pr, session.branch)}><BranchMark pr={session.pr} /></span>
                 {/if}
-                <button class="quiet" title="Move this chat to the trash" onclick={() => remove(session.id)}>×</button>
+                <button class="quiet" title="Move this chat to the trash" onclick={() => (deleting = session.id)}>×</button>
               </span>
             {/if}
           </div>
         {/each}
       </div>
     {/each}
-    {#if app.trash.length > 0}
-      <div class="trash">
-        <button class="row folder" onclick={() => (trashOpen = !trashOpen)}>
-          <span class="path">trash ({app.trash.length})</span>
-          <span>{trashOpen ? "−" : "+"}</span>
-        </button>
-        {#if trashOpen}
-          {#each app.trash as session (session.id)}
-            <div class="row chat" class:active={session.id === app.current.sessionId}>
-              <button class="open" onclick={() => app.open(session.id)} title="{session.title} (send a message to restore it)">
-                <span class="dot">·</span>
-                <span class="title">{session.title || "untitled"}</span>
-              </button>
-              <!-- Days left normally; "restore" while the pointer is on the row. -->
-              <span class="end wide">
-                <span class="left">{daysLeft(session.trashed_at)}</span>
-                <button class="quiet" title="Restore this chat" onclick={() => app.restore(session.id)}>restore</button>
-              </span>
-            </div>
-          {/each}
-          <div class="row chat">
-            <button class="empty" onclick={() => app.emptyTrash()}>empty trash</button>
-          </div>
-        {/if}
-      </div>
-    {/if}
     {#if app.problem}<div class="problem">{app.problem}</div>{/if}
   </div>
 
@@ -226,35 +198,22 @@
   .end > * {
     grid-area: 1 / 1;
   }
-  .end.wide {
-    width: auto;
-  }
-  .row:hover .branch,
-  .row:hover .left {
+  .row:hover .branch {
     visibility: hidden;
   }
-  .trash {
-    margin-top: auto;
-  }
-  .trash .folder {
-    width: 100%;
-    text-align: left;
-  }
-  .trash .folder:hover {
-    color: var(--fg);
-  }
-  .left {
-    flex-shrink: 0;
-    color: var(--faint);
-  }
-  .empty {
-    color: var(--faint);
-  }
-  .empty:hover {
-    color: var(--fg);
-  }
-  .empty {
+  .ask {
+    flex: 1;
     padding-left: 2ch;
+    color: var(--dim);
+  }
+  .no {
+    color: var(--dim);
+  }
+  .no:hover {
+    color: var(--fg);
+  }
+  .danger {
+    color: var(--bad);
   }
   /* Edited in place: the title's own text with a thin underline, none of the
      system's field box or blue focus ring. */
