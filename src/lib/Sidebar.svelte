@@ -78,10 +78,11 @@
                 <span class="dot {dot}" title={meaning[dot]}>{glyph[dot]}</span>
                 <span class="title">{session.title || "untitled"}</span>
               </button>
-              <!-- The branch mark and delete share one slot: the mark normally,
-                   delete while the pointer is on the row. -->
+              <!-- The pull request mark and delete share one slot: the mark
+                   normally, delete while the pointer is on the row. A chat's
+                   worktree alone gets no mark; only a pull request does. -->
               <span class="end">
-                {#if session.branch}
+                {#if session.pr}
                   <span class="branch" title={prLabel(session.pr, session.branch)}><BranchMark pr={session.pr} /></span>
                 {/if}
                 <button class="quiet" title="Move this chat to the trash" onclick={() => (deleting = session.id)}>×</button>
