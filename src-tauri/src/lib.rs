@@ -69,6 +69,12 @@ fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), 
     state.sessions.delete(&session_id)
 }
 
+/// Gives a chat a new title.
+#[tauri::command]
+fn rename_session(state: State<'_, AppState>, session_id: String, title: String) -> Result<(), String> {
+    state.sessions.rename(&session_id, &title)
+}
+
 #[tauri::command]
 fn subscribe(state: State<'_, AppState>, on_event: Channel<Envelope>) {
     *state.channel.lock().unwrap() = Some(on_event);
@@ -247,6 +253,7 @@ pub fn run() {
             sidebar,
             load_session,
             delete_session,
+            rename_session,
             send_message,
             answer_approval,
             interrupt,

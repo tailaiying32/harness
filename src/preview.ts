@@ -288,6 +288,9 @@ const commands: Record<string, (args: Args) => unknown> = {
     events: args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : args.sessionId === "looks" ? looksChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
     live: args.sessionId === "planning",
   }),
+  rename_session: (args) => {
+    for (const p of projects) for (const s of p.sessions) if (s.id === args.sessionId) s.title = args.title.trim();
+  },
   delete_session: (args) => {
     projects = projects
       .map((p) => ({ ...p, sessions: p.sessions.filter((s) => s.id !== args.sessionId) }))

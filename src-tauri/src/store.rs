@@ -285,6 +285,20 @@ impl Store {
         tx.commit().map_err(err)
     }
 
+    /// Gives a chat a new title. An empty name is refused.
+    pub fn rename_session(&self, session_id: &str, title: &str) -> Result<(), String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("A chat needs a name".into());
+        }
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE sessions SET title = ?2 WHERE id = ?1", params![session_id, title])
+            .map(|_| ())
+            .map_err(err)
+    }
+
     pub fn setting(&self, key: &str) -> Option<String> {
         self.conn
             .lock()
