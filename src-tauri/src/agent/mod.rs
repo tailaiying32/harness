@@ -23,6 +23,8 @@ pub struct SpawnOptions {
     pub mode: Option<String>,
     /// Model to start on: an alias such as "opus" or a full name. None or "default" = the agent's default.
     pub model: Option<String>,
+    /// Effort level to start on ("low" ... "max"). None or "default" = the agent's default for the model.
+    pub effort: Option<String>,
 }
 
 /// A live agent process. Every method only queues a message, so none of them block.
@@ -43,6 +45,8 @@ pub trait RunningAgent: Send + Sync {
     fn set_mode(&self, mode: &str) -> Result<(), String>;
     /// Switch model for the turns that follow. "default" goes back to the agent's default.
     fn set_model(&self, model: &str) -> Result<(), String>;
+    /// Switch effort level for the turns that follow.
+    fn set_effort(&self, effort: &str) -> Result<(), String>;
     /// Ask the process to finish up and exit on its own.
     fn close(&self);
     /// End the process now. On Mac and Linux it is asked to terminate first, so

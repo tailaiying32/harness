@@ -140,6 +140,7 @@ async fn send_message(
     project_path: String,
     mode: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
     text: String,
     message_id: String,
 ) -> Result<(), String> {
@@ -157,7 +158,7 @@ async fn send_message(
     // The manager is cloned so nothing borrowed from `state` is held while waiting.
     let sessions = state.sessions.clone();
     sessions
-        .send_message(&session_id, binary, project_path, mode, model, &text, &message_id)
+        .send_message(&session_id, binary, project_path, mode, model, effort, &text, &message_id)
         .await
 }
 
@@ -190,6 +191,11 @@ fn set_model(state: State<'_, AppState>, session_id: String, model: String) -> R
     state.sessions.set_model(&session_id, &model)
 }
 
+#[tauri::command]
+fn set_effort(state: State<'_, AppState>, session_id: String, effort: String) -> Result<(), String> {
+    state.sessions.set_effort(&session_id, &effort)
+}
+
 /// A markdown file's text, for a link opened in the side panel.
 #[tauri::command]
 async fn read_doc(path: String) -> Result<String, String> {
@@ -199,7 +205,8 @@ async fn read_doc(path: String) -> Result<String, String> {
 }
 
 /// The models the agent offers. Starts a short-lived agent process, so it runs
-/// off the main thread and takes about a second.
+/// off the main thread and takes about 7 seconds (it also reads each model's
+/// default effort). The window shows the last list meanwhile.
 #[tauri::command]
 async fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfo>, String> {
     let binary = state
@@ -328,6 +335,7 @@ pub fn run() {
             interrupt,
             set_mode,
             set_model,
+            set_effort,
             list_models,
             close_session,
             read_doc,

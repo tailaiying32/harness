@@ -7,6 +7,7 @@ import {
   readDoc,
   sendMessage,
   setMode,
+  setEffort,
   setModel,
   type AgentEvent,
   type ApprovalKind,
@@ -138,6 +139,7 @@ export class Chat {
     chat.replaying = false;
     chat.mode = row.mode as Mode;
     chat.modelChoice = row.model;
+    chat.effortChoice = row.effort ?? "default";
     chat.stopping = false;
     if (!live) {
       chat.settle();
@@ -157,6 +159,8 @@ export class Chat {
   model = $state<string | null>(null);
   /** The model the user picked: an alias, a full name, or "default" for Claude Code's own default. */
   modelChoice = $state("default");
+  /** The effort level picked for this chat, or "default" for Claude Code's default for the model. */
+  effortChoice = $state("default");
   mode = $state<Mode>("default");
   usage = $state<{ window: string | null; utilization: number } | null>(null);
   projectPath = $state("");
@@ -523,7 +527,7 @@ export class Chat {
     this.stopping = false;
     if (this.turnStartedAt === null) this.turnStartedAt = Date.now();
     try {
-      await sendMessage(this.sessionId, this.projectPath.trim(), this.mode, this.modelChoice, message, messageId);
+      await sendMessage(this.sessionId, this.projectPath.trim(), this.mode, this.modelChoice, this.effortChoice, message, messageId);
       this.onSent?.();
     } catch (e) {
       this.turnStartedAt = null;
@@ -593,6 +597,18 @@ export class Chat {
       await setModel(this.sessionId, choice);
     } catch {
       // No live process: the model is passed along with the next message instead.
+    }
+  }
+
+  /** Pick an effort level for this chat only. A running process is told now; otherwise it applies when one starts. */
+  async changeEffort(effort: string): Promise<void> {
+    this.effortChoice = effort;
+    if (this.status === "none") return;
+    try {
+      // Saved even with no live process, so a resumed chat keeps it.
+      await setEffort(this.sessionId, effort);
+    } catch {
+      // No live process: the level is passed along with the next message instead.
     }
   }
 

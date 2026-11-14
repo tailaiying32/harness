@@ -32,6 +32,7 @@ const row = (
   title,
   mode: "default",
   model: "default",
+  effort: "default",
   agent_session_id: "agent-" + id,
   last_used_at: now - minutesAgo * 60_000,
   work_path: branch ? `${home}/Library/Application Support/harness/worktrees/${id}` : null,
@@ -393,11 +394,16 @@ const commands: Record<string, (args: Args) => unknown> = {
   },
   set_mode: (args) => emit(args.sessionId, { kind: "mode_changed", mode: args.mode }),
   set_model: () => undefined,
-  list_models: () => [
-    { value: "default", name: "Default (Fable 5.2)", detail: null },
-    { value: "opus", name: "Opus 5.5", detail: null },
-    { value: "haiku", name: "Haiku 5.5", detail: null },
-  ],
+  set_effort: () => undefined,
+  list_models: () => {
+    const all = ["low", "medium", "high", "xhigh", "max"];
+    return [
+      { value: "default", name: "Default (Fable 5.2)", detail: null, efforts: all, default_effort: "medium" },
+      { value: "opus", name: "Opus 5.5", detail: null, efforts: all, default_effort: "high" },
+      { value: "haiku", name: "Haiku 5.5", detail: null, efforts: all, default_effort: "medium" },
+      { value: "claude-haiku-4-5", name: "Haiku 4.5", detail: null, efforts: [], default_effort: null },
+    ];
+  },
   close_session: () => undefined,
   autotest: () => null,
   "plugin:path|resolve_directory": () => home,

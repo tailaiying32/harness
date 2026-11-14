@@ -219,6 +219,10 @@ pub struct ModelInfo {
     pub name: String,
     /// A short description, if the agent gives one.
     pub detail: Option<String>,
+    /// Effort levels it takes, lowest first. Empty = no effort setting.
+    pub efforts: Vec<String>,
+    /// The level it uses when none is picked, if known.
+    pub default_effort: Option<String>,
 }
 
 /// What the window receives: an event plus the chat it belongs to.

@@ -29,6 +29,8 @@ pub struct SessionRow {
     pub mode: String,
     /// Model last chosen: an alias, a full name, or "default".
     pub model: String,
+    /// Effort level picked for this chat, or "default" for the agent's own default.
+    pub effort: String,
     /// The agent's own ID for the chat, once it has started. Needed to resume.
     pub agent_session_id: Option<String>,
     /// Milliseconds since 1970.
@@ -95,7 +97,7 @@ fn title_from(text: &str) -> String {
 }
 
 const SESSION_COLUMNS: &str = "s.id, p.path, s.title, s.mode, s.model, s.agent_session_id, \
-     s.last_used_at, s.wt, s.wt_status, s.pr, s.trashed_at";
+     s.last_used_at, s.wt, s.wt_status, s.pr, s.trashed_at, s.effort";
 
 /// A JSON column read leniently: unreadable means absent.
 fn json_col<T: serde::de::DeserializeOwned>(row: &rusqlite::Row, i: usize) -> rusqlite::Result<Option<T>> {
@@ -120,6 +122,7 @@ fn session_from(row: &rusqlite::Row) -> rusqlite::Result<SessionRow> {
         wt_status,
         pr: json_col(row, 9)?,
         trashed_at: row.get(10)?,
+        effort: row.get(11)?,
     })
 }
 
@@ -161,6 +164,8 @@ const ADDED_SESSION_COLUMNS: &[(&str, &str)] = &[
     // The branch's pull request as JSON (`worktree::PrInfo`).
     ("pr", "TEXT"),
     ("trashed_at", "INTEGER"),
+    // Effort level picked for this chat; "default" = the agent's own default.
+    ("effort", "TEXT NOT NULL DEFAULT 'default'"),
 ];
 
 fn migrate(conn: &Connection) -> Result<(), String> {
@@ -457,6 +462,10 @@ impl Store {
 
     pub fn set_model(&self, session_id: &str, model: &str) -> Result<(), String> {
         self.update("model", session_id, model)
+    }
+
+    pub fn set_effort(&self, session_id: &str, effort: &str) -> Result<(), String> {
+        self.update("effort", session_id, effort)
     }
 
     /// `column` is always one of the fixed names above, never user input.
