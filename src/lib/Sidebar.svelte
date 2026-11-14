@@ -107,7 +107,7 @@
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    padding: var(--pad-y) calc(var(--pad-x) * 0.6);
+    padding: var(--pad-y) calc(var(--pad-x) * 0.6) var(--foot-y);
     border-right: 1px solid var(--line);
     min-height: 0;
   }
