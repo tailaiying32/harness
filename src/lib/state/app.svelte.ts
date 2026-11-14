@@ -39,6 +39,8 @@ export class AppState {
   statuses = $state<Record<string, SessionState>>({});
   /** Chats that finished a turn, or need an answer, while another was on screen. */
   unseen = $state<Record<string, boolean>>({});
+  /** The latest usage-limit reading from any chat. Limits are per account, so the newest one wins. */
+  usage = $state<{ window: string | null; utilization: number } | null>(null);
   /** A problem opening or deleting a chat, shown in the sidebar. */
   problem = $state("");
 
@@ -67,6 +69,7 @@ export class AppState {
   route(envelope: Envelope): void {
     const { session_id: id, event } = envelope;
     if (event.kind === "status") this.statuses[id] = event.state;
+    if (event.kind === "usage_update") this.usage = { window: event.window, utilization: event.utilization };
     // These change the chat's row (title, worktree, pull request).
     if (
       event.kind === "title_changed" ||
