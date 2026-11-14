@@ -738,8 +738,11 @@ Mocked up on the same board:
   folder (faint, home as `~`, the end kept when long) with its chats under
   it; "+ new chat" and "settings" at the bottom. No app name at the top (the
   user removed it for room). A mark before each
-  title: `●` green = working, `●` accent = needs your answer, `●` plain =
-  finished since you last looked, `○` = nothing going on. The open chat is
+  title: `●` grey = working, `●` yellow = needs your answer, `●` blue =
+  finished since you last looked, `○` = nothing going on. Every theme has
+  its own `blue` and `yellow` from its palette (yellow darkened on light
+  themes), so the meaning holds across themes (user's choice, 2026-11-13,
+  matching the desktop app). The open chat is
   bright. On hover a folder shows `+` (new chat there) and a chat shows `×`;
   `×` asks "delete? yes no" in place before deleting. Hidden when the window
   is narrower than 720 px.
