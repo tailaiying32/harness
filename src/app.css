@@ -14,6 +14,12 @@
   --col: 800px;
   --side: 228px;
 
+  /* The bottom rows of the sidebar, the message box and the side panel sit
+     on one line: the same distance from the window's bottom edge, and the
+     same space between a text box and the buttons under it. */
+  --foot-y: calc(var(--pad-y) * 0.7);
+  --foot-gap: calc(var(--gap) * 0.7);
+
   /* Harness Dark, so the first paint is right before the theme is applied. */
   --bg: #111210;
   --panel: #1a1b17;
