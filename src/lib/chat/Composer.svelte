@@ -176,7 +176,7 @@
         bind:value={chat.draft}
         oninput={grow}
         onkeydown={onKey}
-        rows="2"
+        rows="1"
         placeholder="Message Claude Code"
       ></textarea>
       {#if chat.busy}
