@@ -25,6 +25,10 @@ pub struct Worktree {
     pub base_commit: String,
     /// The branch it started from, when there was one.
     pub base_branch: Option<String>,
+    /// Other branches the folder has been on (see `follow`). Only these may be
+    /// deleted along with `branch` once their pull requests have merged.
+    #[serde(default)]
+    pub seen: Vec<String>,
 }
 
 impl Worktree {
@@ -38,7 +42,7 @@ impl Worktree {
     }
 }
 
-/// A pull request for a worktree's branch.
+/// One of a chat's pull requests.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrInfo {
     pub number: i64,
@@ -47,6 +51,28 @@ pub struct PrInfo {
     pub url: String,
     /// The PR's head commit.
     pub head: String,
+    /// The branch it was opened from. Empty for one saved before this was kept.
+    #[serde(default)]
+    pub branch: String,
+}
+
+/// One state for a chat's whole set of pull requests: "open" while any is
+/// open, else "draft" while any is a draft, else "merged" if any merged, else
+/// "closed". None for no pull requests. The window has the same rule
+/// (`prSummary` in paths.ts).
+pub fn summary(prs: &[PrInfo]) -> Option<&'static str> {
+    let any = |state: &str| prs.iter().any(|pr| pr.state == state);
+    if prs.is_empty() {
+        None
+    } else if any("open") {
+        Some("open")
+    } else if any("draft") {
+        Some("draft")
+    } else if any("merged") {
+        Some("merged")
+    } else {
+        Some("closed")
+    }
 }
 
 /// Whether a worktree's work has landed, and how.
@@ -190,7 +216,50 @@ pub fn create(
         branch,
         base_commit,
         base_branch,
+        seen: Vec::new(),
     })
+}
+
+/// The branch the worktree's folder is on. None when the folder is gone (put
+/// away) or on no branch (detached).
+pub fn current_branch(wt: &Worktree) -> Option<String> {
+    if !wt.path.join(".git").exists() {
+        return None;
+    }
+    git(&wt.path, ["symbolic-ref", "--short", "-q", "HEAD"])
+        .ok()
+        .filter(|b| !b.is_empty())
+}
+
+/// Whether the folder exists but is on no branch. Such a folder is left
+/// alone: there is no branch to bring it back on.
+pub fn is_detached(wt: &Worktree) -> bool {
+    wt.path.join(".git").exists() && current_branch(wt).is_none()
+}
+
+/// The worktree as it is now, if its folder was switched to another branch
+/// (a split task's next part). None when nothing changed.
+///
+/// The start commit moves too: to where the new branch forked from the first
+/// merge target that exists. `is_merged` reads "tip equals start" as "no work
+/// of its own", so a branch just cut from main isn't taken for merged work.
+pub fn follow(wt: &Worktree) -> Option<Worktree> {
+    let branch = current_branch(wt)?;
+    if branch == wt.branch {
+        return None;
+    }
+    let tip = resolve(&wt.repo_root, &format!("refs/heads/{branch}"))?;
+    let mut next = wt.clone();
+    next.seen.retain(|b| *b != branch);
+    if !next.seen.contains(&wt.branch) {
+        next.seen.push(wt.branch.clone());
+    }
+    next.branch = branch;
+    next.base_commit = merge_targets(&next)
+        .iter()
+        .find_map(|target| git(&wt.repo_root, ["merge-base", &tip, target]).ok().filter(|c| !c.is_empty()))
+        .unwrap_or(tip);
+    Some(next)
 }
 
 /// Copies every file git ignores in `main` into the worktree: build output,
@@ -382,12 +451,16 @@ pub fn has_saved_edits(repo_root: &Path, chat_id: &str) -> bool {
     resolve(repo_root, &saved_ref(chat_id)).is_some()
 }
 
-/// Whether the worktree's work has landed. A branch with no commits of its
-/// own never counts, nor does one with uncommitted edits (in its folder, or
-/// saved while put away for `chat_id`).
-pub fn is_merged(wt: &Worktree, pr: Option<&PrInfo>, chat_id: &str) -> Result<Merged, String> {
+/// Whether the worktree's work has landed. Never while any of the chat's
+/// pull requests is open or a draft (a split task isn't done until every part
+/// is), nor for a detached folder, a branch with no commits of its own, or
+/// uncommitted edits (in the folder, or saved while put away for `chat_id`).
+pub fn is_merged(wt: &Worktree, prs: &[PrInfo], chat_id: &str) -> Result<Merged, String> {
     let tip = resolve(&wt.repo_root, &format!("refs/heads/{}", wt.branch))
         .ok_or_else(|| format!("The branch {} no longer exists", wt.branch))?;
+    if matches!(summary(prs), Some("open" | "draft")) || is_detached(wt) {
+        return Ok(Merged::No);
+    }
     if tip == wt.base_commit {
         return Ok(Merged::No);
     }
@@ -404,7 +477,12 @@ pub fn is_merged(wt: &Worktree, pr: Option<&PrInfo>, chat_id: &str) -> Result<Me
             return Ok(Merged::ByGit);
         }
     }
-    if pr.is_some_and(|pr| pr.state == "merged" && pr.head == tip) {
+    // A pull request saved before branches were kept has none: it counts for
+    // any branch, as the matching head commit is the real proof.
+    let landed = |pr: &PrInfo| {
+        pr.state == "merged" && pr.head == tip && (pr.branch.is_empty() || pr.branch == wt.branch)
+    };
+    if prs.iter().any(landed) {
         return Ok(Merged::ByPr);
     }
     Ok(Merged::No)
@@ -418,6 +496,25 @@ pub fn drop_branch(repo_root: &Path, branch: &str, chat_id: &str) {
     let _ = git(repo_root, ["branch", "-D", branch]);
     let _ = git(repo_root, ["update-ref", "-d", &saved_ref(chat_id)]);
     let _ = git(repo_root, ["worktree", "prune"]);
+}
+
+/// Deletes the earlier branches of a finished split task: ones the folder was
+/// on (`wt.seen`) whose pull request merged with the branch's tip as its head.
+/// A branch with newer commits, or checked out in the main folder, stays.
+/// Called after the folder is removed and `drop_branch` has run.
+pub fn drop_landed_branches(wt: &Worktree, prs: &[PrInfo]) {
+    let main_is_on = git(&wt.repo_root, ["symbolic-ref", "--short", "-q", "HEAD"]).ok();
+    for branch in &wt.seen {
+        if main_is_on.as_deref() == Some(branch.as_str()) {
+            continue;
+        }
+        let Some(tip) = resolve(&wt.repo_root, &format!("refs/heads/{branch}")) else {
+            continue;
+        };
+        if prs.iter().any(|pr| pr.state == "merged" && pr.branch == *branch && pr.head == tip) {
+            let _ = git(&wt.repo_root, ["branch", "-D", branch]);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -598,6 +695,7 @@ mod tests {
             state: state.into(),
             url: "u".into(),
             head: head.into(),
+            branch: String::new(),
         }
     }
 
@@ -606,39 +704,127 @@ mod tests {
         let repo = Repo::new();
         let wt = repo.create(Some("main"));
         // No commits of its own: not merged, even though main contains it.
-        assert_eq!(is_merged(&wt, None, "chat1").unwrap(), Merged::No);
+        assert_eq!(is_merged(&wt, &[], "chat1").unwrap(), Merged::No);
 
         commit_in(&wt.path, "app.py", "work\n");
-        assert_eq!(is_merged(&wt, None, "chat1").unwrap(), Merged::No);
+        assert_eq!(is_merged(&wt, &[], "chat1").unwrap(), Merged::No);
         let tip = repo.git(&["rev-parse", &wt.branch]);
 
         // A squash-merged PR with the same head counts; a later commit doesn't.
-        assert_eq!(is_merged(&wt, Some(&pr("merged", &tip)), "chat1").unwrap(), Merged::ByPr);
-        assert_eq!(is_merged(&wt, Some(&pr("merged", "abc")), "chat1").unwrap(), Merged::No);
-        assert_eq!(is_merged(&wt, Some(&pr("open", &tip)), "chat1").unwrap(), Merged::No);
+        assert_eq!(is_merged(&wt, &[pr("merged", &tip)], "chat1").unwrap(), Merged::ByPr);
+        assert_eq!(is_merged(&wt, &[pr("merged", "abc")], "chat1").unwrap(), Merged::No);
+        assert_eq!(is_merged(&wt, &[pr("open", &tip)], "chat1").unwrap(), Merged::No);
 
         // Uncommitted edits keep it from counting.
         std::fs::write(wt.path.join("app.py"), "more\n").unwrap();
-        assert_eq!(is_merged(&wt, Some(&pr("merged", &tip)), "chat1").unwrap(), Merged::No);
+        assert_eq!(is_merged(&wt, &[pr("merged", &tip)], "chat1").unwrap(), Merged::No);
         git(&wt.path, ["checkout", "--", "."]).unwrap();
 
         // Merged into main with git.
         repo.git(&["merge", "-q", "--no-edit", &wt.branch]);
-        assert_eq!(is_merged(&wt, None, "chat1").unwrap(), Merged::ByGit);
+        assert_eq!(is_merged(&wt, &[], "chat1").unwrap(), Merged::ByGit);
 
         // Put away with uncommitted edits saved: not done, even though merged.
         std::fs::write(wt.path.join("left.txt"), "unfinished\n").unwrap();
         put_away(&wt, "chat1").unwrap();
-        assert_eq!(is_merged(&wt, None, "chat1").unwrap(), Merged::No);
-        assert_eq!(is_merged(&wt, None, "other-chat").unwrap(), Merged::ByGit);
+        assert_eq!(is_merged(&wt, &[], "chat1").unwrap(), Merged::No);
+        assert_eq!(is_merged(&wt, &[], "other-chat").unwrap(), Merged::ByGit);
         restore(&wt, "chat1").unwrap();
         std::fs::remove_file(wt.path.join("left.txt")).unwrap();
 
         // And once its folder is gone too.
         remove_folder(&wt).unwrap();
-        assert_eq!(is_merged(&wt, None, "chat1").unwrap(), Merged::ByGit);
+        assert_eq!(is_merged(&wt, &[], "chat1").unwrap(), Merged::ByGit);
         drop_branch(&repo.root, &wt.branch, "chat1");
         assert!(resolve(&repo.root, &format!("refs/heads/{}", wt.branch)).is_none());
+    }
+
+    #[test]
+    fn an_open_part_or_a_detached_folder_is_never_merged() {
+        let repo = Repo::new();
+        let wt = repo.create(Some("main"));
+        commit_in(&wt.path, "app.py", "work\n");
+        let tip = repo.git(&["rev-parse", &wt.branch]);
+        repo.git(&["merge", "-q", "--no-edit", &wt.branch]);
+        assert_eq!(is_merged(&wt, &[pr("merged", &tip)], "c").unwrap(), Merged::ByGit);
+        // Another part of the task is still open, or a draft.
+        assert_eq!(is_merged(&wt, &[pr("merged", &tip), pr("open", "x")], "c").unwrap(), Merged::No);
+        assert_eq!(is_merged(&wt, &[pr("merged", &tip), pr("draft", "x")], "c").unwrap(), Merged::No);
+        assert_eq!(is_merged(&wt, &[pr("merged", &tip), pr("closed", "x")], "c").unwrap(), Merged::ByGit);
+        // A pull request for another branch doesn't prove this one landed.
+        let other = PrInfo { branch: "other".into(), ..pr("merged", &tip) };
+        git(&wt.path, ["checkout", "-q", "--detach"]).unwrap();
+        assert_eq!(is_merged(&wt, &[], "c").unwrap(), Merged::No, "detached");
+        git(&wt.path, ["checkout", "-q", &wt.branch]).unwrap();
+        repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
+        assert_eq!(is_merged(&wt, &[other], "c").unwrap(), Merged::No);
+        let own = PrInfo { branch: wt.branch.clone(), ..pr("merged", &tip) };
+        assert_eq!(is_merged(&wt, &[own], "c").unwrap(), Merged::ByPr);
+    }
+
+    #[test]
+    fn the_folders_branch_is_followed() {
+        let repo = Repo::new();
+        let wt = repo.create(Some("main"));
+        assert_eq!(follow(&wt), None, "still on its own branch");
+        commit_in(&wt.path, "app.py", "part one\n");
+        let fork = repo.git(&["rev-parse", "main"]);
+
+        // Part two, stacked on part one.
+        git(&wt.path, ["checkout", "-qb", "part-2"]).unwrap();
+        let two = follow(&wt).unwrap();
+        assert_eq!((two.branch.as_str(), two.base_commit.as_str()), ("part-2", fork.as_str()));
+        assert_eq!(two.seen, vec![wt.branch.clone()]);
+        assert_eq!(follow(&two), None);
+        assert_eq!(is_merged(&two, &[], "c").unwrap(), Merged::No);
+
+        // A fresh branch cut from main has no work of its own.
+        git(&wt.path, ["checkout", "-qb", "fresh", "main"]).unwrap();
+        let fresh = follow(&two).unwrap();
+        assert_eq!(fresh.base_commit, fork);
+        assert_eq!(fresh.seen, vec![wt.branch.clone(), "part-2".to_string()]);
+        assert_eq!(is_merged(&fresh, &[], "c").unwrap(), Merged::No);
+
+        // Put away and back: on the followed branch.
+        put_away(&fresh, "c").unwrap();
+        assert_eq!(follow(&fresh), None, "no folder, nothing to follow");
+        restore(&fresh, "c").unwrap();
+        assert_eq!(current_branch(&fresh).as_deref(), Some("fresh"));
+
+        // Detached: nothing to follow.
+        git(&wt.path, ["checkout", "-q", "--detach"]).unwrap();
+        assert!(is_detached(&fresh));
+        assert_eq!(follow(&fresh), None);
+    }
+
+    #[test]
+    fn only_landed_branches_the_folder_was_on_are_deleted() {
+        let repo = Repo::new();
+        let wt = repo.create(Some("main"));
+        let tip_of = |b: &str| repo.git(&["rev-parse", b]);
+        let has = |b: &str| resolve(&repo.root, &format!("refs/heads/{b}")).is_some();
+        let merged = |b: &str, head: &str| PrInfo { branch: b.into(), ..pr("merged", head) };
+        commit_in(&wt.path, "app.py", "part one\n");
+        for b in ["moved-on", "main-has-it", "no-pr", "never-on"] {
+            git(&wt.path, ["checkout", "-qb", b]).unwrap();
+        }
+        git(&wt.path, ["checkout", "-qb", "last"]).unwrap();
+        let mut now = wt.clone();
+        now.branch = "last".into();
+        now.seen = vec![wt.branch.clone(), "moved-on".into(), "main-has-it".into(), "no-pr".into()];
+        let prs = vec![
+            merged(&wt.branch, &tip_of(&wt.branch)),
+            merged("moved-on", "an-older-commit"),
+            merged("main-has-it", &tip_of("main-has-it")),
+            merged("never-on", &tip_of("never-on")),
+        ];
+        remove_folder(&now).unwrap();
+        repo.git(&["checkout", "-q", "main-has-it"]);
+        drop_landed_branches(&now, &prs);
+        assert!(!has(&wt.branch), "landed part deleted");
+        assert!(has("moved-on"), "has commits past its pull request");
+        assert!(has("main-has-it"), "checked out in the main folder");
+        assert!(has("no-pr") && has("never-on") && has("last"));
     }
 
     #[test]

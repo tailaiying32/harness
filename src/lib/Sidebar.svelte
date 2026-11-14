@@ -80,10 +80,11 @@
               </button>
               <!-- The pull request mark and delete share one slot: the mark
                    normally, delete while the pointer is on the row. A chat's
-                   worktree alone gets no mark; only a pull request does. -->
+                   worktree alone gets no mark; only a pull request does. One
+                   mark stands for all of a chat's pull requests. -->
               <span class="end">
-                {#if session.pr}
-                  <span class="branch" title={prLabel(session.pr, session.branch)}><BranchMark pr={session.pr} /></span>
+                {#if session.prs.length}
+                  <span class="branch" title={prLabel(session.prs)}><BranchMark prs={session.prs} /></span>
                 {/if}
                 <button class="quiet" title="Move this chat to the trash" onclick={() => (deleting = session.id)}>×</button>
               </span>
