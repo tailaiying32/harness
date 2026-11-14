@@ -106,6 +106,15 @@ pub enum AgentEvent {
     Interrupted,
     UserMessage {
         text: String,
+        /// Names the message, so `MessageSeen` can point at it. Absent in
+        /// history saved before messages had IDs.
+        #[serde(default)]
+        id: Option<String>,
+    },
+    /// The agent took a message in. One sent mid-turn waits until the running
+    /// step is done.
+    MessageSeen {
+        id: String,
     },
     TurnEnded {
         ok: bool,
@@ -116,6 +125,11 @@ pub enum AgentEvent {
         window: Option<String>,
         /// 0.0 to 1.0.
         utilization: f64,
+    },
+    /// How many background commands and agents the agent has running. Sent
+    /// whenever that changes. A chat with any running is not closed when idle.
+    BackgroundWork {
+        running: u32,
     },
     Error {
         message: String,
@@ -128,7 +142,10 @@ impl AgentEvent {
     pub fn is_saved(&self) -> bool {
         !matches!(
             self,
-            AgentEvent::TextDelta { .. } | AgentEvent::UsageUpdate { .. } | AgentEvent::Status { .. }
+            AgentEvent::TextDelta { .. }
+                | AgentEvent::UsageUpdate { .. }
+                | AgentEvent::Status { .. }
+                | AgentEvent::BackgroundWork { .. }
         )
     }
 
@@ -216,8 +233,15 @@ mod tests {
     #[test]
     fn only_lasting_events_are_saved() {
         assert!(AgentEvent::Interrupted.is_saved());
-        assert!(AgentEvent::UserMessage { text: "hi".into() }.is_saved());
+        assert!(AgentEvent::UserMessage { text: "hi".into(), id: None }.is_saved());
+        assert!(AgentEvent::MessageSeen { id: "u1".into() }.is_saved());
+        // History saved before messages had IDs still loads.
+        assert_eq!(
+            serde_json::from_str::<AgentEvent>(r#"{"kind":"user_message","text":"hi"}"#).unwrap(),
+            AgentEvent::UserMessage { text: "hi".into(), id: None }
+        );
         assert!(!AgentEvent::Status { state: SessionState::Idle }.is_saved());
+        assert!(!AgentEvent::BackgroundWork { running: 1 }.is_saved());
         assert!(
             !AgentEvent::TextDelta {
                 message_id: "m".into(),

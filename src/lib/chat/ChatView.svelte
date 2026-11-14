@@ -82,8 +82,15 @@
     return chat.turnStartedAt === null ? 0 : Math.max(0, Math.floor((Date.now() - chat.turnStartedAt) / 1000));
   });
 
+  // The view lets go of the bottom only when it moves up. Blocks that were
+  // off screen are measured roughly until drawn, so the page can grow under a
+  // view that hasn't moved; that must not count as scrolling away.
+  let lastTop = 0;
   function onScroll() {
-    pinned = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 40;
+    const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    if (distance < 40) pinned = true;
+    else if (scroller.scrollTop < lastTop) pinned = false;
+    lastTop = scroller.scrollTop;
     if (scroller.scrollTop < 300) void showEarlier();
   }
 
@@ -100,6 +107,12 @@
       if (pinned) scroller.scrollTop = scroller.scrollHeight;
     });
     observer.observe(content);
+    // The message box growing a line makes the view shorter; stay at the end.
+    observer.observe(scroller);
+    // A chat opens at its end.
+    void tick().then(() => {
+      if (pinned && scroller) scroller.scrollTop = scroller.scrollHeight;
+    });
     return () => observer.disconnect();
   });
 
@@ -134,6 +147,13 @@
       {:else if group.item.type === "user"}
         <div class="row block mine">
           <div class="body user">{group.item.text}</div>
+          <!-- Claude reads a message sent mid-turn after its current step,
+               unless the user would rather cut that step short. -->
+          {#if group.item.queued}
+            <button class="now" title="Stop what Claude is doing and send this now" onclick={() => chat.stop()}>
+              send now
+            </button>
+          {/if}
         </div>
       {:else if group.item.type === "text"}
         <div class="row block">
@@ -240,7 +260,8 @@
      are easy to find when scrolling back. The text stays left aligned and may
      take most of the column, since the background already sets it apart. */
   .mine {
-    justify-content: flex-end;
+    flex-direction: column;
+    align-items: flex-end;
   }
   .user {
     flex: 0 1 auto;
@@ -251,6 +272,14 @@
     color: var(--bright);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  /* Under a message Claude hasn't taken in yet. */
+  .now {
+    margin-top: 0.2em;
+    color: var(--dim);
+  }
+  .now:hover {
+    color: var(--bright);
   }
   /* More air around them than between Claude's blocks (this adds to the
      normal gap), so each one opens a new turn. Two in a row stay together. */

@@ -330,7 +330,7 @@ mod tests {
     use super::*;
 
     fn user(text: &str) -> AgentEvent {
-        AgentEvent::UserMessage { text: text.into() }
+        AgentEvent::UserMessage { text: text.into(), id: None }
     }
 
     #[test]

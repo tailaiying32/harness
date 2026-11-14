@@ -27,7 +27,8 @@ pub struct SpawnOptions {
 
 /// A live agent process. Every method only queues a message, so none of them block.
 pub trait RunningAgent: Send + Sync {
-    fn send_user_message(&self, text: &str) -> Result<(), String>;
+    /// `id` names the message; `MessageSeen` carries it back when the agent takes the message in.
+    fn send_user_message(&self, text: &str, id: &str) -> Result<(), String>;
     /// `message` goes with a denial. `answers` goes with a question: each
     /// question's text mapped to the chosen answer.
     fn answer_approval(
@@ -44,6 +45,10 @@ pub trait RunningAgent: Send + Sync {
     fn set_model(&self, model: &str) -> Result<(), String>;
     /// Ask the process to finish up and exit on its own.
     fn close(&self);
+    /// End the process now. On Mac and Linux it is asked to terminate first, so
+    /// it can end its own background commands; it is killed if still running
+    /// 5 seconds later.
+    fn stop(&self);
 }
 
 pub trait AgentAdapter: Send + Sync {

@@ -15,7 +15,15 @@ import {
 } from "../ipc";
 import { docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
 
-export type UserItem = { id: number; type: "user"; text: string };
+export type UserItem = {
+  id: number;
+  type: "user";
+  text: string;
+  /** Names the message to the core, which says when Claude has taken it in. */
+  messageId?: string;
+  /** Sent while Claude was working, and not taken in yet. */
+  queued?: boolean;
+};
 export type TextItem = { id: number; type: "text"; messageId: string; text: string; streaming: boolean };
 export type ThinkingItem = { id: number; type: "thinking"; text: string };
 export type ToolItem = { id: number; type: "tool" } & ToolCall;
@@ -42,7 +50,7 @@ export type ErrorItem = { id: number; type: "error"; text: string };
 export type NoteItem = { id: number; type: "note"; text: string };
 
 /** A markdown file the chat wrote, as a tab in the side panel. */
-export type DocTab = { path: string; text: string };
+export type DocTab = { path: string; text: string; /** Its tab was closed; the text still follows edits. */ closed?: boolean };
 
 /** The plan's tab in the side panel. Documents use their file path. */
 export const PLAN_TAB = "plan";
@@ -104,7 +112,11 @@ export class Chat {
     chat.mode = row.mode as Mode;
     chat.modelChoice = row.model;
     chat.stopping = false;
-    if (!live) chat.settle();
+    if (!live) {
+      chat.settle();
+      // Nothing is running, so nothing is waiting to be read.
+      for (const item of chat.items) if (item.type === "user") item.queued = false;
+    }
     // A plan still waiting for an answer is shown, as it would be live.
     if (chat.planPending) chat.openPanel(PLAN_TAB);
     return chat;
@@ -139,20 +151,49 @@ export class Chat {
     return this.plan !== null && !this.plan.answered && !this.plan.cancelled;
   }
 
+  /** The plan's tab was closed. A new plan, or "open plan" in the chat, brings it back. */
+  planClosed = $state(false);
+
+  /** The plan has a tab: there is one and its tab wasn't closed. */
+  get planTab(): boolean {
+    return this.plan !== null && !this.planClosed;
+  }
+
+  /** Documents whose tab is showing. */
+  get openDocs(): DocTab[] {
+    return this.docs.filter((doc) => !doc.closed);
+  }
+
   get tabCount(): number {
-    return (this.plan ? 1 : 0) + this.docs.length;
+    return (this.planTab ? 1 : 0) + this.openDocs.length;
   }
 
   /** The tab on show: the chosen one if it still exists, else the first. */
   get activeTab(): string {
-    if (this.panelTab === PLAN_TAB && this.plan) return PLAN_TAB;
-    if (this.docs.some((doc) => doc.path === this.panelTab)) return this.panelTab;
-    return this.plan ? PLAN_TAB : (this.docs[0]?.path ?? "");
+    if (this.panelTab === PLAN_TAB && this.planTab) return PLAN_TAB;
+    if (this.openDocs.some((doc) => doc.path === this.panelTab)) return this.panelTab;
+    return this.planTab ? PLAN_TAB : (this.openDocs[0]?.path ?? "");
   }
 
+  /** Opens the panel; on `tab` if given, bringing it back if it was closed. */
   openPanel(tab?: string): void {
+    if (tab === PLAN_TAB) this.planClosed = false;
+    else if (tab) {
+      const doc = this.docs.find((d) => d.path === tab);
+      if (doc) doc.closed = false;
+    }
     if (tab) this.panelTab = tab;
     this.panelOpen = this.tabCount > 0;
+  }
+
+  /** Closes one tab. A plan still waiting for an answer can't be closed. */
+  closeTab(tab: string): void {
+    if (tab === PLAN_TAB) {
+      if (!this.planPending) this.planClosed = true;
+      return;
+    }
+    const doc = this.docs.find((d) => d.path === tab);
+    if (doc) doc.closed = true;
   }
 
   /** A call that wrote or edited a markdown file adds its tab, or updates it. */
@@ -300,6 +341,7 @@ export class Chat {
         });
         if (event.approval === "plan") {
           this.plan = item;
+          this.planClosed = false;
           // Claude Code drafts the plan in a file of its own; that file is this tab.
           this.planPath = planOf(event.input).path;
           this.docs = this.docs.filter((doc) => doc.path !== this.planPath);
@@ -355,19 +397,32 @@ export class Chat {
 
       // Live, the message is already on screen from when it was sent.
       case "user_message":
-        if (this.replaying) this.push({ type: "user", text: event.text });
+        if (this.replaying) {
+          this.push({ type: "user", text: event.text, messageId: event.id ?? undefined, queued: !!event.id });
+        }
         break;
+
+      // Claude took the message in. One sent mid-turn was waiting at the end
+      // of the chat; it now belongs after whatever Claude did before reading it.
+      case "message_seen": {
+        const at = this.items.findIndex((i) => i.type === "user" && i.messageId === event.id);
+        if (at < 0) break;
+        (this.items[at] as UserItem).queued = false;
+        if (at !== this.items.length - 1) this.items.push(...this.items.splice(at, 1));
+        break;
+      }
     }
   }
 
   async send(text: string): Promise<void> {
     const message = text.trim();
     if (!message) return;
-    this.push({ type: "user", text: message });
+    const messageId = crypto.randomUUID();
+    this.push({ type: "user", text: message, messageId, queued: this.busy });
     this.stopping = false;
     if (this.turnStartedAt === null) this.turnStartedAt = Date.now();
     try {
-      await sendMessage(this.sessionId, this.projectPath.trim(), this.mode, this.modelChoice, message);
+      await sendMessage(this.sessionId, this.projectPath.trim(), this.mode, this.modelChoice, message, messageId);
       this.onSent?.();
     } catch (e) {
       this.turnStartedAt = null;

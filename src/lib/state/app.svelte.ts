@@ -7,10 +7,19 @@ import {
   renameSession,
   sidebar,
   type Envelope,
+  type Mode,
   type ProjectRow,
   type SessionState,
 } from "../ipc";
+import { loadPrefs } from "../themes";
 import { Chat } from "./chat.svelte";
+
+/** A new chat starts in the mode the user last picked (auto until they pick one). */
+function fresh(): Chat {
+  const chat = new Chat();
+  chat.mode = loadPrefs().mode as Mode;
+  return chat;
+}
 
 /** What the sidebar shows next to a chat's title. */
 export type Dot = "working" | "waiting" | "unseen" | "idle";
@@ -19,13 +28,16 @@ export class AppState {
   /** Every project that has chats, most recently used first. */
   projects = $state<ProjectRow[]>([]);
   /** The chat on screen. A new one isn't in the sidebar until its first message. */
-  current = $state<Chat>(new Chat());
+  current = $state<Chat>(fresh());
   /** What each chat's process is doing, for chats used since the app started. */
   statuses = $state<Record<string, SessionState>>({});
   /** Chats that finished a turn, or need an answer, while another was on screen. */
   unseen = $state<Record<string, boolean>>({});
   /** A problem opening or deleting a chat, shown in the sidebar. */
   problem = $state("");
+
+  /** Goes up each time a new chat is asked for, so the message box takes the cursor. */
+  focusBox = $state(0);
 
   /** The user's home folder; where a first chat starts. */
   home = $state("");
@@ -72,12 +84,13 @@ export class AppState {
 
   /** Starts an empty chat in `folder` (default: the open chat's folder). */
   newChat(folder?: string): void {
+    this.focusBox++;
     // An untouched new chat is reused rather than piling up.
     if (!this.current.started) {
       if (folder) this.current.projectPath = folder;
       return;
     }
-    const chat = new Chat();
+    const chat = fresh();
     chat.projectPath = folder ?? (this.current.projectPath || this.home);
     chat.modelChoice = this.defaultModel;
     this.adopt(chat);
@@ -131,7 +144,7 @@ export class AppState {
     delete this.statuses[sessionId];
     delete this.unseen[sessionId];
     if (this.current.sessionId === sessionId) {
-      const chat = new Chat();
+      const chat = fresh();
       chat.projectPath = folder || this.home;
       chat.modelChoice = this.defaultModel;
       this.adopt(chat);

@@ -72,11 +72,10 @@
                 }}
               />
             {:else}
-              <button class="open" ondblclick={() => startRename(session.id, session.title)} onclick={() => app.open(session.id)} title={session.title}>
+              <button class="open" ondblclick={() => startRename(session.id, session.title)} onclick={() => app.open(session.id)} title="{session.title} (double-click to rename)">
                 <span class="dot {dot}" title={meaning[dot]}>{glyph[dot]}</span>
                 <span class="title">{session.title || "untitled"}</span>
               </button>
-              <button class="quiet" title="Rename (or double-click the title)" onclick={() => startRename(session.id, session.title)}>✎</button>
               <button class="quiet" title="Delete this chat" onclick={() => (deleting = session.id)}>×</button>
             {/if}
           </div>
@@ -150,14 +149,16 @@
     flex-shrink: 0;
     color: var(--faint);
   }
+  /* Same meaning in every theme: grey working, yellow needs you, blue
+     finished since you last looked. Each theme supplies its own blue and yellow. */
   .dot.working {
-    color: var(--ok);
+    color: var(--dim);
   }
   .dot.waiting {
-    color: var(--accent);
+    color: var(--yellow);
   }
   .dot.unseen {
-    color: var(--fg);
+    color: var(--blue);
   }
   .title {
     min-width: 0;
@@ -188,11 +189,22 @@
   .chat button.danger {
     color: var(--bad);
   }
+  /* Edited in place: the title's own text with a thin underline, none of the
+     system's field box or blue focus ring. */
   .rename {
     flex: 1;
     min-width: 0;
     color: var(--bright);
-    border-bottom: 1px solid var(--faint);
+    background: none;
+    border: 0;
+    border-bottom: 1px solid var(--dim);
+    border-radius: 0;
+    padding: 0;
+    /* The row's gap sits between mark and field; titles have none. */
+    margin: 0 0 0 -1ch;
+    outline: 0;
+    appearance: none;
+    line-height: inherit;
   }
   .problem {
     color: var(--bad);

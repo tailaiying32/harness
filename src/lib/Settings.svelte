@@ -1,12 +1,13 @@
 <script lang="ts">
   // Settings, drawn over the chat. A choice applies at once and is remembered.
-  import { applySize, applyTheme, savePrefs, sizes, themes, type Size } from "./themes";
+  import { applyFontSize, applySize, applyTheme, fontSizes, savePrefs, sizes, themes, type Size } from "./themes";
 
   let {
     theme = $bindable(),
     size = $bindable(),
+    fontSize = $bindable(),
     onclose,
-  }: { theme: string; size: Size; onclose: () => void } = $props();
+  }: { theme: string; size: Size; fontSize: number; onclose: () => void } = $props();
 
   const groups = [
     { name: "dark", list: themes.filter((t) => t.dark) },
@@ -24,6 +25,12 @@
     applySize(value);
     savePrefs({ size: value });
   }
+
+  function pickFontSize(px: number) {
+    fontSize = px;
+    applyFontSize(px);
+    savePrefs({ fontSize: px });
+  }
 </script>
 
 <div class="settings">
@@ -34,11 +41,22 @@
     </div>
 
     <section>
-      <div class="label">Size</div>
+      <div class="label">Spacing</div>
       <div class="choices">
         {#each sizes as s (s)}
           <button class:on={s === size} onclick={() => pickSize(s)}>
             <span class="mark">{s === size ? "(•)" : "( )"}</span>{s}
+          </button>
+        {/each}
+      </div>
+    </section>
+
+    <section>
+      <div class="label">Font size</div>
+      <div class="choices">
+        {#each fontSizes as px (px)}
+          <button class:on={px === fontSize} onclick={() => pickFontSize(px)}>
+            <span class="mark">{px === fontSize ? "(•)" : "( )"}</span>{px}
           </button>
         {/each}
       </div>

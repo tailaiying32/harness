@@ -24,11 +24,13 @@
   import { loadCachedModels, saveCachedModels } from "./lib/models";
   import { AppState } from "./lib/state/app.svelte";
   import type { Chat } from "./lib/state/chat.svelte";
-  import { applySize, applyTheme, loadPrefs, sizes, type Size } from "./lib/themes";
+  import { applyFontSize, applyPanelWidth, applySize, applyTheme, loadPrefs, sizes, type Size } from "./lib/themes";
 
   const prefs = loadPrefs();
   applyTheme(prefs.theme);
   applySize(prefs.size);
+  applyFontSize(prefs.fontSize);
+  applyPanelWidth(prefs.panelWidth);
 
   const app = new AppState();
   app.defaultModel = prefs.model;
@@ -38,14 +40,21 @@
 
   let theme = $state(prefs.theme);
   let size = $state<Size>(prefs.size);
+  let fontSize = $state(prefs.fontSize);
   let setup = $state<SetupInfo | null>(null);
   let showSettings = $state(false);
 
-  // Cmd+, (Ctrl+, on Windows) opens settings, as in most apps; Escape closes them.
+  // Cmd+, (Ctrl+, on Windows) opens settings, as in most apps; Escape closes
+  // them. Cmd+N starts a new chat.
   function onKey(e: KeyboardEvent) {
     if (e.key === "," && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       showSettings = !showSettings;
+    } else if (e.key.toLowerCase() === "n" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+      // A new chat in the open chat's folder, ready to type in.
+      e.preventDefault();
+      showSettings = false;
+      app.newChat();
     } else if (e.key === "Escape" && showSettings) {
       showSettings = false;
     }
@@ -184,7 +193,12 @@
             open: current.panelOpen,
             tab: current.activeTab,
             plan: current.plan ? { pending: current.planPending, answered: current.plan.answered ?? null } : null,
-            docs: current.docs.map((doc) => ({ path: doc.path, length: doc.text.length, start: doc.text.slice(0, 80) })),
+            docs: current.docs.map((doc) => ({
+              path: doc.path,
+              closed: !!doc.closed,
+              length: doc.text.length,
+              start: doc.text.slice(0, 80),
+            })),
           },
           items: current.items.map((item) => ({ ...item })),
           // `shown` leaves out blocks the browser hasn't laid out (off screen, or
@@ -215,11 +229,11 @@
         </button>
       {/if}
       <ChatView {chat} problem={setup?.problem ?? null} />
-      <Composer {chat} ready={!!setup?.logged_in} home={app.home} {models} />
+      <Composer {chat} ready={!!setup?.logged_in} home={app.home} {models} focus={app.focusBox} />
     {/key}
     <!-- Drawn over the chat, which stays as it is underneath. -->
     {#if showSettings}
-      <Settings bind:theme bind:size onclose={() => (showSettings = false)} />
+      <Settings bind:theme bind:size bind:fontSize onclose={() => (showSettings = false)} />
     {/if}
   </main>
   {#if panelOpen}
