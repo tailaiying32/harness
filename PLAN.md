@@ -39,7 +39,13 @@ build files with the main folder as copy-on-write copies; idle ones are put
 away (edits kept in a hidden git ref) and come back with the next message;
 merged ones (by git or a merged pull request) are removed with their branch;
 deleting a chat moves it to a trash for 30 days. Pull request status shows as
-a branch mark in the sidebar and in the bottom bar. New chats get a title
+a branch mark in the sidebar and in the bottom bar. Since 2026-11-14 the
+sidebar mark shows only once a chat's branch has a pull request (a worktree
+alone is how a chat keeps its work apart, not news); the bottom bar still
+shows the open chat's branch. Merges go through pull requests on GitHub
+(repo `tailaiying32/harness`, private) so the marks track real events. Deferred (2026-11-14): a cue for idle
+chats with work not on GitHub (uncommitted or unmerged), maybe as an
+"unfinished work" list in settings; revisit if work actually gets lost. New chats get a title
 written by Haiku. **Tested** live with the self-test (Haiku, scratch repo):
 Claude asking by itself for real work (a module with tests) and not for a
 one-line fix, the move with resume, put away and restore with an uncommitted
