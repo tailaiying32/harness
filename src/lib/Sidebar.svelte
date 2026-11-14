@@ -142,6 +142,8 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    /* Scrolling down only: a pixel of overhang must not add a sideways bar. */
+    overflow-x: hidden;
     display: flex;
     flex-direction: column;
     gap: calc(var(--gap) * 1.6);
@@ -217,7 +219,8 @@
   .end {
     flex-shrink: 0;
     display: grid;
-    width: 1.5ch;
+    /* As wide as the branch mark (1em), which is wider than 1.5ch in monospace. */
+    width: max(1.5ch, 1em);
     justify-items: end;
   }
   .end > * {
