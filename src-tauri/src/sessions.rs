@@ -1215,7 +1215,9 @@ mod tests {
         assert!(!wt.path.exists());
         assert!(git(&repo, &["branch", "--list", &wt.branch]).is_empty(), "branch deleted");
         let row = rig.store.chat_git("s1").unwrap().unwrap();
-        assert_eq!((row.status, row.choice, row.pr), (None, None, None));
+        assert_eq!((row.status, row.choice), (None, None));
+        // The merged pull request stays, so the sidebar keeps its purple mark.
+        assert_eq!(row.pr.map(|pr| pr.state).as_deref(), Some("merged"));
         assert_eq!(rig.saw(|e| matches!(e, AgentEvent::WorktreeChanged { status, .. } if status == "merged")), 1);
     }
 
