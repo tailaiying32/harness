@@ -740,6 +740,10 @@ tuned per theme so the panel is always clearly visible against the
 background; where a palette's own value is too close, override it (GitHub
 Light and Nord are already adjusted in the mock-up). Working defaults, cheap
 to change since both are settings: Harness Dark and the regular 12.5px size.
+There are two theme picks, one dark and one light, and an appearance setting
+that says which shows: light, dark, or auto (the default), which follows the
+system and switches the moment it does (added 2026-11-14). Picking a theme for
+the side not showing only saves it.
 The built-in terminal is accepted as a later feature; its position (bottom or
 side panel) is still open. How to build the selectors so the choice costs
 nothing at runtime:
