@@ -2,6 +2,8 @@
 
 import {
   answerApproval,
+  browserClose,
+  browserCurrent,
   closeSession,
   chooseWorktree,
   interrupt,
@@ -16,6 +18,7 @@ import {
   setModel,
   type AgentEvent,
   type ApprovalKind,
+  type BrowserInfo,
   type Decision,
   type ImageRef,
   type Mode,
@@ -26,6 +29,9 @@ import {
   type WorktreeStatus,
 } from "../ipc";
 import { docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
+
+/** What the side panel shows. */
+export type PanelView = "docs" | "side" | "browser";
 
 export type UserItem = {
   id: number;
@@ -234,13 +240,69 @@ export class Chat {
   title = $state("");
 
   // ---- The side panel ----
-  /** The panel's two views: the plan and documents, or the side chat. */
-  panelView = $state<"docs" | "side">("docs");
+  /** The panel's views: the plan and documents, the side chat, or the browser. */
+  panelView = $state<PanelView>("docs");
   /** The side chat (`/btw`), while one is open. It is never saved. */
   side = $state<Chat | null>(null);
   /** The panel has something to show. */
   get panelHasContent(): boolean {
-    return this.tabCount > 0 || this.side !== null;
+    return this.tabCount > 0 || this.side !== null || this.browserOn;
+  }
+
+  // ---- The browser (a localhost page beside the chat; Claude can drive it) ----
+  /** The browser view is open, with or without a page yet. */
+  browserOn = $state(false);
+  /** The page it shows, once there is one. Lives in the core, not saved. */
+  browser = $state<BrowserInfo | null>(null);
+  /** Claude opened or changed the page while the browser wasn't on show. */
+  browserUnseen = $state(false);
+
+  /** The browser is what the panel shows right now. */
+  get browserShown(): boolean {
+    return this.panelOpen && this.panelView === "browser";
+  }
+
+  /** Opens the browser view: the page if there is one, an empty address line if not. */
+  openBrowser(): void {
+    this.browserOn = true;
+    this.browserUnseen = false;
+    this.panelView = "browser";
+    this.panelOpen = true;
+  }
+
+  /** Closes the browser and its page. The panel goes back to another view, or closes. */
+  async closeBrowser(): Promise<void> {
+    const hadPage = this.browser !== null;
+    this.leaveBrowser();
+    if (hadPage) {
+      try {
+        await browserClose(this.sessionId);
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+
+  private leaveBrowser(): void {
+    this.browserOn = false;
+    this.browser = null;
+    this.browserUnseen = false;
+    if (this.panelView !== "browser") return;
+    this.panelView = this.side ? "side" : "docs";
+    this.panelOpen = this.panelOpen && this.panelHasContent;
+  }
+
+  /** A chat opened again after a reload of the window: pick up its live page. */
+  async loadBrowser(): Promise<void> {
+    try {
+      const info = await browserCurrent(this.sessionId);
+      if (info) {
+        this.browser = info;
+        this.browserOn = true;
+      }
+    } catch {
+      // No core (the preview) or nothing open.
+    }
   }
   /** The latest plan Claude presented. A revised plan replaces it. */
   plan = $state<ApprovalItem | null>(null);
@@ -612,6 +674,18 @@ export class Chat {
         this.title = event.title;
         break;
 
+      // Claude or the user opened or moved the page. The panel isn't switched
+      // for Claude; the browser view gets a mark instead, like a plan in side chat.
+      case "browser_state":
+        this.browser = { url: event.url, title: event.title, loading: event.loading };
+        this.browserOn = true;
+        if (!this.browserShown) this.browserUnseen = true;
+        break;
+
+      case "browser_closed":
+        this.leaveBrowser();
+        break;
+
       // Earlier items stay on screen; Claude now sees a summary of them.
       case "compacted":
         this.push({ type: "note", text: event.auto ? "compacted automatically" : "compacted" });
@@ -793,8 +867,9 @@ export class Chat {
   }
 
   /** Shows a view in the panel, opening the panel if it was hidden. Hiding it is the panel toggle's job. */
-  showView(view: "docs" | "side"): void {
+  showView(view: PanelView): void {
     if (view === "side") this.openSide();
+    else if (view === "browser") this.openBrowser();
     else this.openPanel();
   }
 

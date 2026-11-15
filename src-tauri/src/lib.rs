@@ -1,4 +1,5 @@
 mod agent;
+mod browser;
 mod docs;
 mod events;
 mod github;
@@ -17,7 +18,9 @@ use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{Manager, RunEvent, State};
 
+use agent::AppTools;
 use agent::claude_code::ClaudeCodeAdapter;
+use browser::Browsers;
 use events::{AgentEvent, Decision, Envelope, ModelInfo};
 use locate::SetupInfo;
 use sessions::{Out, SessionManager};
@@ -30,6 +33,8 @@ const QUIT_WAIT: Duration = Duration::from_secs(3);
 struct AppState {
     sessions: SessionManager,
     side: SideChats,
+    /// Each chat's side-panel browser.
+    browsers: Browsers,
     store: Arc<Store>,
     /// One app-wide channel to the window, so chats that aren't open still report status.
     channel: Arc<Mutex<Option<Channel<Envelope>>>>,
@@ -74,6 +79,7 @@ async fn load_session(state: State<'_, AppState>, session_id: String) -> Result<
 #[tauri::command]
 async fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     state.side.end(&session_id);
+    state.browsers.close(&session_id);
     let sessions = state.sessions.clone();
     sessions.delete(&session_id).await
 }
@@ -292,6 +298,46 @@ async fn read_doc(path: String) -> Result<String, String> {
         .map_err(|e| e.to_string())?
 }
 
+/// The user typed an address in a chat's browser. Makes the browser if needed.
+#[tauri::command]
+async fn browser_navigate(state: State<'_, AppState>, chat_id: String, url: String) -> Result<(), String> {
+    let browsers = state.browsers.clone();
+    browsers.navigate(&chat_id, &url).await
+}
+
+#[tauri::command]
+fn browser_reload(state: State<'_, AppState>, chat_id: String) -> Result<(), String> {
+    state.browsers.reload(&chat_id)
+}
+
+/// Where the side panel's body is, in the window's logical pixels, and whether
+/// the chat's browser should show there (otherwise it is parked out of sight).
+#[tauri::command]
+fn browser_place(state: State<'_, AppState>, chat_id: String, rect: browser::Rect, visible: bool) {
+    state.browsers.place(&chat_id, rect, visible);
+}
+
+#[tauri::command]
+fn browser_close(state: State<'_, AppState>, chat_id: String) {
+    state.browsers.close(&chat_id);
+}
+
+/// What a chat's browser shows, if it has one: for a window that reloaded.
+#[derive(serde::Serialize)]
+struct BrowserInfo {
+    url: String,
+    title: String,
+    loading: bool,
+}
+
+#[tauri::command]
+fn browser_current(state: State<'_, AppState>, chat_id: String) -> Option<BrowserInfo> {
+    state
+        .browsers
+        .current(&chat_id)
+        .map(|(url, title, loading)| BrowserInfo { url, title, loading })
+}
+
 /// The models the agent offers. Starts a short-lived agent process, so it runs
 /// off the main thread and takes about 7 seconds (it also reads each model's
 /// default effort). The window shows the last list meanwhile.
@@ -407,7 +453,26 @@ pub fn run() {
             };
             let adapter = Arc::new(ClaudeCodeAdapter);
             let side = SideChats::new(adapter.clone(), store.clone(), out.clone());
+            let browsers = Browsers::new(app.handle().clone(), out.clone());
             let sessions = SessionManager::new(adapter, store.clone(), out, dir);
+            // Every chat's agent can drive that chat's browser.
+            {
+                let browsers = browsers.clone();
+                sessions.set_app_tools(Arc::new(move |chat_id: &str| {
+                    let browsers = browsers.clone();
+                    let chat_id = chat_id.to_string();
+                    AppTools {
+                        server: browser::SERVER,
+                        instruction: browser::INSTRUCTION,
+                        list: browser::tools(),
+                        call: Arc::new(move |tool, args| {
+                            let browsers = browsers.clone();
+                            let chat_id = chat_id.clone();
+                            Box::pin(async move { browsers.call(&chat_id, &tool, &args).await })
+                        }),
+                    }
+                }));
+            }
             // Images of chats that are gone, and of new chats never sent.
             {
                 let sessions = sessions.clone();
@@ -426,6 +491,7 @@ pub fn run() {
             app.manage(AppState {
                 sessions,
                 side,
+                browsers,
                 store,
                 channel,
                 binary: Mutex::new(None),
@@ -456,6 +522,11 @@ pub fn run() {
             side_end,
             close_session,
             read_doc,
+            browser_navigate,
+            browser_reload,
+            browser_place,
+            browser_close,
+            browser_current,
             save_image,
             read_image,
             autotest,

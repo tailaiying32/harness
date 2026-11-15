@@ -119,6 +119,7 @@ impl SideChats {
                         model,
                         effort,
                         side: Some(SideOptions { fork_from }),
+                        tools: None,
                     },
                     self.sink(chat_id, run),
                 )?);

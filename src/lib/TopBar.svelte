@@ -13,10 +13,18 @@
   );
   const open = $derived(chat.panelOpen && chat.panelHasContent);
 
-  /** Brings the panel back on the view it had, or the one that still has something. */
+  /**
+   * Brings the panel back on the view it had, or one that still has something;
+   * with nothing anywhere, on the browser's empty address line.
+   */
   function reopen() {
-    if (chat.panelView === "side" && !chat.side) chat.panelView = "docs";
-    if (chat.panelView === "docs" && chat.tabCount === 0) chat.panelView = "side";
+    const has = { docs: chat.tabCount > 0, side: chat.side !== null, browser: chat.browserOn };
+    if (!has[chat.panelView]) {
+      const next = (["docs", "side", "browser"] as const).find((view) => has[view]);
+      if (!next) return chat.openBrowser();
+      chat.panelView = next;
+    }
+    if (chat.panelView === "browser") chat.browserUnseen = false;
     chat.panelOpen = true;
   }
 </script>
@@ -38,12 +46,19 @@
         </button>
       {/if}
       <button class:on={chat.panelView === "side"} onclick={() => chat.showView("side")}>side chat</button>
+      <button class:on={chat.panelView === "browser"} onclick={() => chat.showView("browser")}>
+        {#if chat.browserUnseen}<span class="accent">●</span>{/if}
+        browser
+      </button>
       <span class="spacer" data-tauri-drag-region></span>
       <button title="Hide the panel" onclick={() => (chat.panelOpen = false)}>▸</button>
-    {:else if chat.panelHasContent}
+    {:else}
       <!-- Closed: one mark brings the panel back. (A plan opens the panel by
-           itself; one left waiting after hiding it shows in the chat.) -->
-      <button title="Show the panel" onclick={reopen}>◂</button>
+           itself; one left waiting after hiding it shows in the chat.) With
+           nothing in it, the mark opens the browser's address line. -->
+      <button title="Show the panel" onclick={reopen}>
+        {#if chat.browserUnseen}<span class="accent">●</span>{/if}◂
+      </button>
     {/if}
     </span>
   </span>

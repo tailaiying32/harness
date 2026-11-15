@@ -513,6 +513,20 @@ const commands: Record<string, (args: Args) => unknown> = {
     if (!bytes) throw "Image gone";
     return bytes;
   },
+  // The browser: no page is drawn here (the real one is a separate web view
+  // the core places over the panel); the tab and address line still work.
+  browser_navigate: (args: Args) => {
+    const url = String(args.url).trim();
+    if (!/^(https?:\/\/)?(localhost|127\.0\.0\.1|\[::1\])?(:\d+)?(\/|$)/.test(url)) throw `Only localhost pages can be opened here, not ${url}.`;
+    const full = url.includes("://") ? url : `http://${url.startsWith(":") ? "localhost" + url : url}`;
+    emit(String(args.chatId), { kind: "browser_state", url: full, title: "", loading: true });
+    setTimeout(() => emit(String(args.chatId), { kind: "browser_state", url: full, title: "Sample page", loading: false }), 400);
+  },
+  browser_reload: () => {},
+  browser_place: () => {},
+  browser_close: (args: Args) => emit(String(args.chatId), { kind: "browser_closed" }),
+  browser_current: (args: Args) =>
+    args.chatId === "planning" ? { url: "http://localhost:5173/", title: "My app", loading: false } : null,
   read_doc: (args: Args) => {
     const path = String(args.path);
     if (path.endsWith("gone.md")) throw "That file doesn't exist.";
@@ -538,8 +552,8 @@ const commands: Record<string, (args: Args) => unknown> = {
 
 mount(App, { target: document.getElementById("app")! });
 
-// For screenshots: `#open=<chat id>` opens that chat, and `&trash` opens the
-// sidebar's trash list.
+// For screenshots: `#open=<chat id>` opens that chat, `&trash` opens the
+// sidebar's trash list, and `&browser` the panel's browser view.
 const wanted = new URLSearchParams(location.hash.slice(1));
 setTimeout(() => {
   const title = [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === wanted.get("open"))?.title;
@@ -548,5 +562,11 @@ setTimeout(() => {
     if (!title) return;
     const buttons = [...document.querySelectorAll<HTMLButtonElement>("aside button.open")];
     buttons.find((b) => b.textContent?.includes(title))?.click();
+    if (wanted.has("browser")) {
+      setTimeout(() => {
+        const bar = [...document.querySelectorAll<HTMLButtonElement>("header.bar button")];
+        bar.find((b) => b.textContent?.includes("browser") || b.textContent?.includes("◂"))?.click();
+      }, 200);
+    }
   }, 100);
 }, 400);
