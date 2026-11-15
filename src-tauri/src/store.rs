@@ -41,8 +41,8 @@ pub struct SessionRow {
     pub branch: Option<String>,
     /// "live" or "put_away"; None without a worktree.
     pub wt_status: Option<String>,
-    /// The branch's pull request, as last seen.
-    pub pr: Option<PrInfo>,
+    /// The chat's pull requests as last seen, oldest first.
+    pub prs: Vec<PrInfo>,
     /// When the chat was moved to the trash (ms); None when it isn't there.
     pub trashed_at: Option<i64>,
 }
@@ -60,7 +60,8 @@ pub struct ChatGit {
     pub status: Option<String>,
     pub worktree: Option<Worktree>,
     pub put_away_at: Option<i64>,
-    pub pr: Option<PrInfo>,
+    /// The chat's pull requests as last seen, oldest first.
+    pub prs: Vec<PrInfo>,
     /// The main folder's branch and commit when the chat began.
     pub start_branch: Option<String>,
     pub start_commit: Option<String>,
@@ -97,7 +98,7 @@ fn title_from(text: &str) -> String {
 }
 
 const SESSION_COLUMNS: &str = "s.id, p.path, s.title, s.mode, s.model, s.agent_session_id, \
-     s.last_used_at, s.wt, s.wt_status, s.pr, s.trashed_at, s.effort";
+     s.last_used_at, s.wt, s.wt_status, s.prs, s.trashed_at, s.effort";
 
 /// A JSON column read leniently: unreadable means absent.
 fn json_col<T: serde::de::DeserializeOwned>(row: &rusqlite::Row, i: usize) -> rusqlite::Result<Option<T>> {
@@ -120,14 +121,14 @@ fn session_from(row: &rusqlite::Row) -> rusqlite::Result<SessionRow> {
         work_path: worktree.as_ref().map(|w| w.work_path().to_string_lossy().into_owned()),
         branch: worktree.map(|w| w.branch),
         wt_status,
-        pr: json_col(row, 9)?,
+        prs: json_col(row, 9)?.unwrap_or_default(),
         trashed_at: row.get(10)?,
         effort: row.get(11)?,
     })
 }
 
 const GIT_COLUMNS: &str = "s.id, p.path, s.title, s.last_used_at, s.worktree_choice, s.wt_status, \
-     s.wt, s.wt_put_away_at, s.pr, s.start_branch, s.start_commit, s.trashed_at";
+     s.wt, s.wt_put_away_at, s.prs, s.start_branch, s.start_commit, s.trashed_at";
 
 fn git_from(row: &rusqlite::Row) -> rusqlite::Result<ChatGit> {
     Ok(ChatGit {
@@ -139,7 +140,7 @@ fn git_from(row: &rusqlite::Row) -> rusqlite::Result<ChatGit> {
         status: row.get(5)?,
         worktree: json_col(row, 6)?,
         put_away_at: row.get(7)?,
-        pr: json_col(row, 8)?,
+        prs: json_col(row, 8)?.unwrap_or_default(),
         start_branch: row.get(9)?,
         start_commit: row.get(10)?,
         trashed_at: row.get(11)?,
@@ -161,11 +162,13 @@ const ADDED_SESSION_COLUMNS: &[(&str, &str)] = &[
     // "live" or "put_away"; None = no worktree.
     ("wt_status", "TEXT"),
     ("wt_put_away_at", "INTEGER"),
-    // The branch's pull request as JSON (`worktree::PrInfo`).
+    // One pull request as JSON. No longer used: `prs` replaced it.
     ("pr", "TEXT"),
     ("trashed_at", "INTEGER"),
     // Effort level picked for this chat; "default" = the agent's own default.
     ("effort", "TEXT NOT NULL DEFAULT 'default'"),
+    // The chat's pull requests: a JSON list of `worktree::PrInfo`, oldest first.
+    ("prs", "TEXT"),
 ];
 
 fn migrate(conn: &Connection) -> Result<(), String> {
@@ -180,6 +183,11 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         if !existing.iter().any(|c| c == name) {
             conn.execute_batch(&format!("ALTER TABLE sessions ADD COLUMN {name} {definition}"))
                 .map_err(err)?;
+            // A chat used to keep one pull request; it becomes the list's first.
+            if *name == "prs" {
+                conn.execute_batch("UPDATE sessions SET prs = json_array(json(pr)) WHERE pr IS NOT NULL")
+                    .map_err(err)?;
+            }
         }
     }
     Ok(())
@@ -380,13 +388,15 @@ impl Store {
             .map_err(err)
     }
 
-    /// Every chat the cleanup sweep may act on: with a worktree, or in the trash.
+    /// Every chat the cleanup sweep may act on: with a worktree, in the trash,
+    /// or with a pull request still open (to keep its state fresh).
     pub fn sweep_list(&self) -> Result<Vec<ChatGit>, String> {
         let conn = self.conn.lock().unwrap();
         let rows = conn
             .prepare(&format!(
                 "SELECT {GIT_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id
-                 WHERE s.wt_status IS NOT NULL OR s.trashed_at IS NOT NULL"
+                 WHERE s.wt_status IS NOT NULL OR s.trashed_at IS NOT NULL
+                    OR s.prs LIKE '%\"state\":\"open\"%' OR s.prs LIKE '%\"state\":\"draft\"%'"
             ))
             .map_err(err)?
             .query_map([], git_from)
@@ -412,21 +422,36 @@ impl Store {
     }
 
     /// Saves a chat's worktree as live (its folder exists) or put away.
+    ///
+    /// A chat starting a new worktree (none saved) drops its finished pull
+    /// requests: new work, new list. It keeps them while any is open or a
+    /// draft, and through being put away and brought back.
     pub fn set_worktree(&self, session_id: &str, worktree: &Worktree, status: &str) -> Result<(), String> {
         let json = serde_json::to_string(worktree).map_err(|e| e.to_string())?;
         let put_away_at = (status == "put_away").then(now_ms);
-        // A chat starting a new worktree (none saved) drops the last one's pull
-        // request: new branch, new pull request. Put away and back keeps it.
         self.exec(
             "UPDATE sessions SET wt = ?2, wt_status = ?3, wt_put_away_at = ?4,
-                 pr = CASE WHEN wt IS NULL THEN NULL ELSE pr END WHERE id = ?1",
+                 prs = CASE WHEN wt IS NULL AND prs NOT LIKE '%\"state\":\"open\"%'
+                                 AND prs NOT LIKE '%\"state\":\"draft\"%'
+                            THEN NULL ELSE prs END
+             WHERE id = ?1",
             params![session_id, json, status, put_away_at],
         )
     }
 
+    /// Notes that the worktree's folder is on another branch now. Changes
+    /// nothing else about it.
+    pub fn set_wt_branch(&self, session_id: &str, worktree: &Worktree) -> Result<(), String> {
+        let json = serde_json::to_string(worktree).map_err(|e| e.to_string())?;
+        self.exec(
+            "UPDATE sessions SET wt = ?2 WHERE id = ?1 AND wt IS NOT NULL",
+            params![session_id, json],
+        )
+    }
+
     /// The chat no longer has a worktree, and will be asked again at its next edit.
-    /// Its pull request stays, so a finished chat keeps its mark (purple once
-    /// merged). It is no longer checked on GitHub after this.
+    /// Its pull requests stay, so a finished chat keeps its mark (purple once
+    /// merged).
     pub fn clear_worktree(&self, session_id: &str) -> Result<(), String> {
         self.exec(
             "UPDATE sessions SET wt = NULL, wt_status = NULL, wt_put_away_at = NULL,
@@ -435,9 +460,31 @@ impl Store {
         )
     }
 
-    pub fn set_pr(&self, session_id: &str, pr: Option<&PrInfo>) -> Result<(), String> {
-        let json = pr.map(|p| serde_json::to_string(p).unwrap_or_default());
-        self.exec("UPDATE sessions SET pr = ?2 WHERE id = ?1", params![session_id, json])
+    /// Adds a pull request to the chat's list, or replaces the one with the
+    /// same link. Returns the list afterwards and whether it changed.
+    ///
+    /// The only way the list is written, and it reads and writes under one
+    /// lock, so two updates at once (a refresh and a new pull request) can't
+    /// undo each other.
+    pub fn upsert_pr(&self, session_id: &str, pr: &PrInfo) -> Result<(Vec<PrInfo>, bool), String> {
+        let conn = self.conn.lock().unwrap();
+        let saved: Option<Option<String>> = conn
+            .query_row("SELECT prs FROM sessions WHERE id = ?1", [session_id], |row| row.get(0))
+            .optional()
+            .map_err(err)?;
+        let Some(saved) = saved else {
+            return Ok((Vec::new(), false)); // the chat is gone
+        };
+        let mut prs: Vec<PrInfo> = saved.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        match prs.iter_mut().find(|p| p.url == pr.url) {
+            Some(same) if same == pr => return Ok((prs, false)),
+            Some(old) => *old = pr.clone(),
+            None => prs.push(pr.clone()),
+        }
+        let json = serde_json::to_string(&prs).map_err(|e| e.to_string())?;
+        conn.execute("UPDATE sessions SET prs = ?2 WHERE id = ?1", params![session_id, json])
+            .map_err(err)?;
+        Ok((prs, true))
     }
 
     /// Moves a chat to the trash (`Some(now)`) or back out (`None`).
@@ -717,6 +764,7 @@ mod tests {
             branch: "harness/x-abc".into(),
             base_commit: "c1".into(),
             base_branch: Some("main".into()),
+            seen: Vec::new(),
         }
     }
 
@@ -732,28 +780,91 @@ mod tests {
         assert_eq!(row.branch.as_deref(), Some("harness/x-abc"));
         assert_eq!(row.project_path, "/one/web");
 
-        let pr = PrInfo { number: 4, state: "open".into(), url: "u".into(), head: "h".into() };
-        store.set_pr("a", Some(&pr)).unwrap();
+        let open = pr(4, "open");
+        let pr = open.clone();
+        store.upsert_pr("a", &pr).unwrap();
         store.set_worktree("a", &worktree(), "put_away").unwrap();
         let git = store.chat_git("a").unwrap().unwrap();
         assert_eq!(git.status.as_deref(), Some("put_away"));
         assert!(git.put_away_at.is_some());
-        assert_eq!(git.pr, Some(pr.clone()));
+        assert_eq!(git.prs, vec![pr.clone()]);
         assert_eq!(git.worktree, Some(worktree()));
         assert_eq!((git.start_branch.as_deref(), git.start_commit.as_deref()), (Some("main"), Some("c1")));
         assert_eq!(store.sweep_list().unwrap().len(), 1);
+
+        // The folder moved to another branch: only that changes.
+        let moved = Worktree { branch: "part-2".into(), ..worktree() };
+        store.set_wt_branch("a", &moved).unwrap();
+        let git = store.chat_git("a").unwrap().unwrap();
+        assert_eq!((git.worktree, git.status.as_deref()), (Some(moved), Some("put_away")));
+        assert_eq!(git.prs, vec![pr.clone()]);
 
         store.clear_worktree("a").unwrap();
         let git = store.chat_git("a").unwrap().unwrap();
         assert_eq!((git.choice, git.status, git.worktree), (None, None, None));
         assert!(store.session("a").unwrap().unwrap().work_path.is_none());
-        assert!(store.sweep_list().unwrap().is_empty());
-        // The pull request outlives the worktree, so the sidebar keeps its mark...
-        assert_eq!(git.pr, Some(pr.clone()));
-        assert_eq!(store.session("a").unwrap().unwrap().pr, Some(pr));
-        // ...until the chat starts a new worktree, which gets its own.
+        // Still swept while its pull request is open, to keep the mark fresh.
+        assert_eq!(store.sweep_list().unwrap().len(), 1);
+        // The pull requests outlive the worktree, so the sidebar keeps its mark.
+        assert_eq!(store.session("a").unwrap().unwrap().prs, vec![pr.clone()]);
+        // A new worktree keeps unfinished ones...
         store.set_worktree("a", &worktree(), "live").unwrap();
-        assert_eq!(store.chat_git("a").unwrap().unwrap().pr, None);
+        assert_eq!(store.chat_git("a").unwrap().unwrap().prs, vec![pr]);
+        // ...and starts a fresh list once they are all finished.
+        store.upsert_pr("a", &PrInfo { state: "merged".into(), ..open }).unwrap();
+        store.clear_worktree("a").unwrap();
+        assert!(store.sweep_list().unwrap().is_empty());
+        store.set_worktree("a", &worktree(), "live").unwrap();
+        assert_eq!(store.chat_git("a").unwrap().unwrap().prs, vec![]);
+        store.set_wt_branch("missing", &worktree()).unwrap();
+    }
+
+    fn pr(number: i64, state: &str) -> PrInfo {
+        PrInfo {
+            number,
+            state: state.into(),
+            url: format!("https://github.com/o/r/pull/{number}"),
+            head: "h".into(),
+            branch: format!("b{number}"),
+        }
+    }
+
+    #[test]
+    fn pull_requests_are_added_and_replaced_by_link() {
+        let store = Store::in_memory();
+        store.touch_session("a", "/one", "A", "default", "default").unwrap();
+        assert_eq!(store.upsert_pr("a", &pr(1, "open")).unwrap(), (vec![pr(1, "open")], true));
+        assert_eq!(store.upsert_pr("a", &pr(2, "draft")).unwrap().0.len(), 2);
+        // The same again changes nothing; a new state replaces in place.
+        assert!(!store.upsert_pr("a", &pr(1, "open")).unwrap().1);
+        let (prs, changed) = store.upsert_pr("a", &pr(1, "merged")).unwrap();
+        assert!(changed);
+        assert_eq!(prs, vec![pr(1, "merged"), pr(2, "draft")]);
+        assert_eq!(store.session("a").unwrap().unwrap().prs, prs);
+        // A chat that is gone takes nothing.
+        assert_eq!(store.upsert_pr("gone", &pr(1, "open")).unwrap(), (vec![], false));
+    }
+
+    #[test]
+    fn an_older_stores_single_pull_request_becomes_the_list() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE projects (id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE,
+                 created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL);
+             CREATE TABLE sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+                 agent TEXT NOT NULL DEFAULT 'claude-code', agent_session_id TEXT, title TEXT NOT NULL,
+                 mode TEXT NOT NULL DEFAULT 'default', model TEXT NOT NULL DEFAULT 'default',
+                 created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL, pr TEXT);
+             INSERT INTO projects VALUES ('p', '/old', 0, 0);
+             INSERT INTO sessions (id, project_id, title, created_at, last_used_at, pr) VALUES
+                 ('with', 'p', 'A', 0, 0, '{\"number\":1,\"state\":\"merged\",\"url\":\"u\",\"head\":\"h\"}'),
+                 ('without', 'p', 'B', 0, 0, NULL);",
+        )
+        .unwrap();
+        let store = Store::with(conn).unwrap();
+        let old = PrInfo { number: 1, state: "merged".into(), url: "u".into(), head: "h".into(), branch: String::new() };
+        assert_eq!(store.session("with").unwrap().unwrap().prs, vec![old]);
+        assert_eq!(store.session("without").unwrap().unwrap().prs, vec![]);
     }
 
     #[test]

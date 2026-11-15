@@ -256,6 +256,7 @@ fn close_session(state: State<'_, AppState>, session_id: String) {
 ///   HARNESS_IDLE_SECONDS       idle time before a chat's process is closed
 ///   HARNESS_WORKTREE_IDLE_SECONDS  time without a message before a worktree is put away
 ///   HARNESS_TRASH_SECONDS      how long put-away branches and trashed chats are kept
+///   HARNESS_GH                 a program to use in place of GitHub's `gh`
 #[derive(serde::Serialize)]
 struct AutoTest {
     folder: String,

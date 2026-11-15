@@ -54,14 +54,21 @@ export type AgentEvent =
   | { kind: "worktree_ask"; request_id: string; repo_root: string; tool_id: string | null; name?: string | null }
   | { kind: "worktree_chosen"; choice: WorktreeChoice }
   | { kind: "worktree_changed"; status: WorktreeStatus; branch: string | null }
-  | { kind: "pr_changed"; pr: PrInfo | null };
+  | { kind: "prs_changed"; prs: PrInfo[] };
 
 /** The answer to Claude's request for a worktree. */
 export type WorktreeChoice = "worktree" | "here";
 export type WorktreeStatus = "created" | "restored" | "put_away" | "merged" | "gone";
 
-/** A worktree branch's pull request. Mirrors `PrInfo` in src-tauri/src/worktree.rs. */
-export type PrInfo = { number: number; state: "open" | "draft" | "merged" | "closed"; url: string; head: string };
+/** One of a chat's pull requests. Mirrors `PrInfo` in src-tauri/src/worktree.rs. */
+export type PrInfo = {
+  number: number;
+  state: "open" | "draft" | "merged" | "closed";
+  url: string;
+  head: string;
+  /** The branch it was opened from. Empty for one saved before this was kept. */
+  branch: string;
+};
 
 export type Envelope = { session_id: string; event: AgentEvent };
 
@@ -94,7 +101,8 @@ export type SessionRow = {
   /** The worktree's branch. */
   branch: string | null;
   wt_status: "live" | "put_away" | null;
-  pr: PrInfo | null;
+  /** The chat's pull requests as last seen, oldest first. */
+  prs: PrInfo[];
   /** When the chat went to the trash (ms); null when it isn't there. */
   trashed_at: number | null;
 };

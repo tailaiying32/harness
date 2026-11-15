@@ -54,7 +54,13 @@ alone is how a chat keeps its work apart, not news); the bottom bar still
 shows the open chat's branch. Merges go through pull requests on GitHub
 (repo `tailaiying32/harness`, private) so the marks track real events. Deferred (2026-11-14): a cue for idle
 chats with work not on GitHub (uncommitted or unmerged), maybe as an
-"unfinished work" list in settings; revisit if work actually gets lost. New chats get a title
+"unfinished work" list in settings; revisit if work actually gets lost.
+Since 2026-11-14 a chat keeps a list of pull requests, not one (a task split
+into parts): one mark stands for the set, the bottom bar shows the mark and
+"#12" or "2/3 merged" (no branch name, nothing before a pull request exists)
+with a menu listing them, and a worktree is removed only once no part is open
+and the branch its folder is on has landed. See "Worktrees", "Several pull
+requests". New chats get a title
 written by Haiku. **Tested** live with the self-test (Haiku, scratch repo):
 Claude asking by itself for real work (a module with tests) and not for a
 one-line fix, the move with resume, put away and restore with an uncommitted
@@ -511,6 +517,32 @@ Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-roll
   the folder or saved), and its tip is in the start branch, `origin/HEAD`,
   `main` or `master`; or its pull request is merged with the same head commit
   (covers squash merges).
+- **Several pull requests** (2026-11-14). A chat's `prs` is a list, oldest
+  first (`sessions.prs`, JSON; the old single `pr` column is copied in once
+  and then unused). It grows two ways: the link `gh pr create` prints in a
+  Bash result (also the "already exists" failure; other `gh pr` commands are
+  ignored, as they print links the chat only looked at), and the usual
+  lookup by the worktree's branch. Only open and draft ones are looked up
+  again, each by its link, and every answer updates just its own entry
+  (`Store::upsert_pr`, the only writer), so a refresh can't drop one added
+  meanwhile. Chats without a worktree are swept too while one is open.
+  - One state for the set (`worktree::summary`, `prSummary` in paths.ts):
+    open if any is open, else draft, else merged, else closed. The bar's
+    count leaves closed parts out ("1/1 merged"; "closed" if all were).
+  - **Merged** also needs no part open or a draft, and a folder that is on a
+    branch.
+  - **The folder's branch is followed** (`worktree::follow`): after each
+    turn, before putting away and in the sweep, a folder found on another
+    branch updates the saved worktree (branch, start commit = where it
+    forked from main, and the old branch added to `seen`). So a put-away
+    folder comes back on the branch it was on. A detached folder is left
+    alone: never put away for idleness, never merged.
+  - On removal, branches in `seen` whose merged pull request's head is still
+    their tip go too, unless the main folder is on one. Other branches are
+    never deleted.
+  - A new worktree starts a fresh list only if no part is open or a draft.
+  - Not covered: pull requests opened outside the chat on a branch the
+    folder was never on; a closed one reopened later (never looked up again).
 - **Sweep** (`SessionManager::sweep`): at start, hourly, and after any
   process exits; never touches a chat whose process runs. Merged → folder and
   branch removed, chat asks again at its next edit. No message for 14 days
@@ -724,6 +756,10 @@ tuned per theme so the panel is always clearly visible against the
 background; where a palette's own value is too close, override it (GitHub
 Light and Nord are already adjusted in the mock-up). Working defaults, cheap
 to change since both are settings: Harness Dark and the regular 12.5px size.
+There are two theme picks, one dark and one light, and an appearance setting
+that says which shows: light, dark, or auto (the default), which follows the
+system and switches the moment it does (added 2026-11-14). Picking a theme for
+the side not showing only saves it.
 The built-in terminal is accepted as a later feature; its position (bottom or
 side panel) is still open. How to build the selectors so the choice costs
 nothing at runtime:
@@ -811,7 +847,9 @@ Mocked up on the same board:
   folder picker sits at the left, and it disappears once the first message
   is sent (the sidebar shows the folder from then on). Model, mode and usage
   sit at the right, in that order. The desktop app also shows an effort level
-  ("High") next to the model; Harness has no effort setting yet.
+  ("High") next to the model; Harness has no effort setting yet. A chat with
+  pull requests shows their mark and count at the left (2026-11-14); the
+  branch name and "no PR" are gone.
 - **Queued mark** (2026-11-13). A message sent while Claude works shows a
   "send now" button under it, at the right, until `MessageSeen` arrives. The
   button presses stop: the running turn is cut off and the message starts a

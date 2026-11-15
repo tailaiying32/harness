@@ -91,11 +91,17 @@ pub fn git() -> &'static Path {
     })
 }
 
-/// GitHub's command line tool, if installed. Without it, pull request status is off.
+/// GitHub's command line tool, if installed. Without it, pull request status
+/// is off. `HARNESS_GH` names another program to use (tests put a stand-in
+/// for GitHub there).
 pub fn gh() -> Option<&'static Path> {
     static GH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    GH.get_or_init(|| find_tool("gh", &["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]))
-        .as_deref()
+    GH.get_or_init(|| {
+        std::env::var_os("HARNESS_GH")
+            .map(PathBuf::from)
+            .or_else(|| find_tool("gh", &["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]))
+    })
+    .as_deref()
 }
 
 pub fn check_setup() -> SetupInfo {

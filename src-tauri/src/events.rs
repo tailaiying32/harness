@@ -173,9 +173,10 @@ pub enum AgentEvent {
         status: String,
         branch: Option<String>,
     },
-    /// The worktree branch's pull request changed. Not saved: the store holds it.
-    PrChanged {
-        pr: Option<crate::worktree::PrInfo>,
+    /// The chat's pull requests changed: all of them, oldest first. Not
+    /// saved: the store holds them.
+    PrsChanged {
+        prs: Vec<crate::worktree::PrInfo>,
     },
 }
 
@@ -191,8 +192,23 @@ impl AgentEvent {
                 | AgentEvent::Compacting { .. }
                 | AgentEvent::BackgroundWork { .. }
                 | AgentEvent::TitleChanged { .. }
-                | AgentEvent::PrChanged { .. }
+                | AgentEvent::PrsChanged { .. }
         )
+    }
+
+    /// A tool result's text, with its parts joined. None for other events.
+    pub fn tool_result_text(&self) -> Option<String> {
+        let AgentEvent::ToolResult { content, .. } = self else {
+            return None;
+        };
+        Some(match content {
+            Value::String(text) => text.clone(),
+            Value::Array(parts) => {
+                let texts = parts.iter().filter_map(|part| part.get("text")?.as_str());
+                texts.collect::<Vec<_>>().join("\n")
+            }
+            _ => String::new(),
+        })
     }
 
     /// Cuts a very long tool result. The window shows only a few lines of one,

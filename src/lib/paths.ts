@@ -18,10 +18,40 @@ export function shortPath(path: string, home: string, max = 40): string {
   return lastTwo.length <= max || parts.length < 2 ? lastTwo : "…/" + parts[parts.length - 1];
 }
 
-/** A worktree chat's pull request, in a few words. */
-export function prLabel(pr: { number: number; state: string } | null, branch?: string | null): string {
-  if (!pr) return branch ? `${branch} · no pull request yet` : "no pull request yet";
-  return `PR #${pr.number} ${pr.state}`;
+type Pr = { number: number; state: string };
+
+/**
+ * One state for a chat's whole set of pull requests: "open" while any is
+ * open, else "draft" while any is a draft, else "merged" if any merged, else
+ * "closed". Null for none. The core has the same rule (`summary` in
+ * src-tauri/src/worktree.rs).
+ */
+export function prSummary(prs: Pr[]): string | null {
+  if (!prs.length) return null;
+  return ["open", "draft", "merged"].find((state) => prs.some((pr) => pr.state === state)) ?? "closed";
+}
+
+/**
+ * A chat's pull requests in the fewest words, for the line under the message
+ * box: "#12" for one, "2/3 merged" for several. Closed (abandoned) parts
+ * aren't counted; when every part was closed it reads "closed".
+ */
+export function prShort(prs: Pr[]): string {
+  if (prs.length === 1) return `#${prs[0].number}`;
+  const kept = prs.filter((pr) => pr.state !== "closed");
+  if (!kept.length) return "closed";
+  return `${kept.filter((pr) => pr.state === "merged").length}/${kept.length} merged`;
+}
+
+/** A chat's pull requests, in a few words. */
+export function prLabel(prs: Pr[]): string {
+  if (!prs.length) return "no pull request yet";
+  if (prs.length === 1) return `PR #${prs[0].number} ${prs[0].state}`;
+  const counts = ["merged", "open", "draft", "closed"]
+    .map((state) => [prs.filter((pr) => pr.state === state).length, state] as const)
+    .filter(([count]) => count)
+    .map(([count, state]) => `${count} ${state}`);
+  return `${prs.length} pull requests · ${counts.join(", ")}`;
 }
 
 /**

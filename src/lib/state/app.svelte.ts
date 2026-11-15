@@ -75,7 +75,7 @@ export class AppState {
       event.kind === "title_changed" ||
       event.kind === "worktree_changed" ||
       event.kind === "worktree_chosen" ||
-      event.kind === "pr_changed"
+      event.kind === "prs_changed"
     ) {
       void this.refresh();
     }

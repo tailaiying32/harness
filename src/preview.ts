@@ -19,13 +19,21 @@ function emit(session_id: string, event: AgentEvent) {
 
 const home = "/Users/you";
 const now = Date.now();
+const part = (number: number, state: PrInfo["state"], branch: string): PrInfo => ({
+  number,
+  state,
+  url: `https://github.com/you/harness/pull/${number}`,
+  head: "abc",
+  branch,
+});
 const row = (
   id: string,
   project_path: string,
   title: string,
   minutesAgo: number,
   branch: string | null = null,
-  pr: PrInfo["state"] | null = null,
+  // One state makes a single pull request for `branch`; a list is used as given.
+  pr: PrInfo["state"] | PrInfo[] | null = null,
 ): SessionRow => ({
   id,
   project_path,
@@ -38,9 +46,16 @@ const row = (
   work_path: branch ? `${home}/Library/Application Support/harness/worktrees/${id}` : null,
   branch,
   wt_status: branch ? "live" : null,
-  pr: pr ? { number: 40 + minutesAgo, state: pr, url: "https://github.com/you/harness/pull/1", head: "abc" } : null,
+  prs: !pr ? [] : typeof pr === "string" ? [part(40 + minutesAgo, pr, branch ?? "")] : pr,
   trashed_at: null,
 });
+
+/** A task split into pull requests: one landed, two open, the last built on the second. */
+const split = [
+  part(61, "merged", "harness/split-task-part-1"),
+  part(62, "open", "harness/split-task-part-2"),
+  part(63, "open", "harness/split-task-part-3"),
+];
 
 /** Chats in the trash, for the sidebar's trash list. */
 let trash: SessionRow[] = [
@@ -59,6 +74,16 @@ let projects: ProjectRow[] = [
       row("waiting", `${home}/code/harness`, "Bump dependencies and run the tests", 30),
       row("unseen", `${home}/code/harness`, "Tidy the footer so it stays on one line", 55, "harness/tidy-the-footer-77d3aa", "merged"),
       row("looks", `${home}/code/harness`, "Move the idle timer to the core", 70, "harness/idle-timer-core-c01d5e", "draft"),
+      row("split", `${home}/code/harness`, "Several pull requests per chat", 80, "harness/split-task-part-3", split),
+      row("landed", `${home}/code/harness`, "Rename the settings keys", 90, null, [
+        part(71, "merged", "harness/rename-keys-1"),
+        part(72, "closed", "harness/rename-keys-2"),
+        part(73, "closed", "harness/rename-keys-3"),
+      ]),
+      row("dropped", `${home}/code/harness`, "Try a native menu bar", 95, null, [
+        part(74, "closed", "harness/native-menu-1"),
+        part(75, "closed", "harness/native-menu-2"),
+      ]),
     ],
   },
   {
