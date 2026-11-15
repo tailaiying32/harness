@@ -2,6 +2,7 @@
 // These types mirror src-tauri/src/events.rs.
 
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 
 export type SessionState = "starting" | "working" | "waiting_approval" | "idle" | "exited";
@@ -230,6 +231,45 @@ export const saveImage = (
 ) => invoke<ImageRef>("save_image", { sessionId, mediaType, data, original });
 /** A chat's image as raw bytes, for looking at: the original of a shrunk paste. */
 export const readImage = (sessionId: string, n: number) => invoke<ArrayBuffer>("read_image", { sessionId, n });
+
+// ---- Files ----
+// The window takes file drops itself (the only way to learn a dropped file's
+// path) and hands the paths to whoever listens: the message box.
+
+const dropHandlers = new Set<(paths: string[]) => void>();
+let dropsWired = false;
+
+/** Hands dropped files' paths to the listeners. The window calls it; so does the browser preview. */
+export function dropFiles(paths: string[]): void {
+  if (paths.length) for (const handler of dropHandlers) handler(paths);
+}
+
+/** Calls `handler` with the paths of files dropped on the window. Returns how to stop. */
+export function onFileDrop(handler: (paths: string[]) => void): () => void {
+  dropHandlers.add(handler);
+  if (!dropsWired) {
+    dropsWired = true;
+    try {
+      void getCurrentWebview()
+        .onDragDropEvent((e) => {
+          if (e.payload.type === "drop") dropFiles(e.payload.paths);
+        })
+        .catch(() => {});
+    } catch {
+      // Not in the app's window (the browser preview): nothing to listen to.
+    }
+  }
+  return () => dropHandlers.delete(handler);
+}
+
+/** An image file's bytes, for a dropped image that becomes `[image n]`. */
+export const readImageFile = (path: string) => invoke<ArrayBuffer>("read_image_file", { path });
+/** Whether a path is a file or a folder. */
+export const fileKind = (path: string) => invoke<"file" | "folder">("file_kind", { path });
+/** Opens a dropped file in its own app. Folders, apps and runnable files are shown in their folder instead. */
+export const openFile = (path: string) => invoke<void>("open_file", { path });
+/** Paths of the files on the system clipboard (copied in Finder or Explorer); none when it holds something else. */
+export const clipboardFiles = () => invoke<string[]>("clipboard_files");
 
 /** A markdown file's text, for a link opened in the side panel. */
 export const readDoc = (path: string) => invoke<string>("read_doc", { path });

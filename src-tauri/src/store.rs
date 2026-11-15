@@ -87,9 +87,23 @@ fn err(e: rusqlite::Error) -> String {
     format!("Saved data error: {e}")
 }
 
+/// A line with each dropped file, `[name](<path>)`, written as just `[name]`.
+fn without_file_paths(line: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(at) = rest.find("](<") {
+        let Some(end) = rest[at..].find(">)") else { break };
+        out.push_str(&rest[..=at]);
+        rest = &rest[at + end + 2..];
+    }
+    out + rest
+}
+
 /// The first line of a message, cut to a title's length.
 fn title_from(text: &str) -> String {
     let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let line = without_file_paths(line);
+    let line = line.as_str();
     let mut title: String = line.chars().take(TITLE_CHARS).collect();
     if line.chars().count() > TITLE_CHARS {
         title.push('…');
@@ -642,6 +656,12 @@ mod tests {
 
     fn user(text: &str) -> AgentEvent {
         AgentEvent::UserMessage { text: text.into(), id: None, images: vec![] }
+    }
+
+    #[test]
+    fn a_title_names_dropped_files_without_their_paths() {
+        assert_eq!(title_from("look at [a b.pdf](</Users/me/a b.pdf>) and [c/](</x/c>) now"), "look at [a b.pdf] and [c/] now");
+        assert_eq!(title_from("a [link](<half"), "a [link](<half");
     }
 
     #[test]

@@ -11,6 +11,8 @@ import {
   sideInterrupt,
   sideSend,
   signIn,
+  fileKind,
+  openFile,
   setMode,
   setEffort,
   setModel,
@@ -25,6 +27,7 @@ import {
   type WorktreeChoice,
   type WorktreeStatus,
 } from "../ipc";
+import { FILE_LINK, fileWord, linkable, toLinks, type FileRef } from "../chat/files";
 import { docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
 
 export type UserItem = {
@@ -84,16 +87,27 @@ export const PLAN_TAB = "plan";
 /** The `[image n]` words in a text, in order. */
 export const IMAGE_WORD = /\[image (\d+)\]/g;
 
-/** A text in pieces: plain text, and the words of the given images. */
-export function withImages(text: string, images: ImageRef[] = []): { text: string; image?: ImageRef }[] {
-  if (!images.length) return [{ text }];
-  const out: { text: string; image?: ImageRef }[] = [];
-  let at = 0;
+/** One piece of a message's text: plain text, an image's word, or a file's word (with its path). */
+export type Piece = { text: string; image?: ImageRef; file?: string };
+
+/** A sent text in pieces: plain text, the words of the given images, and the files it links. */
+export function withWords(text: string, images: ImageRef[] = []): Piece[] {
+  const found: { at: number; length: number; piece: Piece }[] = [];
   for (const match of text.matchAll(IMAGE_WORD)) {
     const image = images.find((i) => i.n === Number(match[1]));
-    if (!image) continue;
-    out.push({ text: text.slice(at, match.index) }, { text: match[0], image });
-    at = match.index + match[0].length;
+    if (image) found.push({ at: match.index, length: match[0].length, piece: { text: match[0], image } });
+  }
+  for (const match of text.matchAll(FILE_LINK)) {
+    found.push({ at: match.index, length: match[0].length, piece: { text: `[${match[1]}]`, file: match[2] } });
+  }
+  if (!found.length) return [{ text }];
+  found.sort((a, b) => a.at - b.at);
+  const out: Piece[] = [];
+  let at = 0;
+  for (const word of found) {
+    if (word.at < at) continue; // inside the word before it
+    out.push({ text: text.slice(at, word.at) }, word.piece);
+    at = word.at + word.length;
   }
   out.push({ text: text.slice(at) });
   return out;
@@ -200,6 +214,20 @@ export class Chat {
   draft = $state("");
   /** Images pasted into the draft. One goes with the message only if its word is still in the text. */
   draftImages = $state<ImageRef[]>([]);
+  /** Files dropped into the draft. One goes with the message only if its word is still in the text. */
+  draftFiles = $state<FileRef[]>([]);
+
+  /**
+   * Takes a dropped or pasted file into the draft. Returns what to put in the
+   * text: the file's word, or the bare path when it can't be written as a word.
+   */
+  async addDraftFile(path: string): Promise<string> {
+    if (!linkable(path)) return path;
+    const isDir = (await fileKind(path).catch(() => "file")) === "folder";
+    const word = fileWord(path, this.draftFiles, isDir);
+    if (!this.draftFiles.some((f) => f.path === path)) this.draftFiles.push({ word, path });
+    return word;
+  }
   items = $state<Item[]>([]);
   status = $state<SessionState | "none">("none");
   /** The model Claude Code reports it is using. Known after the first turn starts. */
@@ -307,6 +335,15 @@ export class Chat {
   /** Shows a problem in the chat, e.g. an image that couldn't be attached. */
   showError(text: string): void {
     this.push({ type: "error", text });
+  }
+
+  /**
+   * Opens a dropped file: a markdown file as a tab in the side panel, like a
+   * link to one; anything else in its own app. Says so in the chat when it can't.
+   */
+  openDropped(path: string): void {
+    if (/\.(md|markdown)$/i.test(path)) void this.openFile(path);
+    else openFile(path).catch((e) => this.showError(String(e)));
   }
 
   // ---- Looking at images ----
@@ -649,7 +686,7 @@ export class Chat {
   /** Sends a message, with the draft's images whose `[image n]` word is in it. */
   /** `from` is where the images come from: the draft's, or a sent message's when it is sent again. */
   async send(text: string, from: ImageRef[] = this.draftImages): Promise<void> {
-    const message = text.trim();
+    let message = text.trim();
     if (!message) return;
     // `/btw` goes to the side chat, never to Claude Code (which can't run it headless).
     const btw = this.owner ? null : message.match(/^\/btw(?:\s+([\s\S]*))?$/);
@@ -658,6 +695,11 @@ export class Chat {
       if (question) await this.askSide(question);
       else this.openSide();
       return;
+    }
+    // A fresh send: the draft's file words become name-and-path links.
+    if (from === this.draftImages) {
+      message = toLinks(message, this.draftFiles);
+      this.draftFiles = [];
     }
     const messageId = crypto.randomUUID();
     const images: ImageRef[] = [];

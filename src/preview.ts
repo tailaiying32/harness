@@ -3,7 +3,7 @@
 // look only. It is not part of the built app (the build starts from index.html).
 
 import { mount } from "svelte";
-import type { AgentEvent, PrInfo, ProjectRow, SessionRow } from "./lib/ipc";
+import { dropFiles, type AgentEvent, type PrInfo, type ProjectRow, type SessionRow } from "./lib/ipc";
 import App from "./App.svelte";
 
 type Callback = (message: unknown) => void;
@@ -492,6 +492,13 @@ const commands: Record<string, (args: Args) => unknown> = {
   "plugin:dialog|open": () => null,
   "plugin:opener|open_url": () => undefined,
   "plugin:opener|reveal_item_in_dir": () => undefined,
+  // Dropped files. `__drop([...paths])` in the console stands in for a drop.
+  file_kind: (args: Args) => (String(args.path).endsWith("/") ? "folder" : "file"),
+  open_file: () => undefined,
+  clipboard_files: () => [],
+  read_image_file: () => {
+    throw "The preview can't read files.";
+  },
   save_image: (args: Args) => {
     const id = String(args.sessionId);
     const list = pasted.get(id) ?? [];
@@ -537,6 +544,7 @@ const commands: Record<string, (args: Args) => unknown> = {
 };
 
 mount(App, { target: document.getElementById("app")! });
+(window as any).__drop = dropFiles;
 
 // For screenshots: `#open=<chat id>` opens that chat, and `&trash` opens the
 // sidebar's trash list.

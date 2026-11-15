@@ -34,6 +34,9 @@ struct PendingApproval {
 }
 
 type Pending = Arc<Mutex<HashMap<String, PendingApproval>>>;
+/// Files the user dropped into this chat's messages, by path. Claude may read
+/// these without asking, wherever they are.
+type Allowed = Arc<Mutex<HashSet<String>>>;
 
 /// IDs of messages written to Claude Code that it hasn't echoed back yet.
 type Sent = Arc<Mutex<HashSet<String>>>;
@@ -178,6 +181,7 @@ enum Out {
 struct ClaudeCodeProcess {
     tx: mpsc::UnboundedSender<Out>,
     pending: Pending,
+    allowed: Allowed,
     sent: Sent,
     sink: EventSink,
     /// Taken by the first `stop()`.
@@ -225,6 +229,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
         let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
         let pending: Pending = Arc::default();
+        let allowed: Allowed = Arc::default();
         let sent: Sent = Arc::default();
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
         sink(AgentEvent::Status {
@@ -266,6 +271,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         {
             let weak_tx = tx.downgrade();
             let pending = pending.clone();
+            let allowed = allowed.clone();
             let sent = sent.clone();
             let sink = sink.clone();
             tokio::spawn(async move {
@@ -306,6 +312,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
                     if value["type"] == "result" {
                         last_turn_failed = value["is_error"] == true;
                     }
+                    // A read of a file the user dropped is allowed without a card.
+                    if let Some(reply) = quiet_read(&value, &allowed.lock().unwrap()) {
+                        if let Some(tx) = weak_tx.upgrade() {
+                            let _ = tx.send(Out::Line(reply.to_string()));
+                        }
+                        continue;
+                    }
                     let translated = translate(&value, &pending);
                     if let Some(reply) = translated.reply {
                         if let Some(tx) = weak_tx.upgrade() {
@@ -339,6 +352,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         Ok(Box::new(ClaudeCodeProcess {
             tx,
             pending,
+            allowed,
             sent,
             sink,
             stop_tx: Mutex::new(Some(stop_tx)),
@@ -665,6 +679,7 @@ impl RunningAgent for ClaudeCodeProcess {
     fn send_user_message(&self, text: &str, images: &[ImagePayload], id: &str) -> Result<(), String> {
         // Claude Code echoes the message back under this ID when it takes it in.
         self.sent.lock().unwrap().insert(id.to_string());
+        self.allowed.lock().unwrap().extend(file_links(text));
         self.send(user_message(text, images, id))?;
         (self.sink)(AgentEvent::Status {
             state: SessionState::Working,
@@ -826,6 +841,49 @@ fn is_repeat(v: &Value, seen: &mut HashSet<String>) -> bool {
         Some(uuid) => !seen.insert(uuid.to_string()),
         None => false,
     }
+}
+
+/// The paths of the files a message links: each `[name](<path>)` in it, the
+/// form the app writes a dropped file in (`src/lib/chat/files.ts`).
+fn file_links(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("](<") {
+        let named = rest[..at].rfind('[').is_some_and(|open| at > open + 1 && !rest[open..at].contains('\n'));
+        rest = &rest[at + 3..];
+        if let Some(end) = rest.find(['>', '\n']) {
+            if named && end > 0 && rest[end..].starts_with(">)") {
+                found.push(rest[..end].to_string());
+            }
+        }
+    }
+    found
+}
+
+/// The answer to a permission request that needs no card: Claude reading
+/// (Read) or searching (Grep) exactly a file the user dropped. Only that
+/// file: never its folder, and never through another tool.
+fn quiet_read(v: &Value, allowed: &HashSet<String>) -> Option<Value> {
+    let request = &v["request"];
+    if v["type"] != "control_request" || request["subtype"] != "can_use_tool" {
+        return None;
+    }
+    let path = match request["tool_name"].as_str()? {
+        "Read" => request["input"]["file_path"].as_str()?,
+        "Grep" => request["input"]["path"].as_str()?,
+        _ => return None,
+    };
+    if !allowed.contains(path) {
+        return None;
+    }
+    Some(json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": v["request_id"],
+            "response": { "behavior": "allow", "updatedInput": request["input"] },
+        },
+    }))
 }
 
 /// Turn one line of Claude Code output into the app's events.
@@ -1092,6 +1150,35 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_files_a_message_links() {
+        assert_eq!(
+            file_links("see [a.pdf](</Users/me/My Files/a.pdf>) and [b/](<C:\\logs\\b>) ok"),
+            ["/Users/me/My Files/a.pdf", "C:\\logs\\b"]
+        );
+        // Ordinary links, and broken ones, aren't files.
+        assert!(file_links("[site](https://x.dev) [x](<a\nb>) ](</etc/passwd>) [y](<z> )").is_empty());
+    }
+
+    #[test]
+    fn a_dropped_file_is_read_without_asking() {
+        let allowed = HashSet::from(["/dl/a.pdf".to_string()]);
+        let ask = |tool: &str, input: Value| {
+            json!({ "type": "control_request", "request_id": "r1",
+                "request": { "subtype": "can_use_tool", "tool_name": tool, "input": input } })
+        };
+        let reply = quiet_read(&ask("Read", json!({ "file_path": "/dl/a.pdf", "pages": "1-3" })), &allowed).unwrap();
+        assert_eq!(reply["response"]["request_id"], "r1");
+        assert_eq!(reply["response"]["response"]["behavior"], "allow");
+        assert_eq!(reply["response"]["response"]["updatedInput"]["pages"], "1-3");
+        assert!(quiet_read(&ask("Grep", json!({ "pattern": "x", "path": "/dl/a.pdf" })), &allowed).is_some());
+        // Other files, the folder, and other tools still ask.
+        assert!(quiet_read(&ask("Read", json!({ "file_path": "/dl/b.pdf" })), &allowed).is_none());
+        assert!(quiet_read(&ask("Grep", json!({ "pattern": "x", "path": "/dl" })), &allowed).is_none());
+        assert!(quiet_read(&ask("Edit", json!({ "file_path": "/dl/a.pdf" })), &allowed).is_none());
+        assert!(quiet_read(&ask("Bash", json!({ "command": "cat /dl/a.pdf" })), &allowed).is_none());
+    }
 
     fn events(line: &str, pending: &Pending) -> Vec<AgentEvent> {
         translate(&serde_json::from_str(line).unwrap(), pending).events

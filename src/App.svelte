@@ -193,11 +193,12 @@
       //   @endside       end the open chat's side chat
       //   A message starting with /btw goes to the side chat; the test waits for its answer.
       //   @image <word>  attach a picture of <word>, as a paste would, to the next message
+      //   @file <path>   add the file at <path>, as a drop would, to the next message
       //   @wait <ms>     do nothing for a while. With the window hidden or the screen
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
-        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|image)(?:\s+(\S+))?$/) ??
+        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|image|file)(?:\s+(\S+))?$/) ??
         [];
       const current = app.current;
       if (directive === "model") await current.changeModel(value);
@@ -224,6 +225,7 @@
       if (directive === "wait") await pause(Number(value));
       if (directive === "endside") await current.endSide();
       if (directive === "image") imageWords.push(await attach(current, await pictureOf(value)));
+      if (directive === "file") imageWords.push(await current.addDraftFile(value));
       if (directive === "close") await closeSession(current.sessionId);
       if (directive === "close" || directive === "exited") await exited(current);
       if (directive) {
@@ -322,7 +324,7 @@
     <!-- Each chat gets its own view, so scroll position and open folds don't leak between chats. -->
     {#key chat.sessionId}
       <ChatView {chat} problem={setup?.problem ?? null} />
-      <Composer {chat} ready={!!setup?.binary} home={app.home} {models} focus={app.focusBox} />
+      <Composer {chat} ready={!!setup?.binary} home={app.home} {models} focus={app.focusBox} drops={!showSettings && !chat.viewing} />
     {/key}
   </main>
   {#if panelOpen}
