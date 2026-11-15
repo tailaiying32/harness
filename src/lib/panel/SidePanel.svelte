@@ -1,7 +1,8 @@
 <script lang="ts">
-  // The side panel: a space beside the chat, in one of three views picked in
+  // The side panel: a space beside the chat, in one of four views picked in
   // the top bar, which also holds the view's own row: docs' tabs, the side
-  // chat's name, the browser's address (see PanelBar). Browser: a localhost
+  // chat's name, the browser's address, the terminal's tabs (see PanelBar). Terminal:
+  // the project's shells (see TerminalView). Browser: a localhost
   // page Claude can drive too (see BrowserView). Docs: one tab for the plan and one for each markdown file
   // the chat wrote or a link opened; the plan's answer buttons live at the foot
   // of its tab while Claude waits (mouse only, like every approval: no key
@@ -11,6 +12,7 @@
   import ChatView from "../chat/ChatView.svelte";
   import LiveMarkdown from "../chat/LiveMarkdown.svelte";
   import BrowserView from "./BrowserView.svelte";
+  import TerminalView from "./TerminalView.svelte";
   import Markdown from "../chat/Markdown.svelte";
   import { onDestroy } from "svelte";
   import { NOTES_TAB, PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
@@ -74,11 +76,13 @@
   );
 
   // The panel's left edge drags to set its width, kept as a share of the
-  // window. The chat keeps at least MIN_CHAT px and the panel MIN_PANEL px.
-  // Dragging SNAP px past the chat's limit makes the panel full screen; SNAP
-  // px past the panel's own limit hides it. Both live: back over the line
-  // (button still held) undoes it, and only letting go settles it. Either way
-  // the panel keeps its width from before the drag, for when it is back.
+  // area beside the sidebar (the panel's parent), since that is what the
+  // width's percentage is measured against. The chat keeps at least
+  // MIN_CHAT px and the panel MIN_PANEL px. Dragging SNAP px past the chat's
+  // limit makes the panel full screen; SNAP px past the panel's own limit
+  // hides it. Both live: back over the line (button still held) undoes it,
+  // and only letting go settles it. Either way the panel keeps its width
+  // from before the drag, for when it is back.
   const MIN_CHAT = 360;
   const MIN_PANEL = 280;
   const SNAP = 48;
@@ -89,14 +93,14 @@
       away (and a new one comes) if the drag hides it and brings it back. */
   let area: HTMLElement | null = null;
 
-  // Measured from the chat-and-panel area's left edge, which stays put even
-  // while full screen hides the chat (and with it the edge being dragged, so
-  // the drag listens on the window).
+  // Measured against the chat-and-panel area, which stays put even while
+  // full screen hides the chat (and with it the edge being dragged, so the
+  // drag listens on the window).
   function drag(e: PointerEvent) {
-    const left = area?.getBoundingClientRect().left ?? 0;
-    const width = window.innerWidth;
-    const wide = e.clientX < left + MIN_CHAT - SNAP;
-    const hidden = e.clientX > width - MIN_PANEL + SNAP;
+    const r = area?.getBoundingClientRect();
+    if (!r) return;
+    const wide = e.clientX < r.left + MIN_CHAT - SNAP;
+    const hidden = e.clientX > r.right - MIN_PANEL + SNAP;
     chat.panelWide = wide;
     chat.panelOpen = !hidden;
     if (wide || hidden) {
@@ -104,8 +108,8 @@
       applyPanelWidth(before);
       return;
     }
-    const edge = Math.max(left + MIN_CHAT, Math.min(e.clientX, width - MIN_PANEL));
-    share = (width - edge) / width;
+    const edge = Math.max(r.left + MIN_CHAT, Math.min(e.clientX, r.right - MIN_PANEL));
+    share = (r.right - edge) / r.width;
     applyPanelWidth(share);
   }
 
@@ -180,7 +184,9 @@
 <aside class="panel" bind:this={panel}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="grip" title="Drag to resize; double-click to reset" onpointerdown={startDrag} ondblclick={resetWidth}></div>
-  {#if chat.panelView === "browser"}
+  {#if chat.panelView === "terminal"}
+    <TerminalView {chat} {covered} />
+  {:else if chat.panelView === "browser"}
     <BrowserView {chat} {covered} />
   {:else if side}
     <div class="side">
@@ -251,6 +257,7 @@
 <style>
   .panel {
     width: var(--panel-w, 46%);
+    box-sizing: border-box;
     flex-shrink: 0;
     min-width: 0;
     display: flex;

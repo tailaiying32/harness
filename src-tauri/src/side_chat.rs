@@ -123,7 +123,7 @@ impl SideChats {
                         model,
                         effort,
                         side: Some(SideOptions { fork_from }),
-                        tools: None,
+                        tools: Vec::new(),
                         notes: notes_for(&self.0.notes, chat_id),
                     },
                     self.sink(chat_id, run),

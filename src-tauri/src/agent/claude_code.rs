@@ -64,10 +64,11 @@ planning, or once this chat already works in a worktree.";
 /// always ask, in every mode, so the request reaches the app instead of Claude
 /// Code making a worktree inside the repo by itself (tested on CLI 2.1.322:
 /// without this it doesn't ask). The app's own tools, if any, never ask.
-fn launch_settings(tools: Option<&AppTools>) -> String {
+fn launch_settings(tools: &[AppTools]) -> String {
     let mut permissions = json!({ "ask": ["EnterWorktree"] });
-    if let Some(tools) = tools {
-        permissions["allow"] = json!([format!("mcp__{}", tools.server)]);
+    if !tools.is_empty() {
+        let allow: Vec<String> = tools.iter().map(|t| format!("mcp__{}", t.server)).collect();
+        permissions["allow"] = json!(allow);
     }
     json!({ "permissions": permissions }).to_string()
 }
@@ -76,8 +77,12 @@ fn launch_settings(tools: Option<&AppTools>) -> String {
 /// Code sends their calls down stdout as `mcp_message` control requests and
 /// reads the answers from stdin, as the Agent SDK does (tested on CLI 2.1.322:
 /// no `initialize` request needed first; tools appear as `mcp__<server>__<tool>`).
-fn mcp_config(tools: &AppTools) -> String {
-    json!({ "mcpServers": { tools.server: { "type": "sdk", "name": tools.server } } }).to_string()
+fn mcp_config(tools: &[AppTools]) -> String {
+    let servers: serde_json::Map<String, Value> = tools
+        .iter()
+        .map(|t| (t.server.to_string(), json!({ "type": "sdk", "name": t.server })))
+        .collect();
+    json!({ "mcpServers": servers }).to_string()
 }
 
 /// Added to a side chat's instructions on every launch.
@@ -135,12 +140,14 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
     ]
     .map(String::from)
     .to_vec();
-    args.extend(["--settings".to_string(), launch_settings(opts.tools.as_ref())]);
+    args.extend(["--settings".to_string(), launch_settings(&opts.tools)]);
     let mut instructions = format!("{PLAN_INSTRUCTION}\n\n{WORKTREE_INSTRUCTION}");
-    if let Some(tools) = &opts.tools {
-        args.extend(["--mcp-config".to_string(), mcp_config(tools)]);
-        instructions.push_str("\n\n");
-        instructions.push_str(tools.instruction);
+    if !opts.tools.is_empty() {
+        args.extend(["--mcp-config".to_string(), mcp_config(&opts.tools)]);
+        for tools in &opts.tools {
+            instructions.push_str("\n\n");
+            instructions.push_str(tools.instruction);
+        }
     }
     if let Some(notes) = &opts.notes {
         args.extend(notes_access(notes));
@@ -379,7 +386,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
                     }
                     // A call to the app's own tools: answered in the background,
                     // since a tool may take a while.
-                    if let Some(tools) = tools.as_ref().filter(|t| is_tool_message(&value, t)) {
+                    if let Some(tools) = tools.iter().find(|t| is_tool_message(&value, t)) {
                         let tools = tools.clone();
                         let weak_tx = weak_tx.clone();
                         tokio::spawn(async move {
@@ -1335,7 +1342,7 @@ mod tests {
                 model: None,
                 effort: effort.map(str::to_owned),
                 side: None,
-                tools: None,
+                tools: Vec::new(),
                 notes: None,
             })
         };
@@ -1356,7 +1363,7 @@ mod tests {
             model: None,
             effort: None,
             side: None,
-            tools: None,
+            tools: Vec::new(),
             notes: None,
         });
         assert!(args.contains(&"--replay-user-messages".to_string()));
@@ -1398,7 +1405,7 @@ mod tests {
             model: None,
             effort: None,
             side: None,
-            tools: Some(echo_tools()),
+            tools: vec![echo_tools()],
             notes: None,
         });
         let at = args.iter().position(|a| a == "--mcp-config").unwrap();
@@ -1413,6 +1420,34 @@ mod tests {
     }
 
     #[test]
+    fn several_tool_servers_are_all_declared_allowed_and_explained() {
+        let mut more = echo_tools();
+        more.server = "more_tools";
+        more.instruction = "Use the other tools.";
+        let args = launch_args(&SpawnOptions {
+            binary: "claude".into(),
+            project_path: "/work".into(),
+            resume_id: None,
+            mode: None,
+            model: None,
+            effort: None,
+            side: None,
+            tools: vec![echo_tools(), more],
+            notes: None,
+        });
+        let at = args.iter().position(|a| a == "--mcp-config").unwrap();
+        let config: Value = serde_json::from_str(&args[at + 1]).unwrap();
+        assert_eq!(config["mcpServers"]["app_tools"]["type"], "sdk");
+        assert_eq!(config["mcpServers"]["more_tools"]["name"], "more_tools");
+        let at = args.iter().position(|a| a == "--settings").unwrap();
+        let settings: Value = serde_json::from_str(&args[at + 1]).unwrap();
+        assert_eq!(settings["permissions"]["allow"], json!(["mcp__app_tools", "mcp__more_tools"]));
+        let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
+        assert!(args[at + 1].contains("Use the app tools."));
+        assert!(args[at + 1].ends_with("Use the other tools."));
+    }
+
+    #[test]
     fn a_chat_and_its_side_chat_may_read_the_notes() {
         let opts = |side: Option<SideOptions>| SpawnOptions {
             binary: "claude".into(),
@@ -1422,7 +1457,7 @@ mod tests {
             model: None,
             effort: None,
             side,
-            tools: None,
+            tools: Vec::new(),
             notes: Some("/data/notes/chat-1/notes.md".into()),
         };
         for args in [launch_args(&opts(None)), launch_args(&opts(Some(SideOptions::default())))] {
@@ -1900,7 +1935,7 @@ mod tests {
                 side: Some(SideOptions {
                     fork_from: Some("main-1".into()),
                 }),
-                tools: None,
+                tools: Vec::new(),
                 notes: None,
             })
         };

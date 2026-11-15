@@ -195,6 +195,15 @@ pub enum AgentEvent {
     },
     /// The chat's browser was closed. Not saved.
     BrowserClosed {},
+    /// A project's terminal tabs changed: one opened, closed, or what runs in
+    /// it changed. Sent with an empty session ID. Not saved.
+    TerminalTabs {
+        project: String,
+        tabs: Vec<crate::terminal::TabInfo>,
+    },
+    /// Cmd+W was pressed: the window closes a terminal tab if one has focus,
+    /// or else closes itself. Sent with an empty session ID. Not saved.
+    CloseKey {},
 }
 
 impl AgentEvent {
@@ -212,6 +221,8 @@ impl AgentEvent {
                 | AgentEvent::PrsChanged { .. }
                 | AgentEvent::BrowserState { .. }
                 | AgentEvent::BrowserClosed { .. }
+                | AgentEvent::TerminalTabs { .. }
+                | AgentEvent::CloseKey { .. }
         )
     }
 

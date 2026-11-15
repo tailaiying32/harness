@@ -199,9 +199,20 @@ const pairs: [dark: string, light: string][] = [
 ];
 export const DEFAULT_SIZE: Size = "regular";
 
+let shown: Theme | null = null;
+
+/** The theme on show. */
+export function currentTheme(): Theme {
+  return shown ?? themes[0];
+}
+
+/** Told when the theme or text size changes, for what isn't drawn with CSS (the terminal). */
+export const LOOK_CHANGED = "harness-look";
+
 /** Switching a theme only sets custom properties; nothing re-renders. */
 export function applyTheme(id: string): void {
   const t = themes.find((theme) => theme.id === id) ?? themes[0];
+  shown = t;
   const root = document.documentElement;
   const set = (name: string, value: string) => root.style.setProperty(name, value);
   set("--bg", t.bg);
@@ -224,6 +235,7 @@ export function applyTheme(id: string): void {
   set("--syn-num", t.syn.num);
   set("--syn-comment", t.syn.comment);
   root.style.colorScheme = t.dark ? "dark" : "light";
+  window.dispatchEvent(new Event(LOOK_CHANGED));
 }
 
 /** Spacing: line height, gaps and margins. Defined in app.css, keyed on this attribute. */
@@ -240,6 +252,7 @@ const fontOfSize: Record<Size, number> = { compact: 11.5, regular: 12.5, roomy: 
 /** The text size. Spacing (`applySize`) is separate and doesn't change it. */
 export function applyFontSize(px: number): void {
   document.documentElement.style.setProperty("--font", `${px}px`);
+  window.dispatchEvent(new Event(LOOK_CHANGED));
 }
 
 /** `size` is the spacing: line height, gaps and margins. */
@@ -264,7 +277,7 @@ type Prefs = {
 };
 export const DEFAULT_PANEL_WIDTH = 0.46;
 
-/** The side panel's width, as a share of the window. Set by dragging its left edge. */
+/** The side panel's width, as a share of the area beside the sidebar. Set by dragging its left edge. */
 export function applyPanelWidth(share: number): void {
   document.documentElement.style.setProperty("--panel-w", `${(share * 100).toFixed(2)}%`);
 }

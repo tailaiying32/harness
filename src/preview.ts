@@ -572,6 +572,132 @@ const commands: Record<string, (args: Args) => unknown> = {
   },
 };
 
+// ---- The terminal: a pretend shell that echoes and answers a few commands ----
+
+type PreviewTab = { id: string; project: string; label: string; running: string | null; closed: boolean; worktree: string | null };
+const termTabs: PreviewTab[] = [];
+const termOutput = new Map<string, string>();
+const termSinks = new Map<string, { callback: number; index: number }>();
+const termLine = new Map<string, string>();
+let nextTab = 1;
+const esc = "\x1b";
+const promptFor = (tab: PreviewTab) =>
+  `${esc}[36m~/${tab.project.split("/").pop()}${esc}[0m ${esc}[90mmain${esc}[0m % `;
+
+function termInfo(project: string) {
+  return termTabs
+    .filter((t) => t.project === project)
+    .map((t) => ({ id: t.id, title: t.running ? t.running.split(" ")[0] : t.label, running: t.running, closed: t.closed, worktree: t.worktree }));
+}
+function termSend(id: string, text: string) {
+  termOutput.set(id, (termOutput.get(id) ?? "") + text);
+  const sink = termSinks.get(id);
+  if (sink) callbacks.get(sink.callback)?.({ message: text, index: sink.index++ });
+}
+function termTabsChanged(project: string) {
+  emit("", { kind: "terminal_tabs", project, tabs: termInfo(project) });
+}
+function addTab(project: string, label: string, worktree: string | null, output = ""): PreviewTab {
+  const tab: PreviewTab = { id: `t${nextTab++}`, project, label, running: null, closed: false, worktree };
+  termTabs.push(tab);
+  termOutput.set(tab.id, output || promptFor(tab));
+  return tab;
+}
+{
+  const project = `${home}/code/harness`;
+  const shell = addTab(project, "harness", null);
+  termOutput.set(
+    shell.id,
+    [
+      `${promptFor(shell)}ls src/lib/panel`,
+      "BrowserView.svelte  PanelBar.svelte  SidePanel.svelte  TerminalView.svelte",
+      `${promptFor(shell)}git status -s`,
+      ` ${esc}[31mM${esc}[0m src/lib/panel/SidePanel.svelte`,
+      `${esc}[31m??${esc}[0m scratch/`,
+      promptFor(shell),
+    ].join("\r\n"),
+  );
+  const server = addTab(project, "harness", null);
+  server.running = "python3 -m http.server 8000";
+  termOutput.set(
+    server.id,
+    [
+      `${promptFor(server)}python3 -m http.server 8000`,
+      "Serving HTTP on :: port 8000 (http://[::]:8000/) ...",
+      `::1 - - [15/Nov/2026 14:02:11] "GET / HTTP/1.1" ${esc}[32m200${esc}[0m -`,
+      `::1 - - [15/Nov/2026 14:02:14] "GET /api/items HTTP/1.1" ${esc}[31m404${esc}[0m -`,
+      "",
+    ].join("\r\n"),
+  );
+}
+
+Object.assign(commands, {
+  terminal_tabs: (args: Args) => termInfo(String(args.project)),
+  terminal_new: (args: Args) => {
+    const project = String(args.project);
+    const worktree = args.worktree ? String(args.worktree) : null;
+    const tab = addTab(project, args.label ? String(args.label) : project.split("/").pop() ?? "shell", worktree);
+    termTabsChanged(project);
+    return termInfo(project).find((t) => t.id === tab.id);
+  },
+  terminal_attach: (args: Args) => {
+    const id = String(args.tab);
+    const callback = (args.onData as { id: number }).id;
+    termSinks.set(id, { callback, index: 0 });
+    const kept = termOutput.get(id) ?? "";
+    termOutput.set(id, "");
+    termSend(id, kept);
+  },
+  terminal_write: (args: Args) => {
+    const id = String(args.tab);
+    const tab = termTabs.find((t) => t.id === id);
+    if (!tab) throw "That terminal tab is gone";
+    const data = String(args.data);
+    if (tab.running && data === "\x03") {
+      tab.running = null;
+      termSend(id, `^C\r\n${promptFor(tab)}`);
+      termTabsChanged(tab.project);
+      return;
+    }
+    if (tab.running) return;
+    for (const ch of data) {
+      const line = termLine.get(id) ?? "";
+      if (ch === "\r") {
+        termLine.set(id, "");
+        const answer: Record<string, string> = {
+          ls: "PLAN.md  package.json  src  src-tauri",
+          pwd: tab.worktree ?? tab.project,
+          "echo hello": "hello",
+        };
+        if (line.startsWith("sleep") || line.startsWith("python3")) {
+          tab.running = line;
+          termSend(id, "\r\n");
+          termTabsChanged(tab.project);
+        } else termSend(id, `\r\n${line && (answer[line] ?? `zsh: command not found: ${line.split(" ")[0]}`)}${line ? "\r\n" : ""}${promptFor(tab)}`);
+      } else if (ch === "\x7f") {
+        if (line) {
+          termLine.set(id, line.slice(0, -1));
+          termSend(id, "\b \b");
+        }
+      } else if (ch >= " ") {
+        termLine.set(id, line + ch);
+        termSend(id, ch);
+      }
+    }
+  },
+  terminal_resize: () => {},
+  terminal_place: () => {},
+  terminal_running: (args: Args) => termTabs.find((t) => t.id === args.tab)?.running ?? null,
+  terminal_close: (args: Args) => {
+    const at = termTabs.findIndex((t) => t.id === args.tab);
+    if (at < 0) return;
+    const [tab] = termTabs.splice(at, 1);
+    termTabsChanged(tab.project);
+  },
+  terminal_text: (args: Args) => termOutput.get(String(args.tab)) ?? "",
+  close_window: () => {},
+});
+
 (window as any).__TAURI_INTERNALS__ = {
   transformCallback(callback: Callback) {
     const id = nextCallback++;
@@ -592,7 +718,8 @@ mount(App, { target: document.getElementById("app")! });
 (window as any).__drop = dropFiles;
 
 // For screenshots: `#open=<chat id>` opens that chat, `&trash` opens the
-// sidebar's trash list, and `&browser` the panel's browser view.
+// sidebar's trash list, `&browser` the panel's browser view and `&terminal`
+// its terminal.
 const wanted = new URLSearchParams(location.hash.slice(1));
 setTimeout(() => {
   const title = [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === wanted.get("open"))?.title;
@@ -604,6 +731,11 @@ setTimeout(() => {
     if (wanted.has("browser")) {
       setTimeout(() => {
         document.querySelector<HTMLButtonElement>('header.bar button[title="browser"]')?.click();
+      }, 200);
+    }
+    if (wanted.has("terminal")) {
+      setTimeout(() => {
+        document.querySelector<HTMLButtonElement>('header.bar button[title="terminal"]')?.click();
       }, 200);
     }
   }, 100);

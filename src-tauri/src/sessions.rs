@@ -6,7 +6,7 @@
 mod worktrees;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -22,8 +22,19 @@ pub use worktrees::{PrLookup, SWEEP_EVERY};
 /// Where every chat's events go once saved: the window.
 pub type Out = Arc<dyn Fn(Envelope) + Send + Sync>;
 
-/// Makes the app's own tools for one chat, given its ID.
-pub type ToolsFor = Arc<dyn Fn(&str) -> AppTools + Send + Sync>;
+/// Makes the app's own tools for one chat, given its ID and its project's
+/// main folder (as the window names it).
+pub type ToolsFor = Arc<dyn Fn(&str, &str) -> Vec<AppTools> + Send + Sync>;
+
+/// How the sessions ask the side panel's terminal about worktree folders.
+#[derive(Clone)]
+pub struct TerminalHooks {
+    /// Whether a running shell sits in this worktree folder.
+    pub in_use: Arc<dyn Fn(&Path) -> bool + Send + Sync>,
+    /// A worktree folder is gone, and why ("branch merged", "chat deleted",
+    /// "cleaned up").
+    pub gone: Arc<dyn Fn(&Path, &str) + Send + Sync>,
+}
 
 /// How long a chat sits idle before its process is asked to exit.
 const DEFAULT_IDLE_SECONDS: u64 = 300;
@@ -135,6 +146,8 @@ struct Inner {
     pr_learn_lock: tokio::sync::Mutex<()>,
     /// The app's own tools for each chat's agent; set once at start.
     app_tools: OnceLock<ToolsFor>,
+    /// The side panel's terminal; set once at start.
+    terminal: OnceLock<TerminalHooks>,
 }
 
 #[derive(Clone)]
@@ -175,12 +188,30 @@ impl SessionManager {
             pr_links: Mutex::default(),
             pr_learn_lock: tokio::sync::Mutex::default(),
             app_tools: OnceLock::new(),
+            terminal: OnceLock::new(),
         }))
     }
 
     /// Gives every chat's agent started from now on the app's own tools.
     pub fn set_app_tools(&self, tools: ToolsFor) {
         let _ = self.0.app_tools.set(tools);
+    }
+
+    /// Lets worktree cleanup ask about and tell the terminal.
+    pub fn set_terminal_hooks(&self, hooks: TerminalHooks) {
+        let _ = self.0.terminal.set(hooks);
+    }
+
+    /// Whether a terminal shell sits in this worktree folder.
+    fn terminal_in(&self, root: &Path) -> bool {
+        self.0.terminal.get().is_some_and(|t| (t.in_use)(root))
+    }
+
+    /// Tells the terminal a worktree folder is gone.
+    fn terminal_gone(&self, root: &Path, why: &str) {
+        if let Some(t) = self.0.terminal.get() {
+            (t.gone)(root, why);
+        }
     }
 
     /// Chats' images.
@@ -364,7 +395,11 @@ impl SessionManager {
                     model,
                     effort: saved.map(|s| s.effort),
                     side: None,
-                    tools: inner.app_tools.get().map(|tools| tools(session_id)),
+                    tools: inner
+                        .app_tools
+                        .get()
+                        .map(|tools| tools(session_id, &project_path.to_string_lossy()))
+                        .unwrap_or_default(),
                     notes: notes_for(&inner.notes, session_id),
                 },
                 self.sink(session_id, run),
@@ -1531,6 +1566,31 @@ mod tests {
         assert_eq!(rig.store.chat_git("s1").unwrap().unwrap().status.as_deref(), Some("live"));
         assert_eq!(*rig.fake.folders.lock().unwrap().last().unwrap(), wt.work_path());
         assert!(rig.saw(|e| matches!(e, AgentEvent::WorktreeChanged { status, .. } if status == "restored")) == 1);
+    }
+
+    #[tokio::test]
+    async fn a_worktree_with_a_terminal_in_it_stays_and_a_deleted_chat_tells_the_terminal() {
+        let rig = rig_with(LONG, Duration::ZERO, LONG, PrLookup::none());
+        let repo = scratch_repo();
+        let wt = rig.into_worktree(&repo).await;
+        let shell_in: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
+        let told: Arc<Mutex<Vec<(PathBuf, String)>>> = Arc::default();
+        {
+            let (shell_in, told) = (shell_in.clone(), told.clone());
+            rig.manager.set_terminal_hooks(TerminalHooks {
+                in_use: Arc::new(move |_: &Path| *shell_in.lock().unwrap()),
+                gone: Arc::new(move |root: &Path, why: &str| told.lock().unwrap().push((root.to_path_buf(), why.to_string()))),
+            });
+        }
+        rig.manager.close("s1");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        rig.sweep().await;
+        assert!(wt.path.exists(), "kept while a shell sits in it");
+        *shell_in.lock().unwrap() = false;
+
+        rig.manager.delete("s1").await.unwrap();
+        assert!(!wt.path.exists());
+        assert_eq!(*told.lock().unwrap(), vec![(wt.path.clone(), "chat deleted".to_string())]);
     }
 
     #[tokio::test]

@@ -1,14 +1,81 @@
 <script lang="ts">
   // The open panel's own row, drawn in the top bar right above it, so the panel
-  // needs no row of its own: docs' tabs, the side chat's name, or the browser's
-  // address. What it doesn't fill stays empty for dragging the window.
+  // needs no row of its own: docs' tabs, the side chat's name, the browser's
+  // address, or the terminal's tabs. What it doesn't fill stays empty for
+  // dragging the window.
   import BarIcon from "../BarIcon.svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { browserNavigate, browserReload } from "../ipc";
+  import { shortBranch } from "../paths";
   import { NOTES_TAB, PLAN_TAB, type Chat } from "../state/chat.svelte";
+  import { terminals } from "../state/terminals.svelte";
   import { baseName } from "../tools";
 
   let { chat }: { chat: Chat } = $props();
+
+  // ---- Terminal (the project's tabs) ----
+  const project = $derived(chat.projectPath.trim());
+  const termTabs = $derived(terminals.tabs(project));
+  const termShown = $derived(terminals.shown(project));
+  /** The chat's worktree, offered in the + menu while it is there. */
+  const worktree = $derived(
+    chat.workPath && chat.wtStatus === "live" && chat.branch ? { path: chat.workPath, label: shortBranch(chat.branch) } : null,
+  );
+  let row = $state<HTMLElement>();
+  let menuOpen = $state(false);
+  let menuBox = $state<HTMLElement>();
+  let askBox = $state<HTMLElement>();
+  /** Where the "close it?" box sits: under its tab, kept inside the row. */
+  let askX = $state(0);
+  let askLeft = $state(0);
+  $effect(() => {
+    const box = askBox;
+    const x = askX;
+    if (!box || !row) return;
+    askLeft = Math.max(0, Math.min(x, row.clientWidth - box.offsetWidth));
+  });
+  const asking = $derived(
+    terminals.confirming && termTabs.some((t) => t.id === terminals.confirming?.id) ? terminals.confirming : null,
+  );
+  const askingName = $derived(asking ? (termTabs.find((t) => t.id === asking.id)?.title ?? "") : "");
+
+  async function newTab(where?: { path: string; label: string }) {
+    menuOpen = false;
+    try {
+      await terminals.open(project, where);
+    } catch (e) {
+      chat.showError(String(e));
+    }
+  }
+
+  function shut(e: MouseEvent, id: string) {
+    const tab = (e.currentTarget as HTMLElement).closest(".tab");
+    if (tab && row) askX = tab.getBoundingClientRect().left - row.getBoundingClientRect().left;
+    void terminals.askClose(id);
+  }
+
+  // A click outside the open menu or question, or Escape, closes it (a
+  // question answered this way keeps the tab).
+  $effect(() => {
+    const box = menuOpen ? menuBox : asking ? askBox : null;
+    if (!box) return;
+    const dismiss = () => {
+      menuOpen = false;
+      terminals.confirming = null;
+    };
+    const away = (e: PointerEvent) => {
+      if (!box.contains(e.target as Node)) dismiss();
+    };
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") dismiss();
+    };
+    window.addEventListener("pointerdown", away, true);
+    window.addEventListener("keydown", escape);
+    return () => {
+      window.removeEventListener("pointerdown", away, true);
+      window.removeEventListener("keydown", escape);
+    };
+  });
 
   // ---- Docs ----
   const active = $derived(chat.activeTab);
@@ -83,8 +150,46 @@
   </button>
 {/snippet}
 
-<div class="row" data-tauri-drag-region>
-  {#if chat.panelView === "browser"}
+<div class="row" data-tauri-drag-region bind:this={row}>
+  {#if chat.panelView === "terminal"}
+    <div class="tabs">
+      {#each termTabs as tab (tab.id)}
+        <span class="tab" class:on={tab.id === termShown?.id}>
+          <button title={tab.running ?? tab.title} onclick={() => terminals.pick(project, tab.id)}>{tab.title}</button>
+          <button class="shut" title="Close this tab" onclick={(e) => shut(e, tab.id)}>×</button>
+        </span>
+      {/each}
+    </div>
+    <span class="picker" bind:this={menuBox}>
+      <button
+        class="plus"
+        class:open={menuOpen}
+        title="New tab"
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+        onclick={() => (worktree ? (menuOpen = !menuOpen) : void newTab())}>+</button
+      >
+      {#if menuOpen}
+        <div class="menu" role="menu">
+          <button role="menuitem" onclick={() => newTab()}>new tab</button>
+          {#if worktree}
+            <button role="menuitem" onclick={() => newTab(worktree)}>new tab in {worktree.label}</button>
+          {/if}
+        </div>
+      {/if}
+    </span>
+    <span class="spacer" data-tauri-drag-region></span>
+    {@render widen()}
+    {#if asking}
+      <div class="ask" role="alertdialog" bind:this={askBox} style:left="{askLeft}px">
+        <span class="question">{askingName} is running. Close it?</span>
+        <span class="answers">
+          <button class="danger" onclick={() => terminals.close(asking.id)}>close</button>
+          <button class="keep" onclick={() => (terminals.confirming = null)}>keep</button>
+        </span>
+      </div>
+    {/if}
+  {:else if chat.panelView === "browser"}
     <!-- Before the address, like most browsers. Kept in place (just hidden)
          until a page is open, so the address doesn't jump right. -->
     <button
@@ -175,6 +280,7 @@
 
 <style>
   .row {
+    position: relative;
     flex: 1;
     min-width: 0;
     align-self: stretch;
@@ -223,6 +329,58 @@
   }
   .icon {
     display: flex;
+  }
+  /* The terminal's + and its menu, which opens downward over the panel. */
+  .picker {
+    position: relative;
+    flex-shrink: 0;
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+  }
+  .plus.open {
+    color: var(--bright);
+  }
+  .menu,
+  .ask {
+    position: absolute;
+    top: calc(100% + var(--gap) * 0.4);
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    padding: calc(var(--gap) * 0.4) 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+  }
+  .menu {
+    left: 0;
+  }
+  .menu button {
+    text-align: left;
+    padding: 0 2ch;
+    color: var(--dim);
+  }
+  .menu button:hover {
+    color: var(--fg);
+  }
+  /* "python3 is running. Close it?" under its tab. */
+  .ask {
+    top: calc(100% - var(--gap) * 0.2);
+    padding: calc(var(--gap) * 0.5) 2ch;
+    gap: calc(var(--gap) * 0.4);
+  }
+  .question {
+    color: var(--fg);
+  }
+  .answers {
+    display: flex;
+    gap: 3ch;
+  }
+  .danger {
+    color: var(--bad);
+  }
+  .keep {
+    color: var(--dim);
   }
   .reload.off,
   .icon.off {

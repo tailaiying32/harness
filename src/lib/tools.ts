@@ -70,10 +70,21 @@ function browserWording(tool: string, input: unknown): [string, string, string] 
   }
 }
 
+/** The project's terminal in the side panel, which Claude can read (see terminal.rs). */
+const TERMINAL = "mcp__harness_terminal__";
+
+function terminalWording(tool: string, input: unknown): [string, string, string] {
+  if (tool === "tabs") return [`looked at the terminal tabs`, `Looking at the terminal tabs`, `look at the terminal tabs`];
+  const tab = clip(field(input, "tab"), 30);
+  const what = tab ? `terminal ${tab}` : "the terminal";
+  return [`read ${what}`, `Reading ${what}`, `read ${what}`];
+}
+
 /** [past tense, present tense, "to ..." form], each followed by what it acted on. */
 function wording(tool: ToolCall): [string, string, string] {
   const { name, input } = tool;
   if (name.startsWith(BROWSER)) return browserWording(name.slice(BROWSER.length), input);
+  if (name.startsWith(TERMINAL)) return terminalWording(name.slice(TERMINAL.length), input);
   const file = fileName(field(input, "file_path") || field(input, "notebook_path"));
   const pattern = clip(field(input, "pattern"), 30);
   const query = clip(field(input, "query"), 30);

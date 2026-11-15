@@ -1,6 +1,7 @@
 // The whole window's state: the sidebar's projects and chats, which chat is
 // open, and what each chat's process is doing.
 
+import { terminals } from "./terminals.svelte";
 import {
   deleteSession,
   emptyTrash,
@@ -68,6 +69,15 @@ export class AppState {
   /** Every event from the core comes through here. */
   route(envelope: Envelope): void {
     const { session_id: id, event } = envelope;
+    // The terminal's tabs belong to a project, not a chat.
+    if (event.kind === "terminal_tabs") {
+      terminals.set(event.project, event.tabs);
+      return;
+    }
+    if (event.kind === "close_key") {
+      terminals.closeKey(this.current.projectPath.trim());
+      return;
+    }
     // A side chat's events belong to it alone: no sidebar mark, no usage reading.
     if (id.endsWith("#side")) {
       this.chats.get(id.slice(0, -"#side".length))?.side?.handle(event);

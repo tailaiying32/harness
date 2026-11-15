@@ -21,6 +21,8 @@
     closeSession,
     listModels,
     subscribe,
+    terminalText,
+    terminalWrite,
     type Decision,
     type Mode,
     type WorktreeChoice,
@@ -29,6 +31,7 @@
   import { attach } from "./lib/chat/images";
   import { loadCachedModels, saveCachedModels, startingModel } from "./lib/models";
   import { AppState } from "./lib/state/app.svelte";
+  import { terminals } from "./lib/state/terminals.svelte";
   import type { Chat } from "./lib/state/chat.svelte";
   import {
     applyFontSize,
@@ -96,6 +99,12 @@
   // them. Cmd+N starts a new chat. Cmd+B shows or hides the sidebar. Escape
   // also ends a full screen panel, unless it belongs to a box being typed in.
   function onKey(e: KeyboardEvent) {
+    // In a terminal, Ctrl keys belong to the shell (Ctrl+C, Ctrl+N, Ctrl+R...).
+    if (terminals.focused() && e.ctrlKey && !e.metaKey) return;
+    if (terminalKey(e)) {
+      e.preventDefault();
+      return;
+    }
     if (e.key === "," && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       showSettings = !showSettings;
@@ -113,6 +122,30 @@
       chat.panelWide = false;
     }
   }
+  /**
+   * The terminal's own shortcuts, only while it has the keys: Cmd+T for a new
+   * tab in the project's main folder, Cmd+Shift+[ and ] for the tab before
+   * and after. Cmd+W comes from the Mac menu (see `closeKey`).
+   */
+  function terminalKey(e: KeyboardEvent): boolean {
+    if (!terminals.focused() || !e.metaKey || e.altKey || e.ctrlKey) return false;
+    const project = app.current.projectPath.trim();
+    if (!e.shiftKey && e.key.toLowerCase() === "t") {
+      void terminals.open(project).catch((err) => app.current.showError(String(err)));
+      return true;
+    }
+    if (e.shiftKey && (e.code === "BracketLeft" || e.code === "BracketRight")) {
+      terminals.step(project, e.code === "BracketLeft" ? -1 : 1);
+      return true;
+    }
+    return false;
+  }
+  // Keys the terminal leaves to the window: the app's own Cmd shortcuts.
+  terminals.keys = (e) =>
+    e.metaKey &&
+    !e.ctrlKey &&
+    (["t", "n", ",", "w"].includes(e.key.toLowerCase()) ||
+      (e.shiftKey && (e.code === "BracketLeft" || e.code === "BracketRight")));
   // Opening a chat, from the sidebar or the trash, puts settings away.
   let shownChat = app.current.sessionId;
   $effect(() => {
@@ -185,6 +218,8 @@
     let answer: Decision | null = "allow";
     let worktreeAnswer: WorktreeChoice | null = null;
     let stopAfter = 0;
+    /** What each @termclose was asked about ("python3 …"), or null when it closed at once. */
+    const termAsked: (string | null)[] = [];
     let background = false;
     /** `[image n]` words of pictures attached for the next message. */
     let imageWords: string[] = [];
@@ -226,14 +261,20 @@
       //   @browser <url> open the browser view and type <url> in its address line;
       //                  waits for the page to load. `@browser` alone only shows the view.
       //   @settings      open or close settings (drawn over the panel, hiding the page)
+      //   @terminal <text>  show the terminal (opening a tab if the project has none)
+      //                  and type <text> and Enter in the tab on show
+      //   @termwait <text>  wait (up to 20 s) until the tab on show has <text> in it
+      //   @termtab       open another tab in the project's main folder
+      //   @termclose     close the tab on show, answering "close" if it asks
+      //   @docs          show the docs view (the terminal goes off screen)
       //   @notes <text>  write the open chat's notes (the rest of the line, spaces and all)
       //   @planedit <text>  add a line to the next plan before it is auto-approved
       //   @wait <ms>     do nothing for a while. With the window hidden or the screen
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
-        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|image|file|browser|settings)(?:\s+(\S+))?$/) ??
-        message.match(/^@(notes|planedit)\s+(.+)$/s) ??
+        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|image|file|browser|settings|termtab|termclose|docs)(?:\s+(\S+))?$/) ??
+        message.match(/^@(notes|planedit|terminal|termwait)\s+(.+)$/s) ??
         [];
       const current = app.current;
       if (directive === "notes") await current.saveNotes(value);
@@ -272,6 +313,33 @@
         }
       }
       if (directive === "settings") showSettings = !showSettings;
+      const project = current.projectPath.trim();
+      if (directive === "terminal") {
+        current.showView("terminal");
+        for (let i = 0; i < 100 && !terminals.shown(project); i++) await pause(100);
+        const tab = terminals.shown(project);
+        if (tab) await terminalWrite(tab.id, `${value}\r`);
+        await pause(300);
+      }
+      if (directive === "termwait") {
+        for (let i = 0; i < 100; i++) {
+          const tab = terminals.shown(project);
+          const text = tab ? await terminalText(tab.id, 200).catch(() => "") : "";
+          if (text.includes(value)) break;
+          await pause(200);
+        }
+      }
+      if (directive === "termtab") await terminals.open(project);
+      if (directive === "termclose") {
+        const tab = terminals.shown(project);
+        if (tab) {
+          await terminals.askClose(tab.id);
+          termAsked.push(terminals.confirming?.running ?? null);
+          if (terminals.confirming) await terminals.close(terminals.confirming.id);
+          await pause(300);
+        }
+      }
+      if (directive === "docs") current.showView("docs");
       if (directive === "close") await closeSession(current.sessionId);
       if (directive === "close" || directive === "exited") await exited(current);
       if (directive) {
@@ -301,6 +369,14 @@
     await app.refresh();
     await tick();
     const current = app.current;
+    const termProject = current.projectPath.trim();
+    const termTab = terminals.shown(termProject);
+    const termReport = {
+      on: current.terminalOn,
+      tabs: terminals.tabs(termProject).map((t) => ({ title: t.title, running: t.running, closed: t.closed, worktree: t.worktree })),
+      asked: termAsked,
+      text: termTab ? await terminalText(termTab.id, 40).catch((e) => String(e)) : null,
+    };
     await autotestReport(
       JSON.stringify(
         {
@@ -333,6 +409,7 @@
           panelView: current.panelView,
           notes: current.notes,
           plans: current.items.filter((item) => item.type === "approval" && item.approval === "plan").map((item) => ({ ...item })),
+          terminal: termReport,
           browser: {
             on: current.browserOn,
             page: current.browser,
