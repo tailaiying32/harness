@@ -267,6 +267,8 @@ export class Chat {
   browserOn = $state(false);
   /** The page it shows, once there is one. Lives in the core, not saved. */
   browser = $state<BrowserInfo | null>(null);
+  /** Why the address last typed couldn't be opened; cleared by the next one. */
+  browserProblem = $state("");
   /** The browser is what the panel shows right now. */
   get browserShown(): boolean {
     return this.panelOpen && this.panelView === "browser";
@@ -307,6 +309,7 @@ export class Chat {
   private leaveBrowser(): void {
     this.browserOn = false;
     this.browser = null;
+    this.browserProblem = "";
     if (this.panelView !== "browser") return;
     this.panelView = this.side ? "side" : "docs";
     this.panelOpen = this.panelOpen && this.panelHasContent;

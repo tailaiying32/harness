@@ -1,7 +1,8 @@
 <script lang="ts">
-  // The side panel: a tabbed space beside the chat, in one of three views picked
-  // in the top bar. Browser: a localhost page Claude can drive too (see
-  // BrowserView). Docs: one tab for the plan and one for each markdown file
+  // The side panel: a space beside the chat, in one of three views picked in
+  // the top bar, which also holds the view's own row: docs' tabs, the side
+  // chat's name, the browser's address (see PanelBar). Browser: a localhost
+  // page Claude can drive too (see BrowserView). Docs: one tab for the plan and one for each markdown file
   // the chat wrote or a link opened; the plan's answer buttons live at the foot
   // of its tab while Claude waits (mouse only, like every approval: no key
   // approves a plan). Side chat: one tab for the side conversation, its own
@@ -13,7 +14,7 @@
   import { PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
   import { folderOf } from "../paths";
   import { applyPanelWidth, DEFAULT_PANEL_WIDTH, savePrefs } from "../themes";
-  import { baseName, planOf } from "../tools";
+  import { planOf } from "../tools";
 
   // `covered`: something is drawn over the panel (settings, an image), so the
   // browser's page, which would sit on top of it, is put out of sight.
@@ -35,13 +36,6 @@
         : ""
       : (chat.docs.find((doc) => doc.path === active)?.text ?? ""),
   );
-
-  /** A file's name; with its folder when two tabs share a name. */
-  function label(path: string): string {
-    const name = baseName(path);
-    if (chat.openDocs.filter((doc) => baseName(doc.path) === name).length < 2) return name;
-    return path.split(/[\\/]/).slice(-2).join("/");
-  }
 
   // The panel's left edge drags to set its width, kept as a share of the
   // window. The chat keeps at least MIN_CHAT px and the panel MIN_PANEL px.
@@ -117,15 +111,6 @@
   {#if chat.panelView === "browser"}
     <BrowserView {chat} {covered} />
   {:else if side}
-    <!-- Drawn as a tab, like a document's; its × ends the side chat. -->
-    <div class="bar">
-      <div class="tabs">
-        <span class="tab on">
-          <button class="name" title={side.title || "side chat"}>{side.title || "side chat"}</button>
-          <button class="shut" title="End the side chat; it is forgotten" onclick={() => chat.endSide()}>×</button>
-        </span>
-      </div>
-    </div>
     <div class="side">
       <ChatView chat={side} problem={null} />
     </div>
@@ -145,28 +130,6 @@
       </div>
     </div>
   {:else}
-  <div class="bar">
-    <div class="tabs">
-      {#if plan}
-        <span class="tab" class:on={active === PLAN_TAB}>
-          <button onclick={() => chat.openPanel(PLAN_TAB)}>
-            {#if chat.planPending}<span class="accent">●</span>{/if}
-            plan
-          </button>
-          <!-- A plan that is waiting for an answer stays put. -->
-          {#if !chat.planPending}
-            <button class="shut" title="Close this tab" onclick={() => chat.closeTab(PLAN_TAB)}>×</button>
-          {/if}
-        </span>
-      {/if}
-      {#each chat.openDocs as doc (doc.path)}
-        <span class="tab" class:on={active === doc.path}>
-          <button title={doc.path} onclick={() => chat.openPanel(doc.path)}>{label(doc.path)}</button>
-          <button class="shut" title="Close this tab" onclick={() => chat.closeTab(doc.path)}>×</button>
-        </span>
-      {/each}
-    </div>
-  </div>
 
   <!-- Each tab starts at its top. -->
   {#key active}
@@ -238,48 +201,6 @@
       display: none;
     }
   }
-  .bar {
-    display: flex;
-    gap: 3ch;
-    padding: calc(var(--pad-y) * 0.6) var(--pad-x) calc(var(--gap) * 0.7);
-    border-bottom: 1px solid var(--line);
-    color: var(--faint);
-    white-space: nowrap;
-  }
-  /* Many tabs scroll sideways; the close mark stays put. */
-  .tabs {
-    display: flex;
-    gap: 3ch;
-    min-width: 0;
-    flex: 1;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .tab {
-    flex-shrink: 0;
-    display: flex;
-    gap: 1.5ch;
-  }
-  .bar button:hover {
-    color: var(--fg);
-  }
-  /* A side chat's name is a few words; keep it to one line. */
-  .name {
-    max-width: 40ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .tab.on button:first-child {
-    color: var(--bright);
-  }
-  /* A tab's close mark shows on the tab in front, or under the pointer. */
-  .shut {
-    visibility: hidden;
-  }
-  .tab.on .shut,
-  .tab:hover .shut {
-    visibility: visible;
-  }
   /* The side chat: the same view as the main chat, in the panel's space. */
   .side {
     flex: 1;
@@ -338,9 +259,6 @@
   }
   .actions .primary:hover {
     color: var(--bg);
-  }
-  .accent {
-    color: var(--accent);
   }
   .faint {
     color: var(--faint);

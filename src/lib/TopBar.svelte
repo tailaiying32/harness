@@ -1,9 +1,14 @@
 <script lang="ts">
   // The bar along the top of the chat and panel. On a Mac it sits in the window's
-  // title bar, beside the window buttons, so it costs no room. The chat's title
-  // on the left; over the open panel, its views and ▸ to hide it; with the
-  // panel closed, only ◂ to bring it back. Its empty space drags the window.
+  // title bar, beside the window buttons, so it costs no room. Over the chat:
+  // its title, and the panel's three views as icons, pushed against the panel's
+  // line. Clicking a view opens the panel on it; clicking the one on show hides
+  // the panel. Over the open panel: that view's own row (see PanelBar), so the
+  // panel has none of its own. Empty space drags the window.
+  import PanelIcon from "./PanelIcon.svelte";
+  import PanelBar from "./panel/PanelBar.svelte";
   import type { AppState } from "./state/app.svelte";
+  import type { PanelView } from "./state/chat.svelte";
 
   let { app }: { app: AppState } = $props();
 
@@ -13,50 +18,44 @@
   );
   const open = $derived(chat.panelOpen && chat.panelHasContent);
 
-  /**
-   * Brings the panel back on the view it had, or one that still has something;
-   * with nothing anywhere, on the browser's empty address line.
-   */
-  function reopen() {
-    const has = { docs: chat.tabCount > 0, side: chat.side !== null, browser: chat.browserOn };
-    if (!has[chat.panelView]) {
-      const next = (["docs", "side", "browser"] as const).find((view) => has[view]);
-      if (!next) return chat.openBrowser();
-      chat.panelView = next;
-    }
-    chat.panelOpen = true;
+  const views: { view: PanelView; name: string }[] = [
+    { view: "docs", name: "docs" },
+    { view: "side", name: "side chat" },
+    { view: "browser", name: "browser" },
+  ];
+
+  /** Docs has nothing to show until Claude writes a plan or a document, or a link opens one. */
+  const empty = (view: PanelView) => view === "docs" && chat.tabCount === 0;
+
+  function pick(view: PanelView) {
+    if (open && chat.panelView === view) chat.panelOpen = false;
+    else if (!empty(view)) chat.showView(view);
   }
 </script>
 
 <!-- Laid out like the chat and panel below it (the chat takes the rest, the
-     panel --panel-w and no less), so the panel's dividing line runs straight up
-     through the bar. -->
+     panel --panel-w), so the panel's dividing line runs straight up through the bar. -->
 <header class="bar" data-tauri-drag-region>
-  <span class="title" data-tauri-drag-region>{title}</span>
-  <!-- Sized exactly like the panel (its width plus a 1px left line, no padding);
-       the padding is inside. -->
-  <span class="views" class:open>
-    <span class="inner" data-tauri-drag-region>
-    {#if open}
-      {#if chat.tabCount > 0}
-        <button class:on={chat.panelView === "docs"} onclick={() => chat.showView("docs")}>
-          {#if chat.planPending}<span class="accent">●</span>{/if}
-          docs
+  <span class="chat" data-tauri-drag-region>
+    <span class="title" data-tauri-drag-region>{title}</span>
+    <span class="views">
+      {#each views as { view, name } (view)}
+        <button
+          title={name}
+          class:on={open && chat.panelView === view}
+          class:empty={empty(view)}
+          onclick={() => pick(view)}
+        >
+          <PanelIcon {view} />
         </button>
-      {/if}
-      <button class:on={chat.panelView === "side"} onclick={() => chat.showView("side")}>side chat</button>
-      <button class:on={chat.panelView === "browser"} onclick={() => chat.showView("browser")}>browser</button>
-      <span class="spacer" data-tauri-drag-region></span>
-      <button title="Hide the panel" onclick={() => (chat.panelOpen = false)}>▸</button>
-    {:else}
-      <!-- Closed: one mark brings the panel back. (A plan opens the panel by
-           itself; one left waiting after hiding it shows in the chat, as does
-           a page Claude opened.) With nothing in it, the mark opens the
-           browser's address line. -->
-      <button title="Show the panel" onclick={reopen}>◂</button>
-    {/if}
+      {/each}
     </span>
   </span>
+  {#if open}
+    <span class="over-panel" data-tauri-drag-region>
+      <PanelBar {chat} />
+    </span>
+  {/if}
 </header>
 
 <style>
@@ -71,20 +70,7 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  .title {
-    flex: 1;
-    min-width: 0;
-    line-height: var(--bar);
-    padding: 0 var(--pad-x);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    color: var(--dim);
-  }
-  .views {
-    flex-shrink: 0;
-    display: flex;
-  }
-  .inner {
+  .chat {
     flex: 1;
     min-width: 0;
     display: flex;
@@ -92,30 +78,58 @@
     gap: 3ch;
     padding: 0 var(--pad-x);
   }
-  /* Over the open panel: the panel's width, edge and dividing line. */
-  .views.open {
-    width: var(--panel-w, 46%);
-    min-width: 0;
-    border-left: 1px solid var(--line);
-  }
-  .spacer {
+  .title {
     flex: 1;
-    align-self: stretch;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--dim);
   }
-  /* Too narrow for both: the panel takes the chat's place (see App.svelte). */
-  @media (max-width: 1100px) {
-    .views.open {
-      width: auto;
-      border-left: 0;
-    }
+  .views {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 1.6ch;
   }
-  button:hover {
+  .views button {
+    display: flex;
+  }
+  .views button:hover {
     color: var(--fg);
   }
-  button.on {
+  /* The view on show is bright, like the open chat in the sidebar. */
+  .views button.on {
     color: var(--bright);
   }
-  .accent {
-    color: var(--accent);
+  .views button.empty {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .views button.empty:hover {
+    color: var(--faint);
+  }
+  /* Over the open panel: exactly the panel's width and dividing line, no
+     padding (PanelBar pads inside), so the line runs straight up. */
+  .over-panel {
+    width: var(--panel-w, 46%);
+    flex-shrink: 0;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    border-left: 1px solid var(--line);
+  }
+  /* Too narrow for both: the panel takes the chat's place (see App.svelte);
+     the chat's part keeps only the icons. */
+  @media (max-width: 1100px) {
+    .bar:has(.over-panel) .chat {
+      flex: 0 0 auto;
+    }
+    .bar:has(.over-panel) .title {
+      display: none;
+    }
+    .over-panel {
+      width: auto;
+      flex: 1;
+    }
   }
 </style>

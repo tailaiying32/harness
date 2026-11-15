@@ -309,7 +309,7 @@
           edges: {
             window: window.innerWidth,
             panel: document.querySelector<HTMLElement>(".panel")?.getBoundingClientRect().left ?? null,
-            bar: document.querySelector<HTMLElement>(".views.open")?.getBoundingClientRect().left ?? null,
+            bar: document.querySelector<HTMLElement>(".over-panel")?.getBoundingClientRect().left ?? null,
           },
           planPending: current.planPending,
           side: current.side ? current.side.items.map((item) => ({ ...item })) : null,
