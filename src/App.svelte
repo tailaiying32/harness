@@ -9,6 +9,7 @@
   import SidePanel from "./lib/panel/SidePanel.svelte";
   import Settings from "./lib/Settings.svelte";
   import Sidebar from "./lib/Sidebar.svelte";
+  import TopBar from "./lib/TopBar.svelte";
   import {
     autotest,
     autotestReport,
@@ -51,7 +52,7 @@
   app.defaultModel = prefs.model;
   app.current.modelChoice = prefs.model;
   const chat = $derived(app.current);
-  const panelOpen = $derived(chat.panelOpen && chat.tabCount > 0);
+  const panelOpen = $derived(chat.panelOpen && chat.panelHasContent);
 
   // Two picked themes, and which shows: one of them always, or whichever the
   // system is in, switching the moment it does.
@@ -171,11 +172,13 @@
       //   @delete <n>    delete the nth chat in the sidebar
       //   @close         shut the open chat's process down, as going idle does
       //   @exited        wait until the open chat's process has exited (idle shutdown)
+      //   @endside       end the open chat's side chat
+      //   A message starting with /btw goes to the side chat; the test waits for its answer.
       //   @wait <ms>     do nothing for a while. With the window hidden or the screen
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
-        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait)(?:\s+(\S+))?$/) ??
+        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside)(?:\s+(\S+))?$/) ??
         [];
       const current = app.current;
       if (directive === "model") await current.changeModel(value);
@@ -200,6 +203,7 @@
       if (directive === "open") await app.open(nth(value) ?? "");
       if (directive === "delete") await app.remove(nth(value) ?? "");
       if (directive === "wait") await pause(Number(value));
+      if (directive === "endside") await current.endSide();
       if (directive === "close") await closeSession(current.sessionId);
       if (directive === "close" || directive === "exited") await exited(current);
       if (directive) {
@@ -209,7 +213,9 @@
 
       current.autoAnswer = answer;
       current.autoWorktree = worktreeAnswer;
-      const done = new Promise<void>((resolve) => (current.onTurnEnd = resolve));
+      // A side question ends a turn in the side chat, not the main one.
+      const target = /^\/btw\s/.test(message) ? current.openSide() : current;
+      const done = new Promise<void>((resolve) => (target.onTurnEnd = resolve));
       await current.send(message);
       if (stopAfter) void pause(stopAfter).then(() => current.stop());
       stopAfter = 0;
@@ -218,7 +224,7 @@
         continue;
       }
       await done;
-      current.onTurnEnd = null;
+      target.onTurnEnd = null;
       await tick();
       modelsUsed.push(current.model);
       modesAfter.push(current.mode);
@@ -255,6 +261,16 @@
             })),
           },
           items: current.items.map((item) => ({ ...item })),
+          panelView: current.panelView,
+          // Where the panel's left line is, in the panel and in the top bar above it.
+          edges: {
+            window: window.innerWidth,
+            panel: document.querySelector<HTMLElement>(".panel")?.getBoundingClientRect().left ?? null,
+            bar: document.querySelector<HTMLElement>(".views.open")?.getBoundingClientRect().left ?? null,
+          },
+          planPending: current.planPending,
+          side: current.side ? current.side.items.map((item) => ({ ...item })) : null,
+          sideTitle: current.side?.title ?? null,
           // `shown` leaves out blocks the browser hasn't laid out (off screen, or
           // everything while the window is hidden); `text` has them all.
           shown: document.querySelector<HTMLElement>(".content")?.innerText ?? "",
@@ -272,18 +288,13 @@
 
 <div class="app" class:paneled={panelOpen}>
   <Sidebar {app} onsettings={() => (showSettings = !showSettings)} />
+  <div class="right">
+  <TopBar {app} />
   <!-- Chat and side panel; settings are drawn over both, never the sidebar. -->
   <div class="work">
   <main>
     <!-- Each chat gets its own view, so scroll position and open folds don't leak between chats. -->
     {#key chat.sessionId}
-      <!-- With the panel closed, one faint line brings it back. -->
-      {#if !panelOpen && chat.tabCount > 0}
-        <button class="reopen" onclick={() => chat.openPanel()}>
-          {#if chat.planPending}<span class="accent">●</span>{/if}
-          panel · {chat.tabCount} {chat.tabCount === 1 ? "tab" : "tabs"} ◂
-        </button>
-      {/if}
       <ChatView {chat} problem={setup?.problem ?? null} />
       <Composer {chat} ready={!!setup?.binary} home={app.home} {models} focus={app.focusBox} />
     {/key}
@@ -298,6 +309,7 @@
     <Settings {app} bind:darkTheme bind:lightTheme bind:appearance bind:size bind:fontSize onclose={() => (showSettings = false)} />
   {/if}
   </div>
+  </div>
 </div>
 
 <style>
@@ -305,9 +317,17 @@
     height: 100%;
     display: flex;
   }
+  /* The top bar over the chat and panel. */
+  .right {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
   .work {
     flex: 1;
     min-width: 0;
+    min-height: 0;
     display: flex;
     position: relative;
   }
@@ -317,18 +337,6 @@
     display: flex;
     flex-direction: column;
     position: relative;
-  }
-  .reopen {
-    align-self: flex-end;
-    padding: calc(var(--pad-y) * 0.6) var(--pad-x) 0;
-    color: var(--faint);
-    white-space: nowrap;
-  }
-  .reopen:hover {
-    color: var(--fg);
-  }
-  .accent {
-    color: var(--accent);
   }
   /* Too narrow for chat and panel side by side: the open panel takes the chat's place. */
   @media (max-width: 1100px) {

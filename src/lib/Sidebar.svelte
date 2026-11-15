@@ -47,6 +47,8 @@
 </script>
 
 <aside>
+  <!-- On a Mac: the strip by the window buttons drags the window, like a title bar. -->
+  <div class="drag" data-tauri-drag-region></div>
   <div class="list">
     {#each app.projects as project (project.id)}
       <div>
@@ -111,6 +113,22 @@
     padding: var(--pad-y) calc(var(--pad-x) * 0.6) var(--foot-y);
     border-right: 1px solid var(--line);
     min-height: 0;
+  }
+  /* On a Mac the window buttons sit at the sidebar's top, in line with the top bar. */
+  :global(.mac) aside {
+    position: relative;
+    padding-top: calc(var(--bar) + var(--pad-y) * 0.4);
+  }
+  .drag {
+    display: none;
+  }
+  :global(.mac) .drag {
+    display: block;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--bar);
   }
   .list {
     flex: 1;

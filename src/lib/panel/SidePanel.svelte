@@ -1,12 +1,12 @@
 <script lang="ts">
-  // The side panel: a tabbed space beside the chat. One tab for the plan and
-  // one for each markdown file the chat wrote or a link opened. The plan's answer buttons live
-  // here, at the foot of its tab, while Claude waits. Mouse only, like every
-  // approval: no key approves a plan.
-  //
-  // The tab strip holds what the chat produced. Things that aren't the chat's
-  // (a terminal, later) go at the right end of the bar, before the close mark.
+  // The side panel: a tabbed space beside the chat, in one of two views picked
+  // in the top bar. Docs: one tab for the plan and one for each markdown file
+  // the chat wrote or a link opened; the plan's answer buttons live at the foot
+  // of its tab while Claude waits (mouse only, like every approval: no key
+  // approves a plan). Side chat: one tab for the side conversation, its own
+  // message box at the foot. Showing and hiding the panel is the top bar's.
   import { contentClick } from "../clicks";
+  import ChatView from "../chat/ChatView.svelte";
   import Markdown from "../chat/Markdown.svelte";
   import { PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
   import { folderOf } from "../paths";
@@ -80,6 +80,26 @@
     box.style.height = `${box.scrollHeight}px`;
   }
 
+  // The side chat's own message box. Enter sends; Shift+Enter starts a new line.
+  let ask = $state("");
+  let askBox = $state<HTMLTextAreaElement>();
+  const side = $derived(chat.panelView === "side" ? chat.side : null);
+
+  function growAsk() {
+    if (!askBox) return;
+    askBox.style.height = "auto";
+    askBox.style.height = `${askBox.scrollHeight}px`;
+  }
+
+  function askKey(e: KeyboardEvent) {
+    if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+    e.preventDefault();
+    if (!side || !ask.trim()) return;
+    void side.send(ask);
+    ask = "";
+    queueMicrotask(growAsk);
+  }
+
   function keepPlanning() {
     if (!plan) return;
     void chat.answer(plan, "deny", feedback.trim() || "Keep planning.");
@@ -90,6 +110,35 @@
 <aside class="panel" bind:this={panel}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="grip" title="Drag to resize; double-click to reset" onpointerdown={startDrag} ondblclick={resetWidth}></div>
+  {#if side}
+    <!-- Drawn as a tab, like a document's; its × ends the side chat. -->
+    <div class="bar">
+      <div class="tabs">
+        <span class="tab on">
+          <button class="name" title={side.title || "side chat"}>{side.title || "side chat"}</button>
+          <button class="shut" title="End the side chat; it is forgotten" onclick={() => chat.endSide()}>×</button>
+        </span>
+      </div>
+    </div>
+    <div class="side">
+      <ChatView chat={side} problem={null} />
+    </div>
+    <div class="foot">
+      <div class="feedback">
+        <span class="marker">&gt;</span>
+        <!-- svelte-ignore a11y_autofocus -->
+        <textarea
+          bind:this={askBox}
+          bind:value={ask}
+          oninput={growAsk}
+          onkeydown={askKey}
+          rows="1"
+          autofocus
+          placeholder="ask on the side"
+        ></textarea>
+      </div>
+    </div>
+  {:else}
   <div class="bar">
     <div class="tabs">
       {#if plan}
@@ -111,7 +160,6 @@
         </span>
       {/each}
     </div>
-    <button class="close" title="Close the panel" onclick={() => (chat.panelOpen = false)}>▸</button>
   </div>
 
   <!-- Each tab starts at its top. -->
@@ -146,6 +194,7 @@
         <span class="faint">{planOutcome(plan)}</span>
       {/if}
     </div>
+  {/if}
   {/if}
 </aside>
 
@@ -208,6 +257,12 @@
   .bar button:hover {
     color: var(--fg);
   }
+  /* A side chat's name is a few words; keep it to one line. */
+  .name {
+    max-width: 40ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .tab.on button:first-child {
     color: var(--bright);
   }
@@ -219,8 +274,12 @@
   .tab:hover .shut {
     visibility: visible;
   }
-  .close {
-    flex-shrink: 0;
+  /* The side chat: the same view as the main chat, in the panel's space. */
+  .side {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
   .body {
     flex: 1;

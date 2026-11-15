@@ -225,6 +225,7 @@ src-tauri/
       mod.rs           AgentAdapter and RunningAgent traits
       claude_code.rs   the only file that knows Claude Code's wire format
     sessions.rs        SessionManager: live processes, saving, resume, idle shutdown
+    side_chat.rs       SideChats: one read-only side chat per chat (/btw), never saved
     store.rs           SQLite schema, reads, writes
     locate.rs          find the claude binary
 src/
@@ -236,7 +237,8 @@ src/
     state/chat.svelte.ts  one chat: items on screen, live events and replay
     Sidebar.svelte     projects and chats
     chat/              ChatView, WorkRun, ApprovalCard, Composer, Clipped, Markdown
-    panel/SidePanel.svelte   the tabbed side panel: plan and documents
+    panel/SidePanel.svelte   the side panel: docs (plan and documents) or the side chat
+    TopBar.svelte            the bar in the Mac title bar: chat title, panel views
     clicks.ts          copy and link clicks in formatted text (chat and panel)
     tools.ts           how tool calls are worded; which calls write documents
     markdown.ts        markdown-it + highlight.js setup
@@ -563,6 +565,9 @@ Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-roll
   before worktrees existed.
 - **Self-test steps**: `@worktree <worktree|here|none>` answers the worktree card,
   `@moved` waits for a turn to end in the worktree, `@turn` for any turn end.
+  A message starting with `/btw ` goes to the side chat and the test waits for
+  its answer; `@endside` ends the side chat. The report has `side` (its items),
+  `panelView` and `planPending`.
 
 ### Session lifecycle (`sessions.rs`)
 
@@ -673,6 +678,8 @@ interrupt(session_id)
 set_mode(session_id, mode) / set_model(session_id, model)   saved; a live process is told
 list_models()
 close_session(session_id) ask the chat's process to exit (used by the self-test)
+side_send(chat_id, project_path, model, effort, text, message_id)   ask the side chat; starts it as a copy
+side_interrupt(chat_id) / side_end(chat_id)   stop its turn / end it and forget it
 autotest() / autotest_wait(ms) / autotest_report(text)
 ```
 
@@ -879,9 +886,54 @@ Mocked up on the same board:
   `command_lifecycle` `started` is the "taken in" signal. Commands that
   duplicate Harness controls (`/model`, `/clear`, `/rename`, `/effort`) are
   left alone: Claude Code runs them, and Harness's own controls may fall out
-  of step. `/btw` answers "isn't available in this environment" headless;
-  it is deferred and will need Harness to build it (a short-lived second
-  process with a copy of the chat and no tools, shown in a floating view).
+  of step. `/btw` answers "isn't available in this environment" headless,
+  so Harness catches it and opens a side chat instead (next item).
+- **Side chat (`/btw`): built** (2026-11-14; mock-up: "Top Bar" canvas,
+  version A). `/btw <question>` in the message box, or **side chat** in the
+  top bar, opens a small second conversation in the side panel. It starts as
+  a copy of the chat at that moment (`--resume <chat's session>
+  --fork-session`) and never refreshes from it; follow-ups go in its own box
+  and the same process remembers them. Read-only: `--tools Read,Grep,Glob`
+  and `--strict-mcp-config` with no config. Without the latter, the user's
+  claude.ai connectors (Gmail, Drive…) loaded from the second message on
+  (tested, CLI 2.1.322). No approval channel, so anything needing permission
+  is refused without asking. Nothing is saved by Harness: its events go to
+  the window as `<chat id>#side` (`side_chat.rs`). Its process closes after
+  the chats' idle time and resumes its own session on the next question, so
+  a forgotten side chat costs no memory; that is why Claude Code saves it.
+  **× end** stops it and, a few seconds later, deletes Claude Code's saved
+  copy (`forget_session`: the exact `<id>.jsonl` under
+  `~/.claude/projects/*/`). Quitting or deleting the chat ends it too.
+  Switching chats or hiding the panel doesn't. A plan that arrives while
+  side chat is showing doesn't switch the panel; ● on `docs` in the top bar
+  says it's waiting. In the panel, side chat is drawn as one tab, like a
+  document's, whose × ends it (several side chats as tabs were considered
+  and left for later). The tab is named from the first side question by the
+  same small model that names chats (`make_title`); it reads "side chat"
+  until the name arrives, and the name is not saved. **Tested** live with the self-test (`/btw …` messages,
+  `@endside`): answers from the copied chat, a file read, idle close then
+  resume with its history, the saved copy deleted on end, the main chat
+  untouched, and a plan arriving while in side chat.
+- **Top bar: built** (2026-11-14). On a Mac the window draws into its own
+  title bar (`titleBarStyle: Overlay`, `hiddenTitle`, `trafficLightPosition`
+  in `tauri.conf.json`); the window buttons sit at the top of the sidebar and
+  a bar runs over the chat and panel: the chat's title on the left, the
+  panel's views (`docs`, shown when there are tabs, and `side chat`) on the
+  right, laid out exactly like the panel below (its width and dividing line),
+  so they sit over the panel when it is open. Clicking a view only switches
+  the panel (opening it if hidden); ▸ at the bar's right end hides the
+  panel. With the panel closed the names are hidden and only ◂ shows; it
+  brings the panel back on the view it had. A plan opens the panel by itself;
+  one left waiting after the panel was hidden shows in the chat's last line. Most
+  openings happen on their own (`/btw`, a plan, a doc link), so picking a
+  particular view from closed taking two clicks is accepted. The default window is 1400 × 900, since below
+  1100 px the panel replaces the chat.
+  The bar and the sidebar's top strip carry `data-tauri-drag-region`
+  (needs `core:window:allow-start-dragging`). It replaces the old "panel ·
+  N tabs ◂" line. Windows ignores the overlay settings: the bar sits under
+  the normal title bar there. In Mac full screen the window buttons hide and
+  the sidebar's top strip stays empty; accepted for now. Renaming the chat
+  from the bar is not built.
 - **Model picker: built** (the user asked for it on 2026-11-13). A selector
   in the line under the message box lists the models Claude Code itself
   reports, by their real names ("Opus 5.5", "Default (Fable 5.2)"), including

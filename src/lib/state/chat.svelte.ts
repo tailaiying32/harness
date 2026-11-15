@@ -7,6 +7,9 @@ import {
   interrupt,
   readDoc,
   sendMessage,
+  sideEnd,
+  sideInterrupt,
+  sideSend,
   signIn,
   setMode,
   setEffort,
@@ -130,10 +133,13 @@ function firstOptions(input: unknown): Record<string, string> | undefined {
 
 export class Chat {
   readonly sessionId: string;
+  /** For a side chat: the chat it belongs to. Null for a chat of its own. */
+  readonly owner: Chat | null;
 
   /** A new chat gets a fresh ID; a saved one keeps its own. */
-  constructor(sessionId: string = crypto.randomUUID()) {
+  constructor(sessionId: string = crypto.randomUUID(), owner: Chat | null = null) {
     this.sessionId = sessionId;
+    this.owner = owner;
   }
 
   /**
@@ -193,8 +199,18 @@ export class Chat {
   turnStartedAt = $state<number | null>(null);
   /** Claude Code is compacting the conversation. */
   compacting = $state(false);
+  /** A side chat's name, written from its first question. A chat's own title lives in the sidebar's row. */
+  title = $state("");
 
   // ---- The side panel ----
+  /** The panel's two views: the plan and documents, or the side chat. */
+  panelView = $state<"docs" | "side">("docs");
+  /** The side chat (`/btw`), while one is open. It is never saved. */
+  side = $state<Chat | null>(null);
+  /** The panel has something to show. */
+  get panelHasContent(): boolean {
+    return this.tabCount > 0 || this.side !== null;
+  }
   /** The latest plan Claude presented. A revised plan replaces it. */
   plan = $state<ApprovalItem | null>(null);
   /** Markdown files this chat wrote, kept in step with its later edits to them. */
@@ -233,8 +249,11 @@ export class Chat {
     return this.planTab ? PLAN_TAB : (this.openDocs[0]?.path ?? "");
   }
 
-  /** Opens the panel; on `tab` if given, bringing it back if it was closed. */
+  /** Opens the panel on docs; on `tab` if given, bringing it back if it was closed. */
   openPanel(tab?: string): void {
+    // A link or "open plan" in a side chat opens it in the chat's own panel.
+    if (this.owner) return this.owner.openPanel(tab);
+    this.panelView = "docs";
     if (tab === PLAN_TAB) this.planClosed = false;
     else if (tab) {
       const doc = this.docs.find((d) => d.path === tab);
@@ -260,6 +279,7 @@ export class Chat {
    * opens the plan tab.
    */
   async openFile(path: string): Promise<void> {
+    if (this.owner) return this.owner.openFile(path);
     if (path === this.planPath && this.plan) {
       this.openPanel(PLAN_TAB);
       return;
@@ -429,8 +449,15 @@ export class Chat {
           // Claude Code drafts the plan in a file of its own; that file is this tab.
           this.planPath = planOf(event.input).path;
           this.docs = this.docs.filter((doc) => doc.path !== this.planPath);
-          // Claude is waiting on the user, so the plan is put in front of them.
-          if (!this.replaying) this.openPanel(PLAN_TAB);
+          // Claude is waiting on the user, so the plan is put in front of them;
+          // in a side chat it only marks docs, and the side chat stays.
+          if (this.replaying) {
+            // Nothing to show yet.
+          } else if (this.panelOpen && this.panelView === "side") {
+            this.panelTab = PLAN_TAB;
+          } else {
+            this.openPanel(PLAN_TAB);
+          }
         }
         if (this.autoAnswer) {
           // A question has no "always"; it is answered with its first options.
@@ -524,6 +551,10 @@ export class Chat {
         this.compacting = event.active;
         break;
 
+      case "title_changed":
+        this.title = event.title;
+        break;
+
       // Earlier items stay on screen; Claude now sees a summary of them.
       case "compacted":
         this.push({ type: "note", text: event.auto ? "compacted automatically" : "compacted" });
@@ -555,13 +586,26 @@ export class Chat {
   async send(text: string): Promise<void> {
     const message = text.trim();
     if (!message) return;
+    // `/btw` goes to the side chat, never to Claude Code (which can't run it headless).
+    const btw = this.owner ? null : message.match(/^\/btw(?:\s+([\s\S]*))?$/);
+    if (btw) {
+      const question = (btw[1] ?? "").trim();
+      if (question) await this.askSide(question);
+      else this.openSide();
+      return;
+    }
     const messageId = crypto.randomUUID();
     this.push({ type: "user", text: message, messageId, queued: this.busy });
     this.stopping = false;
     if (this.turnStartedAt === null) this.turnStartedAt = Date.now();
     try {
-      await sendMessage(this.sessionId, this.projectPath.trim(), this.mode, this.modelChoice, this.effortChoice, message, messageId);
-      this.onSent?.();
+      const owner = this.owner;
+      if (owner) {
+        await sideSend(owner.sessionId, owner.projectPath.trim(), owner.modelChoice, owner.effortChoice, message, messageId);
+      } else {
+        await sendMessage(this.sessionId, this.projectPath.trim(), this.mode, this.modelChoice, this.effortChoice, message, messageId);
+        this.onSent?.();
+      }
     } catch (e) {
       this.turnStartedAt = null;
       this.push({ type: "error", text: String(e) });
@@ -634,9 +678,52 @@ export class Chat {
     if (tool) tool.declined = true;
   }
 
+  // ---- The side chat ----
+
+  /** Opens the side chat in the panel, starting an empty one if there is none. */
+  openSide(): Chat {
+    if (!this.side) {
+      const side = new Chat(`${this.sessionId}#side`, this);
+      side.projectPath = this.projectPath;
+      side.workPath = this.workPath;
+      this.side = side;
+    }
+    this.panelView = "side";
+    this.panelOpen = true;
+    // Read back so the caller holds the reactive version.
+    return this.side!;
+  }
+
+  /** Asks the side chat something, opening it first. */
+  async askSide(question: string): Promise<void> {
+    await this.openSide().send(question);
+  }
+
+  /** Ends the side chat; it is forgotten. The panel goes back to docs, or closes. */
+  async endSide(): Promise<void> {
+    this.side = null;
+    this.panelView = "docs";
+    this.panelOpen = this.tabCount > 0;
+    try {
+      await sideEnd(this.sessionId);
+    } catch {
+      // Nothing running to end.
+    }
+  }
+
+  /** Shows a view in the panel, opening the panel if it was hidden. Hiding it is the panel toggle's job. */
+  showView(view: "docs" | "side"): void {
+    if (view === "side") this.openSide();
+    else this.openPanel();
+  }
+
   async stop(): Promise<void> {
     try {
       this.stopping = true;
+      if (this.owner) {
+        await sideInterrupt(this.owner.sessionId);
+        return;
+      }
       await interrupt(this.sessionId);
     } catch (e) {
       this.stopping = false;

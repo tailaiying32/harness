@@ -154,6 +154,19 @@ export const answerApproval = (
 
 export const interrupt = (sessionId: string) => invoke<void>("interrupt", { sessionId });
 
+/** Ask a chat's side chat something. Starts it as a copy of the chat on the first question. */
+export const sideSend = (
+  chatId: string,
+  projectPath: string,
+  model: string,
+  effort: string,
+  text: string,
+  messageId: string,
+) => invoke<void>("side_send", { chatId, projectPath, model, effort, text, messageId });
+export const sideInterrupt = (chatId: string) => invoke<void>("side_interrupt", { chatId });
+/** End a chat's side chat and forget it. */
+export const sideEnd = (chatId: string) => invoke<void>("side_end", { chatId });
+
 export const setMode = (sessionId: string, mode: Mode) => invoke<void>("set_mode", { sessionId, mode });
 
 /** One model the agent offers. Mirrors `ModelInfo` in src-tauri/src/events.rs. */

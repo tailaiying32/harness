@@ -13,8 +13,11 @@
     "windows": [
       {
         "title": "Harness",
-        "width": 1000,
-        "height": 720
+        "width": 1400,
+        "height": 900,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 14, "y": 19 }
       }
     ],
     "security": {
