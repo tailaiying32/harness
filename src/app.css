@@ -80,6 +80,28 @@ body {
   color: var(--bg);
 }
 
+/* Scroll bars in the theme's own colours: a thin square thumb, no track.
+   The clear border keeps the thumb slim but the grab area wide. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--faint);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--dim);
+}
+
 button,
 select,
 textarea,
