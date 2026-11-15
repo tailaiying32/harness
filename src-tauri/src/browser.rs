@@ -28,7 +28,8 @@ pub const SERVER: &str = "harness_browser";
 /// A line for the agent's instructions.
 pub const INSTRUCTION: &str = "This app has a browser in its side panel for localhost pages. To \
 check a web UI you are building, use the harness_browser tools (open, read, click, type, console, \
-screenshot); the user sees the same page.";
+screenshot, resize); the user sees the same page. The panel is narrow, so pages show their \
+small-screen layout; use resize (e.g. 1440) to check the desktop layout.";
 
 /// How long an action may take before it is given up.
 const ACTION_WAIT: Duration = Duration::from_secs(15);
@@ -43,6 +44,9 @@ const PARK_X: f64 = -20_000.0;
 const PUT_AWAY_AFTER: Duration = Duration::from_secs(10 * 60);
 /// How often put-away is checked.
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
+/// Narrowest and widest layout width `resize` takes, in CSS pixels.
+const MIN_WIDTH: f64 = 320.0;
+const MAX_WIDTH: f64 = 3840.0;
 /// Longest image edge sent to the agent, in pixels (larger ones are shrunk by it anyway).
 const SHOT_MAX_EDGE: f64 = 1568.0;
 
@@ -106,6 +110,14 @@ pub fn tools() -> Value {
             "name": "screenshot",
             "description": "A picture of the page as shown in the side panel, to check how the UI looks.",
             "inputSchema": none,
+        },
+        {
+            "name": "resize",
+            "description": "Set how wide the page lays out, in CSS pixels, without changing the panel: the page is zoomed to fit, so e.g. 1440 shows the full desktop layout, smaller. Stays until changed, across loads. Omit width (or 0) to go back to the panel's own width.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "width": { "type": "number", "description": "Layout width in CSS pixels, e.g. 1440 for desktop or 390 for a phone" } },
+            },
         },
     ])
 }
@@ -171,6 +183,18 @@ struct Place {
     /// The panel body; None until the window has placed it.
     rect: Option<Rect>,
     visible: bool,
+    /// Width the agent wants the page laid out at (`resize`); None fits the panel.
+    width: Option<f64>,
+}
+
+impl Place {
+    /// Page zoom that lays the page out at `width` inside the panel.
+    fn zoom(&self) -> f64 {
+        match (self.width, self.rect) {
+            (Some(width), Some(rect)) if rect.width > 0.0 => rect.width / width,
+            _ => 1.0,
+        }
+    }
 }
 
 /// A page put away after sitting unused: what it showed, to bring it back.
@@ -292,6 +316,31 @@ impl Browsers {
             }
         };
         self.send(chat, event);
+    }
+
+    /// Lays the chat's page out `width` CSS pixels wide (None: the panel's
+    /// width), by zooming it to fit the panel. Says what it did.
+    fn resize(&self, chat: &str, width: Option<f64>) -> Result<String, String> {
+        let width = width.filter(|w| *w > 0.0).map(|w| w.round().clamp(MIN_WIDTH, MAX_WIDTH));
+        let place = {
+            let mut places = self.0.places.lock().unwrap();
+            let place = places.entry(chat.to_string()).or_default();
+            place.width = width;
+            *place
+        };
+        if let Some(webview) = self.webview(chat) {
+            apply_place(&webview, place);
+        }
+        let panel = place.rect.map(|r| r.width.round());
+        Ok(match (width, panel) {
+            (None, Some(panel)) => format!("The page lays out at the panel's width again ({panel} px)."),
+            (None, None) => "The page lays out at the panel's width again.".into(),
+            (Some(w), Some(_)) => format!(
+                "The page now lays out {w} px wide, shown at {:.0}% to fit the panel.",
+                place.zoom() * 100.0
+            ),
+            (Some(w), None) => format!("The page will lay out {w} px wide once the panel shows."),
+        })
     }
 
     fn webview(&self, chat: &str) -> Option<Webview> {
@@ -575,6 +624,7 @@ impl Browsers {
                     other => other.to_string(),
                 })
             }
+            "resize" => text(self.resize(chat, args["width"].as_f64())?),
             "screenshot" => {
                 let webview = self.webview(chat).ok_or("No page is open; call open first.")?;
                 let png = screenshot(&webview).await?;
@@ -649,12 +699,14 @@ fn put_away_after() -> Duration {
         .unwrap_or(PUT_AWAY_AFTER)
 }
 
-/// Places a page: over the panel body when visible, parked out of sight otherwise.
+/// Places a page: over the panel body when visible, parked out of sight
+/// otherwise, zoomed to lay out at the width the agent asked for.
 fn apply_place(webview: &Webview, place: Place) {
     let Some(rect) = place.rect else { return };
     let x = if place.visible { rect.x } else { PARK_X };
     let _ = webview.set_size(LogicalSize::new(rect.width, rect.height));
     let _ = webview.set_position(LogicalPosition::new(x, rect.y));
+    let _ = webview.set_zoom(place.zoom());
 }
 
 /// What `eval_with_callback` hands back: the script's value as JSON. The
@@ -1005,6 +1057,15 @@ mod tests {
         let raw = serde_json::to_string(&r#"{"done":true,"ok":true,"value":"hi"}"#).unwrap();
         assert_eq!(decode(&raw)["value"], "hi");
         assert_eq!(decode("\"plain title\""), json!("plain title"));
+    }
+
+    #[test]
+    fn zoom_fits_the_asked_width_into_the_panel() {
+        let rect = Some(Rect { x: 0.0, y: 0.0, width: 720.0, height: 900.0 });
+        assert_eq!(Place { rect, visible: true, width: None }.zoom(), 1.0);
+        assert_eq!(Place { rect, visible: true, width: Some(1440.0) }.zoom(), 0.5);
+        assert_eq!(Place { rect, visible: true, width: Some(360.0) }.zoom(), 2.0);
+        assert_eq!(Place { rect: None, visible: false, width: Some(1440.0) }.zoom(), 1.0);
     }
 
     #[test]
