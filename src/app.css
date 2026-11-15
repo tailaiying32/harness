@@ -13,6 +13,8 @@
   --pad-y: 24px;
   --col: 800px;
   --side: 228px;
+  /* The top bar, the height of a Mac title bar with its window buttons. */
+  --bar: 38px;
 
   /* The bottom rows of the sidebar, the message box and the side panel sit
      on one line: the same distance from the window's bottom edge, and the

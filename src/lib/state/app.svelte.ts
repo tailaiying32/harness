@@ -68,6 +68,11 @@ export class AppState {
   /** Every event from the core comes through here. */
   route(envelope: Envelope): void {
     const { session_id: id, event } = envelope;
+    // A side chat's events belong to it alone: no sidebar mark, no usage reading.
+    if (id.endsWith("#side")) {
+      this.chats.get(id.slice(0, -"#side".length))?.side?.handle(event);
+      return;
+    }
     if (event.kind === "status") this.statuses[id] = event.state;
     if (event.kind === "usage_update") this.usage = { window: event.window, utilization: event.utilization };
     // These change the chat's row (title, worktree, pull request).

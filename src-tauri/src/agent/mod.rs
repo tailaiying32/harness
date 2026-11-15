@@ -25,6 +25,16 @@ pub struct SpawnOptions {
     pub model: Option<String>,
     /// Effort level to start on ("low" ... "max"). None or "default" = the agent's default for the model.
     pub effort: Option<String>,
+    /// Set for a side chat: a read-only conversation that starts as a copy of a chat.
+    pub side: Option<SideOptions>,
+}
+
+/// How a side chat starts.
+#[derive(Clone, Debug, Default)]
+pub struct SideOptions {
+    /// The main chat's agent session ID, copied on the side chat's first start.
+    /// None when the main chat hasn't started one yet.
+    pub fork_from: Option<String>,
 }
 
 /// An image to send with a message.
@@ -78,4 +88,8 @@ pub trait AgentAdapter: Send + Sync {
     /// Sign the agent in, the way its own login command does (for Claude Code
     /// it opens the browser). Blocks until done; call it off the main thread.
     fn sign_in(&self, binary: &Path) -> Result<(), String>;
+
+    /// Delete what the agent saved for a session, so it can't be resumed or
+    /// listed. Used when a side chat ends. Failures are ignored.
+    fn forget_session(&self, agent_session_id: &str);
 }

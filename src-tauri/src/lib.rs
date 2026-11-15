@@ -5,6 +5,7 @@ mod github;
 mod images;
 mod locate;
 mod sessions;
+mod side_chat;
 mod store;
 mod worktree;
 
@@ -20,6 +21,7 @@ use agent::claude_code::ClaudeCodeAdapter;
 use events::{AgentEvent, Decision, Envelope, ModelInfo};
 use locate::SetupInfo;
 use sessions::{Out, SessionManager};
+use side_chat::SideChats;
 use store::{ProjectRow, SessionRow, Store};
 
 /// How long quitting waits for chat processes to finish up.
@@ -27,6 +29,7 @@ const QUIT_WAIT: Duration = Duration::from_secs(3);
 
 struct AppState {
     sessions: SessionManager,
+    side: SideChats,
     store: Arc<Store>,
     /// One app-wide channel to the window, so chats that aren't open still report status.
     channel: Arc<Mutex<Option<Channel<Envelope>>>>,
@@ -70,6 +73,7 @@ async fn load_session(state: State<'_, AppState>, session_id: String) -> Result<
 /// Moves a chat to the trash.
 #[tauri::command]
 async fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    state.side.end(&session_id);
     let sessions = state.sessions.clone();
     sessions.delete(&session_id).await
 }
@@ -163,6 +167,45 @@ async fn send_message(
     sessions
         .send_message(&session_id, binary, project_path, mode, model, effort, &text, &images.unwrap_or_default(), &message_id)
         .await
+}
+
+/// Ask the chat's side chat something (`/btw`). Starts it as a copy of the
+/// chat on the first question.
+#[tauri::command]
+async fn side_send(
+    state: State<'_, AppState>,
+    chat_id: String,
+    project_path: String,
+    model: Option<String>,
+    effort: Option<String>,
+    text: String,
+    message_id: String,
+) -> Result<(), String> {
+    let binary = state
+        .binary
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Claude Code couldn't be found")?;
+    let project_path = PathBuf::from(project_path);
+    if !project_path.is_dir() {
+        return Err(format!("Not a folder: {}", project_path.display()));
+    }
+    state
+        .side
+        .send(&chat_id, binary, &project_path, model, effort, &text, &message_id)
+}
+
+#[tauri::command]
+fn side_interrupt(state: State<'_, AppState>, chat_id: String) -> Result<(), String> {
+    state.side.interrupt(&chat_id)
+}
+
+/// End the chat's side chat and forget it.
+#[tauri::command]
+async fn side_end(state: State<'_, AppState>, chat_id: String) -> Result<(), String> {
+    state.side.end(&chat_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -362,7 +405,9 @@ pub fn run() {
                     }
                 })
             };
-            let sessions = SessionManager::new(Arc::new(ClaudeCodeAdapter), store.clone(), out, dir);
+            let adapter = Arc::new(ClaudeCodeAdapter);
+            let side = SideChats::new(adapter.clone(), store.clone(), out.clone());
+            let sessions = SessionManager::new(adapter, store.clone(), out, dir);
             // Images of chats that are gone, and of new chats never sent.
             {
                 let sessions = sessions.clone();
@@ -380,6 +425,7 @@ pub fn run() {
             }
             app.manage(AppState {
                 sessions,
+                side,
                 store,
                 channel,
                 binary: Mutex::new(None),
@@ -405,6 +451,9 @@ pub fn run() {
             set_effort,
             list_models,
             sign_in,
+            side_send,
+            side_interrupt,
+            side_end,
             close_session,
             read_doc,
             save_image,
@@ -419,6 +468,7 @@ pub fn run() {
             // Quitting: ask every chat's process to finish up, and wait briefly.
             if let RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<AppState>() {
+                    state.side.shutdown();
                     state.sessions.shutdown(QUIT_WAIT);
                 }
             }

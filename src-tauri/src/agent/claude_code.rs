@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{AgentAdapter, EventSink, ImagePayload, RunningAgent, SpawnOptions};
+use super::{AgentAdapter, EventSink, ImagePayload, RunningAgent, SideOptions, SpawnOptions};
 use crate::events::{AgentEvent, ApprovalKind, Block, Decision, ModelInfo, SessionState};
 
 /// How many stderr lines to keep for an error message when the process dies.
@@ -62,8 +62,16 @@ planning, or once this chat already works in a worktree.";
 /// repo by itself (tested on CLI 2.1.322: without this it doesn't ask).
 const WORKTREE_SETTINGS: &str = r#"{"permissions":{"ask":["EnterWorktree"]}}"#;
 
+/// Added to a side chat's instructions on every launch.
+const SIDE_INSTRUCTION: &str = "This is a side conversation about the chat above. The user asks \
+quick questions here while the main chat carries on. You can read and search files but not change \
+anything or run commands. Answer briefly.";
+
 /// The command line for one chat's process.
 fn launch_args(opts: &SpawnOptions) -> Vec<String> {
+    if let Some(side) = &opts.side {
+        return side_args(opts, side);
+    }
     let mut args: Vec<String> = [
         "-p",
         "--input-format",
@@ -91,6 +99,46 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
     }
     if let Some(mode) = opts.mode.as_deref().filter(|m| *m != "default") {
         args.extend(["--permission-mode".to_string(), mode.to_string()]);
+    }
+    if let Some(model) = opts.model.as_deref().filter(|m| *m != "default") {
+        args.extend(["--model".to_string(), model.to_string()]);
+    }
+    if let Some(effort) = opts.effort.as_deref().filter(|e| *e != "default") {
+        args.extend(["--effort".to_string(), effort.to_string()]);
+    }
+    args
+}
+
+/// A side chat's command line. Read-only: only the file reading and search
+/// tools, and `--strict-mcp-config` with no config, so no tool servers load
+/// (without it the user's online connectors appeared from the second message
+/// on; tested on CLI 2.1.322). No approval channel: anything needing
+/// permission is refused without asking. Its session is saved, so it can be
+/// resumed after an idle close; `forget_session` removes it when it ends.
+fn side_args(opts: &SpawnOptions, side: &SideOptions) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--replay-user-messages",
+        "--tools",
+        "Read,Grep,Glob",
+        "--strict-mcp-config",
+        "--append-system-prompt",
+        SIDE_INSTRUCTION,
+    ]
+    .map(String::from)
+    .to_vec();
+    if let Some(id) = &opts.resume_id {
+        args.extend(["--resume".to_string(), id.clone()]);
+        // The first start copies the main chat; later ones resume the copy.
+        if side.fork_from.as_ref() == Some(id) {
+            args.push("--fork-session".to_string());
+        }
     }
     if let Some(model) = opts.model.as_deref().filter(|m| *m != "default") {
         args.extend(["--model".to_string(), model.to_string()]);
@@ -483,6 +531,42 @@ impl AgentAdapter for ClaudeCodeAdapter {
         } else {
             let detail = detail.trim();
             Err(if detail.is_empty() { "Sign-in failed".to_string() } else { detail.to_string() })
+        }
+    }
+
+    fn forget_session(&self, agent_session_id: &str) {
+        forget_saved_session(agent_session_id);
+    }
+}
+
+/// Claude Code keeps each session as `~/.claude/projects/<folder>/<id>.jsonl`
+/// (`CLAUDE_CONFIG_DIR` replaces `~/.claude`). The folder name is derived from
+/// the working folder; rather than copy that rule, every folder is searched
+/// for the exact file name.
+fn forget_saved_session(agent_session_id: &str) {
+    // Only a plain ID; never anything that could reach outside the folder.
+    if agent_session_id.is_empty()
+        || !agent_session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return;
+    }
+    let base = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+            std::env::var_os(var).map(|h| std::path::PathBuf::from(h).join(".claude"))
+        });
+    let Some(projects) = base.map(|b| b.join("projects")) else {
+        return;
+    };
+    let Ok(folders) = std::fs::read_dir(projects) else {
+        return;
+    };
+    let name = format!("{agent_session_id}.jsonl");
+    for folder in folders.flatten() {
+        let file = folder.path().join(&name);
+        if file.is_file() {
+            let _ = std::fs::remove_file(file);
         }
     }
 }
@@ -1023,6 +1107,7 @@ mod tests {
                 mode: None,
                 model: None,
                 effort: effort.map(str::to_owned),
+                side: None,
             })
         };
         let args = with(Some("max"));
@@ -1041,6 +1126,7 @@ mod tests {
             mode: Some("plan".into()),
             model: None,
             effort: None,
+            side: None,
         });
         assert!(args.contains(&"--replay-user-messages".to_string()));
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
@@ -1449,5 +1535,60 @@ mod tests {
                 message: "Not logged in · Please run /login".into()
             }]
         );
+    }
+
+    #[test]
+    fn a_side_chat_is_read_only_and_copies_the_chat_once() {
+        let side = |resume: Option<&str>| {
+            launch_args(&SpawnOptions {
+                binary: "claude".into(),
+                project_path: "/work".into(),
+                resume_id: resume.map(str::to_owned),
+                mode: Some("plan".into()),
+                model: Some("haiku".into()),
+                effort: None,
+                side: Some(SideOptions {
+                    fork_from: Some("main-1".into()),
+                }),
+            })
+        };
+        let first = side(Some("main-1"));
+        assert!(first.windows(2).any(|w| w == ["--tools", "Read,Grep,Glob"]));
+        assert!(first.contains(&"--strict-mcp-config".to_string()));
+        assert!(first.windows(2).any(|w| w == ["--resume", "main-1"]));
+        assert!(first.contains(&"--fork-session".to_string()));
+        assert!(first.windows(2).any(|w| w == ["--model", "haiku"]));
+        // No approval channel, no worktree rule, no plan instruction, no mode.
+        for absent in ["--permission-prompt-tool", "--settings", "--permission-mode"] {
+            assert!(!first.contains(&absent.to_string()), "{absent}");
+        }
+        let at = first.iter().position(|a| a == "--append-system-prompt").unwrap();
+        assert_eq!(first[at + 1], SIDE_INSTRUCTION);
+
+        // After an idle close it resumes its own copy, without copying again.
+        let later = side(Some("side-1"));
+        assert!(later.windows(2).any(|w| w == ["--resume", "side-1"]));
+        assert!(!later.contains(&"--fork-session".to_string()));
+
+        // A chat with nothing to copy starts fresh.
+        let fresh = side(None);
+        assert!(!fresh.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn forgetting_a_session_removes_only_its_file() {
+        let dir = std::env::temp_dir().join(format!("harness-forget-{}", std::process::id()));
+        let folder = dir.join("projects").join("-tmp-proj");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("side-1.jsonl"), "x").unwrap();
+        std::fs::write(folder.join("main-1.jsonl"), "x").unwrap();
+        // SAFETY: tests touching CLAUDE_CONFIG_DIR are confined to this one.
+        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", &dir) };
+        forget_saved_session("../main-1");
+        forget_saved_session("side-1");
+        unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
+        assert!(!folder.join("side-1.jsonl").exists());
+        assert!(folder.join("main-1.jsonl").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

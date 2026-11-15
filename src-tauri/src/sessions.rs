@@ -46,6 +46,17 @@ struct Timings {
     keep: Option<Duration>,
 }
 
+/// The idle time from `HARNESS_IDLE_SECONDS`, the `idle_seconds` setting, or
+/// the default. None = never. Side chats use it too.
+pub fn configured_idle(store: &Store) -> Option<Duration> {
+    let seconds = std::env::var("HARNESS_IDLE_SECONDS")
+        .ok()
+        .or_else(|| store.setting("idle_seconds"))
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_IDLE_SECONDS);
+    (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
 #[derive(Default)]
 struct Session {
     /// The live process, if any.
@@ -173,12 +184,7 @@ impl SessionManager {
         if let Some(fixed) = self.0.timings.idle {
             return Some(fixed);
         }
-        let seconds = std::env::var("HARNESS_IDLE_SECONDS")
-            .ok()
-            .or_else(|| self.0.store.setting("idle_seconds"))
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(DEFAULT_IDLE_SECONDS);
-        (seconds > 0).then(|| Duration::from_secs(seconds))
+        configured_idle(&self.0.store)
     }
 
     /// Saves an event (if it is the lasting kind) and passes it to the window.
@@ -325,6 +331,7 @@ impl SessionManager {
                     mode,
                     model,
                     effort: saved.map(|s| s.effort),
+                    side: None,
                 },
                 self.sink(session_id, run),
             );
@@ -843,6 +850,7 @@ mod tests {
         fn sign_in(&self, _: &Path) -> Result<(), String> {
             Ok(())
         }
+        fn forget_session(&self, _: &str) {}
     }
 
     struct Rig {
