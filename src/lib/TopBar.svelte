@@ -24,12 +24,9 @@
     { view: "browser", name: "browser" },
   ];
 
-  /** Docs has nothing to show until Claude writes a plan or a document, or a link opens one. */
-  const empty = (view: PanelView) => view === "docs" && chat.tabCount === 0;
-
   function pick(view: PanelView) {
     if (open && chat.panelView === view) chat.panelOpen = false;
-    else if (!empty(view)) chat.showView(view);
+    else chat.showView(view);
   }
 </script>
 
@@ -43,7 +40,6 @@
         <button
           title={name}
           class:on={open && chat.panelView === view}
-          class:empty={empty(view)}
           onclick={() => pick(view)}
         >
           <PanelIcon {view} />
@@ -100,13 +96,6 @@
   /* The view on show is bright, like the open chat in the sidebar. */
   .views button.on {
     color: var(--bright);
-  }
-  .views button.empty {
-    opacity: 0.45;
-    cursor: default;
-  }
-  .views button.empty:hover {
-    color: var(--faint);
   }
   /* Over the open panel: exactly the panel's width and dividing line, no
      padding (PanelBar pads inside), so the line runs straight up. */

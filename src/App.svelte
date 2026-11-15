@@ -197,13 +197,18 @@
       //   @browser <url> open the browser view and type <url> in its address line;
       //                  waits for the page to load. `@browser` alone only shows the view.
       //   @settings      open or close settings (drawn over the panel, hiding the page)
+      //   @notes <text>  write the open chat's notes (the rest of the line, spaces and all)
+      //   @planedit <text>  add a line to the next plan before it is auto-approved
       //   @wait <ms>     do nothing for a while. With the window hidden or the screen
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
         message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|image|browser|settings)(?:\s+(\S+))?$/) ??
+        message.match(/^@(notes|planedit)\s+(.+)$/s) ??
         [];
       const current = app.current;
+      if (directive === "notes") await current.saveNotes(value);
+      if (directive === "planedit") current.autoPlanEdit = value;
       if (directive === "model") await current.changeModel(value);
       if (directive === "mode") await current.changeMode(value as Mode);
       if (directive === "answer") answer = value === "none" ? null : (value as Decision);
@@ -296,6 +301,8 @@
           },
           items: current.items.map((item) => ({ ...item })),
           panelView: current.panelView,
+          notes: current.notes,
+          plans: current.items.filter((item) => item.type === "approval" && item.approval === "plan").map((item) => ({ ...item })),
           browser: {
             on: current.browserOn,
             page: current.browser,

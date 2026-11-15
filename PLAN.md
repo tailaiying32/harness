@@ -1241,6 +1241,41 @@ default browser (`on_navigation`). The side chat gets no browser tools.
 - **Self-test:** `@browser <url>` types an address (waits for the load),
   `@settings` toggles settings; the report has `browser {on, page, pageLines, slot}`.
 
+### Notes and plan edits (built 2026-11-14, branch `harness/chat-notes`)
+
+**Notes.** Every chat has a `notes` tab, always first in the docs row and
+never closed, for longer thinking than a message. Markdown, shown formatted;
+a click (not on a link) turns it into a plain textarea, and Escape, Cmd+Enter
+or clicking away shows it formatted again (`EditableMarkdown.svelte`). Empty
+notes start as the textarea. Saved 400 ms after typing stops and when editing
+ends (`write_notes`), read lazily the first time the tab shows (`read_notes`).
+- Stored in the app's data folder, `notes/<chat id>/notes.md` (`notes.rs`),
+  never in the repo; written to a side file then moved into place; 1 MB cap.
+  Purged with the chat when the trash is emptied; swept at start for chats
+  that don't exist (a new chat never sent), like images.
+- The agent reads them only when the user mentions them (the user's choice:
+  "I wrote some notes, take a look"). Each launch, main and side chat, gets
+  `--add-dir <notes folder>` (no permission prompt, tested on CLI 2.1.322) and
+  a line in its instructions with the file's path. Nothing is sent per turn,
+  so prompt caching isn't disturbed.
+- The docs icon is never faded now. Ending the side chat or closing the
+  browser still closes the panel when only the notes are left
+  (`Chat.hasPanelWork`).
+
+**Plan edits.** A waiting plan is editable the same way. Approve (and the
+"always" variant) sends the edit: `answer_approval` takes `plan`, which
+replaces `plan` in the approved input; Claude Code works from that text (tested
+on CLI 2.1.322: no write to its plan file needed). A saved `PlanEdited` event,
+recorded before the answer, keeps the edited plan after a restart. Keep
+planning with an edit sends the whole edited plan in the message. An answered
+plan is read-only.
+
+**Tested** live with the self-test (Haiku): notes read by the main chat with
+no approval card, and by the side chat; an edited plan (GOODBYE added)
+followed exactly and still shown after a restart. Checked in the preview: the
+tab order, formatted notes, editing. Self-test: `@notes <text>`,
+`@planedit <text>`; report `notes` and `plans`.
+
 ### Preview page
 
 `npm run dev`, then open `http://localhost:1420/preview.html`: the same window

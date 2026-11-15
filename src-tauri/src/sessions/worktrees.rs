@@ -244,7 +244,7 @@ impl SessionManager {
         let (id, request) = (session_id.to_string(), request_id.to_string());
         let answer = move || {
             if let Ok(agent) = manager.agent(&id) {
-                let _ = agent.answer_approval(&request, Decision::Deny, Some(message), None);
+                let _ = agent.answer_approval(&request, Decision::Deny, Some(message), None, None);
             }
         };
         if tokio::runtime::Handle::try_current().is_ok() {
@@ -287,13 +287,13 @@ impl SessionManager {
 
         if choice == "here" {
             for (id, _) in &ask.held {
-                agent.answer_approval(id, Decision::Deny, Some(STAY_HERE.to_string()), None)?;
+                agent.answer_approval(id, Decision::Deny, Some(STAY_HERE.to_string()), None, None)?;
             }
             return Ok(());
         }
 
         for (id, _) in &ask.held {
-            let _ = agent.answer_approval(id, Decision::Deny, Some(MOVING.to_string()), None);
+            let _ = agent.answer_approval(id, Decision::Deny, Some(MOVING.to_string()), None, None);
         }
         let _ = agent.interrupt();
         agent.stop();
@@ -657,6 +657,7 @@ impl SessionManager {
             eprintln!("harness: couldn't delete a chat: {e}");
         }
         self.0.images.delete_session(&row.id);
+        self.0.notes.delete_session(&row.id);
         self.0.pr_checked.lock().unwrap().remove(&row.id);
     }
 }

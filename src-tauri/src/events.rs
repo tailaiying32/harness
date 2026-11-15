@@ -181,6 +181,12 @@ pub enum AgentEvent {
     PrsChanged {
         prs: Vec<crate::worktree::PrInfo>,
     },
+    /// The user edited a plan before approving it; the agent works from this
+    /// text. Saved, so the plan shows as approved after a restart.
+    PlanEdited {
+        request_id: String,
+        plan: String,
+    },
     /// The chat's side-panel browser: what it shows. Not saved.
     BrowserState {
         url: String,

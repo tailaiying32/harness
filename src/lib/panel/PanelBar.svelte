@@ -3,7 +3,7 @@
   // needs no row of its own: docs' tabs, the side chat's name, or the browser's
   // address. What it doesn't fill stays empty for dragging the window.
   import { browserNavigate, browserReload } from "../ipc";
-  import { PLAN_TAB, type Chat } from "../state/chat.svelte";
+  import { NOTES_TAB, PLAN_TAB, type Chat } from "../state/chat.svelte";
   import { baseName } from "../tools";
 
   let { chat }: { chat: Chat } = $props();
@@ -77,6 +77,10 @@
   {:else}
     <!-- Many tabs scroll sideways. -->
     <div class="tabs">
+      <!-- The chat's notes: always there, always first, never closed. -->
+      <span class="tab" class:on={active === NOTES_TAB}>
+        <button onclick={() => chat.openPanel(NOTES_TAB)}>notes</button>
+      </span>
       {#if chat.planTab}
         <span class="tab" class:on={active === PLAN_TAB}>
           <button onclick={() => chat.openPanel(PLAN_TAB)}>plan</button>
