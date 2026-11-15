@@ -47,6 +47,9 @@ export type AgentEvent =
   | { kind: "usage_update"; window: string | null; utilization: number }
   | { kind: "background_work"; running: number }
   | { kind: "error"; message: string }
+  | { kind: "compacting"; active: boolean }
+  | { kind: "compacted"; auto: boolean }
+  | { kind: "sign_in_needed"; message: string }
   | { kind: "title_changed"; title: string }
   | { kind: "worktree_ask"; request_id: string; repo_root: string; tool_id: string | null; name?: string | null }
   | { kind: "worktree_chosen"; choice: WorktreeChoice }
@@ -71,8 +74,6 @@ export type Envelope = { session_id: string; event: AgentEvent };
 
 export type SetupInfo = {
   binary: string | null;
-  logged_in: boolean;
-  subscription: string | null;
   problem: string | null;
 };
 
@@ -170,6 +171,9 @@ export type ModelInfo = {
 
 /** Asks Claude Code for its current models and their effort levels. Takes about 7 seconds. */
 export const listModels = () => invoke<ModelInfo[]>("list_models");
+
+/** Runs Claude Code's own sign-in, which opens the browser. Resolves once the user is done. */
+export const signIn = () => invoke<void>("sign_in");
 
 /** `model` is an alias ("opus"), a full name, or "default". */
 export const setModel = (sessionId: string, model: string) => invoke<void>("set_model", { sessionId, model });

@@ -772,6 +772,9 @@ mod tests {
         fn make_title(&self, _: &Path, first_message: &str) -> Result<String, String> {
             Ok(format!("Written: {first_message}"))
         }
+        fn sign_in(&self, _: &Path) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     struct Rig {

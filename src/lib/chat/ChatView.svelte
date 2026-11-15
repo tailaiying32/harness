@@ -5,6 +5,7 @@
   import { contentClick } from "../clicks";
   import { PLAN_TAB, planOutcome, type Chat, type Item, type ToolItem } from "../state/chat.svelte";
   import ApprovalCard from "./ApprovalCard.svelte";
+  import SignInCard from "./SignInCard.svelte";
   import Markdown from "./Markdown.svelte";
   import WorkRun from "./WorkRun.svelte";
 
@@ -195,6 +196,11 @@
           <span class="marker"></span>
           <div class="body"><ApprovalCard item={group.item} {chat} /></div>
         </div>
+      {:else if group.item.type === "signin"}
+        <div class="row block">
+          <span class="marker"></span>
+          <div class="body"><SignInCard item={group.item} {chat} /></div>
+        </div>
       {:else if group.item.type === "note"}
         <div class="row block">
           <span class="marker"></span>
@@ -211,7 +217,9 @@
     {#if idleLine}
       <div class="row">
         <span class="marker accent">{spinner}</span>
-        <div class="body dim">Working… <span class="faint">{elapsed}s</span></div>
+        <div class="body dim">
+          {chat.compacting ? "Compacting…" : "Working…"} <span class="faint">{elapsed}s</span>
+        </div>
       </div>
     {/if}
   </div>

@@ -66,4 +66,8 @@ pub trait AgentAdapter: Send + Sync {
     /// A short title for a chat that starts with `first_message`, written by a
     /// small model. Blocks for a few seconds; call it off the main thread.
     fn make_title(&self, binary: &Path, first_message: &str) -> Result<String, String>;
+
+    /// Sign the agent in, the way its own login command does (for Claude Code
+    /// it opens the browser). Blocks until done; call it off the main thread.
+    fn sign_in(&self, binary: &Path) -> Result<(), String>;
 }
