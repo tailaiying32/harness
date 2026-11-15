@@ -40,12 +40,10 @@
     <span class="title" data-tauri-drag-region>{title}</span>
     <span class="views">
       {#each views as { view, name } (view)}
-        <!-- A plan waiting while another view is on show tints the docs icon. -->
         <button
           title={name}
           class:on={open && chat.panelView === view}
           class:empty={empty(view)}
-          class:waiting={view === "docs" && chat.planPending && !(open && chat.panelView === "docs")}
           onclick={() => pick(view)}
         >
           <PanelIcon {view} />
@@ -99,10 +97,9 @@
   .views button:hover {
     color: var(--fg);
   }
+  /* The view on show is in the accent colour, like the chosen model in the
+     model menu; a plain bright icon stood out more than anything else in the bar. */
   .views button.on {
-    color: var(--bright);
-  }
-  .views button.waiting {
     color: var(--accent);
   }
   .views button.empty {

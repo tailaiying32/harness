@@ -1026,8 +1026,10 @@ Mocked up on the same board:
   mark: a document, a chat bubble, a globe) at the right of the chat's half of
   the bar, against the panel's line. Clicking one opens the panel on it;
   clicking the one on show hides the panel; ◂ and ▸ are gone. The docs icon is
-  faded and does nothing until there is a plan or document, and turns the
-  accent colour while a plan waits under another view (the ● is gone). The bar
+  faded and does nothing until there is a plan or document. The icon on show
+  is in the accent colour, like the chosen model in the model menu (the user
+  found bright white too intense); so a plan waiting under another view no
+  longer marks the docs icon, and the chat's plan line is the cue. The bar
   over the open panel now holds that view's own row (`PanelBar.svelte`): docs'
   tabs, the side chat's name and ×, or the browser's address, ↻ and ×. The
   panel itself has no row, so every view starts right under the bar. The user
