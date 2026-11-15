@@ -4,6 +4,7 @@
   // address, or the terminal's tabs. What it doesn't fill stays empty for
   // dragging the window.
   import BarIcon from "../BarIcon.svelte";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { browserNavigate, browserReload } from "../ipc";
   import { shortBranch } from "../paths";
   import { NOTES_TAB, PLAN_TAB, type Chat } from "../state/chat.svelte";
@@ -90,6 +91,27 @@
   const page = $derived(chat.browser);
   let address = $state("");
   let editing = $state(false);
+  /** Typing a new address: double-click on it, or there's no page yet. */
+  let typingUrl = $state(false);
+  /** Lit for a moment after a click copies the address. */
+  let copied = $state(false);
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+
+  async function copy() {
+    if (!page) return;
+    try {
+      await navigator.clipboard.writeText(page.url);
+    } catch {
+      return;
+    }
+    copied = true;
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copied = false), 600);
+  }
+
+  function focusBox(node: HTMLInputElement) {
+    if (typingUrl) node.focus();
+  }
 
   // The address follows the page, except while the user types in it.
   $effect(() => {
@@ -115,6 +137,18 @@
     }
   }
 </script>
+
+<!-- Full screen: the panel covers the chat (never the sidebar); again, or
+     Escape, brings the chat back. On every view, just before its ×. -->
+{#snippet widen()}
+  <button
+    class="icon"
+    title={chat.panelWide ? "Bring the chat back (Esc)" : "Full screen"}
+    onclick={() => (chat.panelWide = !chat.panelWide)}
+  >
+    <BarIcon name={chat.panelWide ? "narrow" : "widen"} />
+  </button>
+{/snippet}
 
 <div class="row" data-tauri-drag-region bind:this={row}>
   {#if chat.panelView === "terminal"}
@@ -145,6 +179,7 @@
       {/if}
     </span>
     <span class="spacer" data-tauri-drag-region></span>
+    {@render widen()}
     {#if asking}
       <div class="ask" role="alertdialog" bind:this={askBox} style:left="{askLeft}px">
         <span class="question">{askingName} is running. Close it?</span>
@@ -166,26 +201,52 @@
     >
       <BarIcon name="reload" />
     </button>
+    <!-- One click copies the address; double-click types a new one. -->
+    {#if page && !typingUrl}
+      <button
+        class="address shown"
+        class:copied
+        title="Click to copy, double-click to type an address"
+        onclick={copy}
+        ondblclick={() => (typingUrl = true)}>{page.url}</button
+      >
+    {:else}
     <input
       class="address"
+      use:focusBox
       bind:value={address}
       onfocus={(e) => {
         editing = true;
         (e.target as HTMLInputElement).select();
       }}
-      onblur={() => (editing = false)}
+      onblur={() => {
+        editing = false;
+        typingUrl = false;
+      }}
       onkeydown={go}
       spellcheck="false"
       autocomplete="off"
       placeholder="Type a url"
     />
+    {/if}
     <span class="spacer" data-tauri-drag-region></span>
+    <!-- With the panel's other buttons at the right, not after the address. -->
+    <button
+      class="icon"
+      class:off={!page}
+      title="Open in your browser"
+      onclick={() => page && void openUrl(page.url).catch(() => {})}
+    >
+      <BarIcon name="external" />
+    </button>
+    {@render widen()}
     <button class="icon" title="Close the browser" onclick={() => chat.closeBrowser()}>
       <BarIcon name="close" />
     </button>
   {:else if chat.panelView === "side" && chat.side}
     <span class="name on">{chat.side.title || "side chat"}</span>
     <span class="spacer" data-tauri-drag-region></span>
+    {@render widen()}
     <button class="icon" title="End the side chat; it is forgotten" onclick={() => chat.endSide()}>
       <BarIcon name="close" />
     </button>
@@ -213,6 +274,7 @@
       {/each}
     </div>
     <span class="spacer" data-tauri-drag-region></span>
+    {@render widen()}
   {/if}
 </div>
 
@@ -320,7 +382,8 @@
   .keep {
     color: var(--dim);
   }
-  .reload.off {
+  .reload.off,
+  .icon.off {
     visibility: hidden;
   }
   /* Turns while the page loads. */
@@ -342,6 +405,23 @@
     background: transparent;
     color: var(--dim);
     caret-color: var(--accent);
+  }
+  /* The address as text: only as wide as it is (the rest drags the window),
+     one line, cut short with an ellipsis. */
+  .address.shown {
+    flex: 0 1 auto;
+    max-width: 48ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: left;
+  }
+  .address.shown:hover {
+    color: var(--fg);
+  }
+  /* Copied: the accent for a moment, the only sign. */
+  .address.shown.copied {
+    color: var(--accent);
   }
   .address:focus {
     color: var(--bright);

@@ -2,8 +2,10 @@
   // Projects and their chats: bare titles under each folder, a mark for what
   // each chat is doing. Nothing here redraws while a chat streams.
   import type { AppState, Dot } from "./state/app.svelte";
+  import type { SessionRow } from "./ipc";
   import BranchMark from "./BranchMark.svelte";
   import { prLabel, shortPath } from "./paths";
+  import { loadPrefs, savePrefs } from "./themes";
 
   let { app, onsettings }: { app: AppState; onsettings: () => void } = $props();
 
@@ -14,6 +16,94 @@
     unseen: "Finished since you last looked",
     idle: "",
   };
+
+  /** Each project shows this many of its most recently used chats. */
+  const CAP = 8;
+
+  /** How many hidden chats each project shows, in steps of CAP; until the app quits. */
+  let extra = $state<Record<string, number>>({});
+
+  /** Folders folded down to their name (plus any chat that needs you); kept across quits. */
+  let folded = $state<string[]>(loadPrefs().foldedProjects);
+
+  // ---- Project order ----
+  // Fixed, set by dragging a folder name. A project seen for the first time
+  // goes on top (it was just used); one with no chats left drops out.
+  let order = $state<string[]>(loadPrefs().projectOrder);
+  $effect(() => {
+    const paths = app.projects.map((p) => p.path);
+    const next = [...paths.filter((p) => !order.includes(p)), ...order.filter((p) => paths.includes(p))];
+    if (next.join("\n") !== order.join("\n")) {
+      order = next;
+      savePrefs({ projectOrder: order });
+    }
+  });
+  const projects = $derived(
+    [...app.projects].sort((a, b) => {
+      const i = order.indexOf(a.path);
+      const j = order.indexOf(b.path);
+      return (i < 0 ? -1 : i) - (j < 0 ? -1 : j);
+    }),
+  );
+
+  /** The folder being pressed; it starts dragging once the pointer moves a few pixels. */
+  let pressed: { path: string; y: number } | null = null;
+  let dragging = $state<string | null>(null);
+  /** Set by a drag, so the click that ends it doesn't fold the folder too. */
+  let dragged = false;
+  const blocks: Record<string, HTMLElement> = $state({});
+
+  function press(e: PointerEvent, path: string) {
+    if (e.button !== 0) return;
+    pressed = { path, y: e.clientY };
+    dragged = false;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+
+  // Live: the folder moves among the others as the pointer passes their middles.
+  function drag(e: PointerEvent) {
+    if (!pressed) return;
+    if (!dragging && Math.abs(e.clientY - pressed.y) < 4) return;
+    dragging = pressed.path;
+    dragged = true;
+    const others = order.filter((p) => p !== dragging);
+    const to = others.filter((p) => {
+      const r = blocks[p]?.getBoundingClientRect();
+      return r && e.clientY > r.top + r.height / 2;
+    }).length;
+    const next = [...others.slice(0, to), dragging, ...others.slice(to)];
+    if (next.join("\n") !== order.join("\n")) order = next;
+  }
+
+  function drop() {
+    if (dragging) savePrefs({ projectOrder: order });
+    pressed = null;
+    dragging = null;
+  }
+
+  /** The folder name folds one step: back to the first CAP chats, then away. */
+  function fold(project: { id: string; path: string }) {
+    if (dragged) {
+      dragged = false;
+      return;
+    }
+    if (extra[project.id]) {
+      extra[project.id] = 0;
+      return;
+    }
+    folded = folded.includes(project.path) ? folded.filter((p) => p !== project.path) : [...folded, project.path];
+    savePrefs({ foldedProjects: folded });
+  }
+
+  /** Shown even in a folded folder: the open chat, and ones working, waiting or finished unseen. */
+  function needsYou(session: SessionRow): boolean {
+    return session.id === app.current.sessionId || app.dot(session.id) !== "idle";
+  }
+
+  /** Shown even past the cap: those, and chats with a pull request still open. */
+  function keep(session: SessionRow): boolean {
+    return needsYou(session) || session.prs.some((pr) => pr.state === "open" || pr.state === "draft");
+  }
 
   /** The chat being renamed, and the text typed so far. */
   let renaming = $state<string | null>(null);
@@ -50,13 +140,31 @@
   <!-- On a Mac: the strip by the window buttons drags the window, like a title bar. -->
   <div class="drag" data-tauri-drag-region></div>
   <div class="list">
-    {#each app.projects as project (project.id)}
-      <div>
+    {#each projects as project (project.id)}
+      {@const isFolded = folded.includes(project.path)}
+      {@const capped = project.sessions.filter((s, i) => (isFolded ? needsYou(s) : i < CAP || keep(s)))}
+      {@const hidden = isFolded ? [] : project.sessions.filter((s) => !capped.includes(s))}
+      {@const opened = hidden.slice(0, extra[project.id] ?? 0)}
+      {@const shown = opened.length ? project.sessions.filter((s) => capped.includes(s) || opened.includes(s)) : capped}
+      <div bind:this={blocks[project.path]} class:dragging={dragging === project.path}>
         <div class="row folder">
-          <span class="path" title={project.path}>{shortPath(project.path, app.home, 22)}/</span>
+          <!-- Click folds a step; drag moves the folder among the others. The
+               caret points down while open, right once folded to the name. -->
+          <button
+            class="path"
+            title="{project.path} (click to fold, drag to move)"
+            onclick={() => fold(project)}
+            onpointerdown={(e) => press(e, project.path)}
+            onpointermove={drag}
+            onpointerup={drop}
+            onpointercancel={drop}
+          >
+            <svg class="caret" class:shut={isFolded} viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg>
+            <span class="name">{shortPath(project.path, app.home, 20)}/</span>
+          </button>
           <button class="quiet" title="New chat in this folder" onclick={() => app.newChat(project.path)}>+</button>
         </div>
-        {#each project.sessions as session (session.id)}
+        {#each shown as session (session.id)}
           {@const dot = app.dot(session.id)}
           <div class="row chat" class:active={session.id === app.current.sessionId}>
             {#if deleting === session.id}
@@ -93,6 +201,10 @@
             {/if}
           </div>
         {/each}
+        <!-- Folding back is the folder name's job, so this is the only label. -->
+        {#if opened.length < hidden.length}
+          <button class="row more" onclick={() => (extra[project.id] = opened.length + CAP)}>show more</button>
+        {/if}
       </div>
     {/each}
     {#if app.problem}<div class="problem">{app.problem}</div>{/if}
@@ -113,9 +225,8 @@
     padding: var(--pad-y) calc(var(--pad-x) * 0.6) var(--foot-y);
     border-right: 1px solid var(--line);
     min-height: 0;
-  }
-  /* On a Mac the window buttons sit at the sidebar's top, in line with the top bar. */
-  :global(.mac) aside {
+    /* The top strip, in line with the top bar, holds the show/hide button
+       (see App.svelte) and, on a Mac, the window buttons. */
     position: relative;
     padding-top: calc(var(--bar) + var(--pad-y) * 0.4);
   }
@@ -148,7 +259,40 @@
   .folder {
     color: var(--faint);
   }
+  /* In the dots' column, so the folder name lines up with the chat titles. */
+  .caret {
+    /* Centred on the dots below, which fill the column's first 1ch. */
+    width: 1.4ch;
+    height: 1.4ch;
+    margin: 0 0.8ch 0 -0.2ch;
+    flex-shrink: 0;
+    align-self: center;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+  }
+  .caret.shut {
+    transform: rotate(-90deg);
+  }
+  .name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dragging .folder {
+    color: var(--fg);
+    cursor: grabbing;
+  }
+  .path:hover {
+    color: var(--fg);
+  }
   .path {
+    display: flex;
+    align-items: baseline;
+    text-align: left;
+    color: inherit;
+    touch-action: none;
     flex: 1;
     min-width: 0;
     overflow: hidden;
@@ -251,6 +395,15 @@
     outline: 0;
     appearance: none;
     line-height: inherit;
+  }
+  /* Lined up with the titles, as faint as the folder path. */
+  .more {
+    margin-top: calc(var(--gap) * 0.4);
+    padding-left: 2ch;
+    color: var(--faint);
+  }
+  .more:hover {
+    color: var(--fg);
   }
   .problem {
     color: var(--bad);

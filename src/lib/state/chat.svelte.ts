@@ -395,6 +395,8 @@ export class Chat {
   /** Markdown files this chat wrote, kept in step with its later edits to them. */
   docs = $state<DocTab[]>([]);
   panelOpen = $state(false);
+  /** The open panel covers the chat (not the sidebar). Ends when the panel hides. */
+  panelWide = $state(false);
   /** The chosen tab: PLAN_TAB or a document's path. */
   panelTab = $state(PLAN_TAB);
   /** Where Claude Code keeps the plan. It is the plan's tab, not a document. */

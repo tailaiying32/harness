@@ -85,6 +85,22 @@ let projects: ProjectRow[] = [
         part(74, "closed", "harness/native-menu-1"),
         part(75, "closed", "harness/native-menu-2"),
       ]),
+      // Past the sidebar's cap of eight: hidden behind "more", except the
+      // one with an open pull request.
+      row("old1", `${home}/code/harness`, "Pick a monospace font", 2000),
+      row("old2", `${home}/code/harness`, "Check memory against the desktop app", 3000),
+      row("oldpr", `${home}/code/harness`, "Windows build script", 3500, "harness/windows-build-5e6f7a", "open"),
+      row("old3", `${home}/code/harness`, "First window", 5000),
+      row("old4", `${home}/code/harness`, "Font size setting", 5200),
+      row("old5", `${home}/code/harness`, "Theme list: twenty palettes", 5400),
+      row("old6", `${home}/code/harness`, "Keep a chat process alive briefly", 5600),
+      row("old7", `${home}/code/harness`, "Resume by session ID", 5800),
+      row("old8", `${home}/code/harness`, "Sign-in card when login fails", 6000),
+      row("old9", `${home}/code/harness`, "Trash and purge after 30 days", 6200),
+      row("old10", `${home}/code/harness`, "Code block tint per theme", 6400),
+      row("old11", `${home}/code/harness`, "Tool calls folded into one line", 6600),
+      row("old12", `${home}/code/harness`, "Window buttons in the sidebar", 6800),
+      row("old13", `${home}/code/harness`, "Native picker for folders", 7000),
     ],
   },
   {
@@ -493,11 +509,12 @@ const commands: Record<string, (args: Args) => unknown> = {
   set_effort: () => undefined,
   list_models: () => {
     const all = ["low", "medium", "high", "xhigh", "max"];
+    // As the core sends it: newest of each family, the recommended one first.
     return [
-      { value: "default", name: "Default (Fable 5.2)", detail: null, efforts: all, default_effort: "medium" },
       { value: "opus", name: "Opus 5.5", detail: null, efforts: all, default_effort: "high" },
+      { value: "fable", name: "Fable 5.2", detail: null, efforts: all, default_effort: "medium" },
+      { value: "sonnet", name: "Sonnet 5.5", detail: null, efforts: all, default_effort: "medium" },
       { value: "haiku", name: "Haiku 5.5", detail: null, efforts: all, default_effort: "medium" },
-      { value: "claude-haiku-4-5", name: "Haiku 4.5", detail: null, efforts: [], default_effort: null },
     ];
   },
   close_session: () => undefined,

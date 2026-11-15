@@ -11,6 +11,7 @@
   import Settings from "./lib/Settings.svelte";
   import Sidebar from "./lib/Sidebar.svelte";
   import TopBar from "./lib/TopBar.svelte";
+  import BarIcon from "./lib/BarIcon.svelte";
   import {
     autotest,
     autotestReport,
@@ -28,7 +29,7 @@
     type SetupInfo,
   } from "./lib/ipc";
   import { attach } from "./lib/chat/images";
-  import { loadCachedModels, saveCachedModels } from "./lib/models";
+  import { loadCachedModels, saveCachedModels, startingModel } from "./lib/models";
   import { AppState } from "./lib/state/app.svelte";
   import { terminals } from "./lib/state/terminals.svelte";
   import type { Chat } from "./lib/state/chat.svelte";
@@ -38,6 +39,7 @@
     applySize,
     applyTheme,
     loadPrefs,
+    savePrefs,
     shownTheme,
     sizes,
     systemIsDark,
@@ -55,10 +57,30 @@
   applyPanelWidth(prefs.panelWidth);
 
   const app = new AppState();
-  app.defaultModel = prefs.model;
-  app.current.modelChoice = prefs.model;
+  app.defaultModel = startingModel(prefs.model, loadCachedModels());
+  app.current.modelChoice = app.defaultModel;
   const chat = $derived(app.current);
   const panelOpen = $derived(chat.panelOpen && chat.panelHasContent);
+  // Full screen panel: it covers the chat, never the sidebar. Hiding the
+  // panel ends it, so the panel always comes back at its own width.
+  const wide = $derived(panelOpen && chat.panelWide);
+  $effect(() => {
+    if (!panelOpen && chat.panelWide) chat.panelWide = false;
+  });
+
+  // The sidebar put away, kept across quits. Its button stays in one spot
+  // (by the window buttons on a Mac) whether the sidebar shows or not.
+  let sidebarHidden = $state(prefs.sidebarHidden);
+  function toggleSidebar() {
+    sidebarHidden = !sidebarHidden;
+    savePrefs({ sidebarHidden });
+  }
+
+  /** Typing somewhere, where Escape belongs to the box. */
+  function typing(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+  }
 
   // Two picked themes, and which shows: one of them always, or whichever the
   // system is in, switching the moment it does.
@@ -74,7 +96,8 @@
   let showSettings = $state(false);
 
   // Cmd+, (Ctrl+, on Windows) opens settings, as in most apps; Escape closes
-  // them. Cmd+N starts a new chat.
+  // them. Cmd+N starts a new chat. Cmd+B shows or hides the sidebar. Escape
+  // also ends a full screen panel, unless it belongs to a box being typed in.
   function onKey(e: KeyboardEvent) {
     // In a terminal, Ctrl keys belong to the shell (Ctrl+C, Ctrl+N, Ctrl+R...).
     if (terminals.focused() && e.ctrlKey && !e.metaKey) return;
@@ -90,8 +113,13 @@
       e.preventDefault();
       showSettings = false;
       app.newChat();
+    } else if (e.key.toLowerCase() === "b" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      toggleSidebar();
     } else if (e.key === "Escape" && showSettings) {
       showSettings = false;
+    } else if (e.key === "Escape" && wide && !chat.viewing && !typing(e.target) && !e.defaultPrevented) {
+      chat.panelWide = false;
     }
   }
   /**
@@ -420,8 +448,13 @@
   ondrop={(e) => e.dataTransfer?.types.includes("Files") && e.preventDefault()}
 />
 
-<div class="app" class:paneled={panelOpen}>
-  <Sidebar {app} onsettings={() => (showSettings = !showSettings)} />
+<div class="app" class:paneled={panelOpen} class:wide class:bare={sidebarHidden}>
+  {#if !sidebarHidden}
+    <Sidebar {app} onsettings={() => (showSettings = !showSettings)} />
+  {/if}
+  <button class="side-toggle" title={sidebarHidden ? "Show the sidebar (⌘B)" : "Hide the sidebar (⌘B)"} onclick={toggleSidebar}>
+    <BarIcon name="sidebar" />
+  </button>
   <div class="right">
   <TopBar {app} />
   <!-- Chat and side panel; settings are drawn over both, never the sidebar. -->
@@ -455,6 +488,27 @@
   .app {
     height: 100%;
     display: flex;
+    position: relative;
+  }
+  /* Always in the same spot: in the top strip, after the window buttons on a
+     Mac, at the far left elsewhere. Over the sidebar when it shows, over the
+     top bar's start when it doesn't (the top bar leaves room, see TopBar). */
+  .side-toggle {
+    position: absolute;
+    top: 0;
+    left: var(--toggle-x);
+    height: var(--bar);
+    display: flex;
+    align-items: center;
+    color: var(--faint);
+    z-index: 2;
+  }
+  .side-toggle:hover {
+    color: var(--fg);
+  }
+  /* Full screen panel: the chat steps aside, as in a narrow window. */
+  .wide main {
+    display: none;
   }
   /* The top bar over the chat and panel. */
   .right {
