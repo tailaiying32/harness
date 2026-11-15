@@ -37,7 +37,7 @@ import { FILE_LINK, fileWord, linkable, toLinks, type FileRef } from "../chat/fi
 import { docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
 
 /** What the side panel shows. */
-export type PanelView = "docs" | "side" | "browser";
+export type PanelView = "docs" | "side" | "browser" | "terminal";
 
 /** The browser tool that opens a page (see browser.rs). */
 const BROWSER_OPEN = "mcp__harness_browser__open";
@@ -266,6 +266,8 @@ export class Chat {
   workPath = $state<string | null>(null);
   /** The worktree's branch, and its pull request as last seen. */
   branch = $state<string | null>(null);
+  /** "live" or "put_away" while the chat has a worktree. */
+  wtStatus = $state<string | null>(null);
   prs = $state<PrInfo[]>([]);
   /** The folder paths are shown relative to: the worktree if there is one. */
   get root(): string {
@@ -275,6 +277,7 @@ export class Chat {
   syncRow(row: SessionRow): void {
     this.workPath = row.work_path;
     this.branch = row.branch;
+    this.wtStatus = row.wt_status;
     this.prs = row.prs;
   }
   /** When the current turn began, for the elapsed-time counter. */
@@ -295,12 +298,31 @@ export class Chat {
    * rather than leaving it on the notes.
    */
   get hasPanelWork(): boolean {
-    return this.planTab || this.openDocs.length > 0 || this.side !== null || this.browserOn;
+    return this.planTab || this.openDocs.length > 0 || this.side !== null || this.browserOn || this.terminalOn;
   }
 
   /** The panel has something to show. */
   get panelHasContent(): boolean {
-    return this.tabCount > 0 || this.side !== null || this.browserOn;
+    return this.tabCount > 0 || this.side !== null || this.browserOn || this.terminalOn;
+  }
+
+  // ---- The terminal (its tabs belong to the project; see terminals.svelte.ts) ----
+  /** The terminal view is open in this chat's panel. */
+  terminalOn = $state(false);
+
+  openTerminal(): void {
+    if (this.owner) return this.owner.openTerminal();
+    this.terminalOn = true;
+    this.panelView = "terminal";
+    this.panelOpen = true;
+  }
+
+  /** The project's last tab closed: the panel goes back to another view, or closes. */
+  leaveTerminal(): void {
+    this.terminalOn = false;
+    if (this.panelView !== "terminal") return;
+    this.panelView = this.side ? "side" : this.browserOn ? "browser" : "docs";
+    this.panelOpen = this.panelOpen && this.hasPanelWork;
   }
 
   // ---- The browser (a localhost page beside the chat; Claude can drive it) ----
@@ -352,7 +374,7 @@ export class Chat {
     this.browser = null;
     this.browserProblem = "";
     if (this.panelView !== "browser") return;
-    this.panelView = this.side ? "side" : "docs";
+    this.panelView = this.side ? "side" : this.terminalOn ? "terminal" : "docs";
     this.panelOpen = this.panelOpen && this.hasPanelWork;
   }
 
@@ -1014,6 +1036,7 @@ export class Chat {
   showView(view: PanelView): void {
     if (view === "side") this.openSide();
     else if (view === "browser") this.openBrowser();
+    else if (view === "terminal") this.openTerminal();
     else this.openPanel();
   }
 

@@ -31,8 +31,9 @@ pub struct SpawnOptions {
     pub effort: Option<String>,
     /// Set for a side chat: a read-only conversation that starts as a copy of a chat.
     pub side: Option<SideOptions>,
-    /// Tools the app itself offers this chat (the side panel's browser).
-    pub tools: Option<AppTools>,
+    /// Tools the app itself offers this chat (the side panel's browser and
+    /// terminal), one group per server.
+    pub tools: Vec<AppTools>,
     /// The chat's notes file, which the user writes in the side panel. The
     /// agent is told where it is and may read it; it may not exist yet.
     pub notes: Option<PathBuf>,

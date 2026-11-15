@@ -70,6 +70,20 @@ file, a hand merge cleaned up at startup, the trash and its purge. Checked in th
 list, the bottom bar. Not tested live: a real pull request going through its
 states (the lookup command was run read-only against pookie). See "Worktrees".
 
+Added 2026-11-15 (terminal, branch `harness/terminal-7d6f44`): the side
+panel's fourth view, real shells whose tabs belong to the project (every chat
+of the project shows the same ones). New tabs open in the main folder; + also
+offers the chat's worktree. Claude can read a tab (not type into it). A tab
+unused for a day of awake time closes, keeping its output and a line saying
+why; quitting saves tabs and they come back closed. See "Terminal
+(`terminal.rs`)". **Tested** live with the self-test: a login shell in the
+project folder, a running command asked about before closing, unique tab
+names, the one-day close (at 5 s) with its line and a fresh shell after,
+Claude (Haiku) reading a tab with no approval card. Not checked by eye in the
+real window: Cmd+T, Cmd+W (new menu item), Cmd+K, copy and paste, vim, the
+look against the mock-up. Restore after quit and worktree closing are tested
+in Rust only. Windows untested.
+
 Added 2026-11-14 (browser, branch `harness/harness-browser-pane-0ac457`, not
 merged): the side panel's third view, a localhost page that Claude can drive
 (open, read, click, type, console, run, screenshot). See "Browser (`browser.rs`)".
@@ -196,6 +210,10 @@ the login itself.
   outright, so its background commands keep running. Fix in the Windows pass
   (for example with a job object).
 - Showing which chats have background work, or how much memory each uses.
+- In the terminal: Claude typing into it, split panes, search, clickable
+  links, terminal settings, and the terminal beside the browser at once.
+  Commands running at quit don't come back, only their output. On Windows
+  nothing counts as running (× never asks; tabs show the folder's name).
 
 ---
 
@@ -895,9 +913,9 @@ There are two theme picks, one dark and one light, and an appearance setting
 that says which shows: light, dark, or auto (the default), which follows the
 system and switches the moment it does (added 2026-11-14). Picking a theme for
 the side not showing only saves it.
-The built-in terminal is accepted as a later feature; its position (bottom or
-side panel) is still open. How to build the selectors so the choice costs
-nothing at runtime:
+The built-in terminal is built as a side panel view (see "Terminal
+(`terminal.rs`)"). How to build the selectors so the choice costs nothing at
+runtime:
 
 - All colours and sizes are CSS custom properties on the root element. A
   theme is one small object of values; switching sets the properties. Nothing
@@ -927,12 +945,8 @@ Mocked up on the same board:
 - **Density.** The app should fit more on screen than the desktop app. Three
   sizes are mocked up: compact 11.5px, regular 12.5px, roomy 13.5px, each with
   its own line height and gaps. Size is a setting. Open: the default.
-- **Built-in terminal** (secondary, after v1). A real shell in the project
-  folder, either along the bottom or as a tab in the side panel. Needs a
-  pseudo-terminal in the core and a terminal renderer in the window (likely
-  the `portable-pty` crate and xterm.js; check both before building). Load the
-  renderer only when a terminal is first opened so it costs nothing otherwise.
-  Open: bottom or side.
+- **Built-in terminal.** Built 2026-11-15 as the side panel's fourth view;
+  see "Terminal (`terminal.rs`)". Mock-up: Magic Patterns canvas "Terminal".
 
 #### Behaviour decided 2026-11-13
 
@@ -1214,10 +1228,8 @@ Mocked up on the same board:
     (the chat keeps at least 360 px, the panel 280 px); a double-click on the
     edge goes back to 46%. The width is one saved setting for every chat.
     Below 1100 px the open panel takes the chat's place.
-  - **A terminal later** (the user's note, 2026-11-13: decide where its
-    selector lives). The tab strip holds what the chat produced; the right
-    end of the bar, before `×`, is kept free for things that aren't the
-    chat's, such as a terminal. Not decided.
+  - **The terminal** is the panel's fourth view, picked by its icon like the
+    others; its row holds the project's tabs and + (see "Terminal").
 - **Rendered markdown must be safe.** As built: markdown-it runs with raw HTML
   turned off and its default link checks, and highlight.js escapes code, so
   the output holds only tags the renderer itself produces. dompurify was
@@ -1335,6 +1347,75 @@ followed exactly and still shown after a restart. Checked in the preview: the
 tab order, formatted notes, editing. Self-test: `@notes <text>`,
 `@planedit <text>`; report `notes` and `plans`.
 
+### Terminal (`terminal.rs`, built 2026-11-15)
+
+Real shells in the side panel, for scratch work (finding things, a quick
+command, a scratch server); real servers stay Claude's job. Mock-up: Magic
+Patterns canvas "Terminal" (file `tHBjJsfaSXZFYgQhxfUVbS`).
+
+- **Tabs belong to the project**, keyed by the project's main folder exactly
+  as chats name it (`Chat.projectPath`, `projects.path`), never the project's
+  database id (it doesn't exist before a first message and changes when the
+  last chat is purged). Every chat of the project shows the same tabs; which
+  view the panel shows is still per chat (`Chat.terminalOn`).
+- **Shells:** `portable-pty`. The user's `$SHELL -l` (so their profile sets
+  PATH; `/bin/zsh` if unset), in the main folder or a chat's worktree folder,
+  with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=Harness`,
+  `LANG=en_US.UTF-8` if unset, and no `ANTHROPIC_API_KEY`/`_AUTH_TOKEN` (so
+  `claude` run there uses the subscription). Windows: `new_default_prog`.
+  A reader thread per shell keeps the last 512 KB of raw output (`tail`) and
+  sends each chunk to the window over the tab's own `Channel` as raw bytes.
+  A shell that exits by itself takes its tab.
+- **What runs:** once a second the core reads the pty's foreground process
+  group; when it isn't the shell's, `ps -o args=` gives the command line.
+  Tab name: argv[0]'s base name when something runs ("python3"), else the
+  label (the project folder's name, or the worktree branch's short name);
+  repeats get " 2", " 3". Changes go to the window as `terminal_tabs`
+  events (empty session ID, not saved).
+- **Closing:** × or Cmd+W asks "<name> is running. Close it?" when
+  something runs, else closes at once. Closing hangs up the shell's process
+  group and the job in front, waits 2 s, then kills what is left.
+- **Unused for a day** (`HARNESS_TERMINAL_IDLE_SECONDS` for tests): checked
+  every 30 s with `Instant` (doesn't count Mac sleep). Use = typing, the tab
+  on screen (`terminal_place`), Claude's `read`; output never counts. The
+  shell closes; the tab keeps its output plus a dimmed `── closed after a day
+  unused: <command line> ──` line; typing starts a fresh shell under it.
+- **Quit and restore:** `Terminals::shutdown` (before the chats' shutdown)
+  saves each tab's last 256 KB to the `terminals` table, then ends every
+  shell (1 s grace). Also saved every 5 minutes when there was output. On
+  start, tabs of projects still in `projects` come back closed with a
+  `── restored Nov 15 14:02 ──` line.
+- **Worktrees:** + offers "new tab in <short branch>" while the open chat's
+  worktree is live. A running shell in a worktree keeps the 14-day sweep
+  from putting it away (`TerminalHooks::in_use`). When a worktree goes
+  (chat deleted, branch merged, cleaned up), its tabs close with
+  `closed: worktree removed (<why>)` and start again in the main folder
+  (`TerminalHooks::gone`, called from `trash`, the sweep's merged and gone
+  arms, and `purge`).
+- **Claude:** a second in-process tool server, `harness_terminal`, with
+  `tabs` and `read {tab?, lines?}` (default the tab on show, else the newest;
+  200 lines, at most 2,000). `read` returns plain text: escape sequences
+  dropped, `\r` overwrites, backspace, erase-line and clear-screen applied; a
+  note when a full-screen program has the screen. `SpawnOptions.tools` is now
+  a list, so a chat gets both the browser's and the terminal's servers.
+  Shown as "read terminal <tab>".
+- **Window:** xterm.js 6 with the fit addon, loaded on first use
+  (`src/lib/terminal/xterm.ts`, a 334 KB chunk, 84 KB gzipped). Each tab's
+  xterm lives in `src/lib/state/terminals.svelte.ts`, outside the panel
+  (which is made again per chat), and its element is moved into
+  `TerminalView`. Theme roles map to ANSI colours (`xtermTheme`); theme and
+  text size changes come through the `harness-look` event.
+- **Keys** (only while the terminal has the keys): Cmd+T new tab in the main
+  folder, Cmd+Shift+[ / ] previous / next tab, Cmd+K clear, Cmd+W close tab.
+  Cmd+W elsewhere closes the window as before: on the Mac the default menu's
+  Close Window is replaced by a custom item (`app_menu` in `lib.rs`) that
+  sends `close_key`, and the window decides. Ctrl keys always go to the shell.
+- **Memory** (release build, 2026-11-15): one terminal open adds about 6 MB
+  to the window's web page (38 → 44 MB at start) and 1 MB to the core; each
+  shell is about 4 MB.
+- Self-test: `@terminal <text>`, `@termwait <text>`, `@termtab`,
+  `@termclose`, `@docs`; report `terminal: {on, tabs, asked, text}`.
+
 ### Preview page
 
 `npm run dev`, then open `http://localhost:1420/preview.html`: the same window
@@ -1345,7 +1426,9 @@ waiting and two documents (for the side panel; Keep planning brings a revised
 plan, approving brings an edit to a document), and a scripted answer to
 anything typed. For working on the look without building the app. Add
 `#open=planning&browser` for the browser view (no page is drawn in the
-preview; the tab and address line work).
+preview; the tab and address line work), or `&terminal` for the terminal (a
+pretend shell with two tabs: one at its prompt, one running a server; it
+answers `ls`, `pwd` and `echo hello`, and `sleep`/`python3` "run" until Ctrl+C).
 It is not part of the built app. `.claude/launch.json` starts it as
 `ui-preview`.
 

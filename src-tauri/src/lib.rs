@@ -9,6 +9,7 @@ mod notes;
 mod sessions;
 mod side_chat;
 mod store;
+mod terminal;
 mod worktree;
 
 use std::collections::BTreeMap;
@@ -16,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Manager, RunEvent, State};
 
 use agent::AppTools;
@@ -24,9 +25,10 @@ use agent::claude_code::ClaudeCodeAdapter;
 use browser::Browsers;
 use events::{AgentEvent, Decision, Envelope, ModelInfo};
 use locate::SetupInfo;
-use sessions::{Out, SessionManager};
+use sessions::{Out, SessionManager, TerminalHooks};
 use side_chat::SideChats;
 use store::{ProjectRow, SessionRow, Store};
+use terminal::{TabInfo, Terminals};
 
 /// How long quitting waits for chat processes to finish up.
 const QUIT_WAIT: Duration = Duration::from_secs(3);
@@ -36,6 +38,8 @@ struct AppState {
     side: SideChats,
     /// Each chat's side-panel browser.
     browsers: Browsers,
+    /// Each project's side-panel terminal tabs.
+    terminals: Terminals,
     store: Arc<Store>,
     /// One app-wide channel to the window, so chats that aren't open still report status.
     channel: Arc<Mutex<Option<Channel<Envelope>>>>,
@@ -445,6 +449,81 @@ fn browser_current(state: State<'_, AppState>, chat_id: String) -> Option<Browse
         .map(|(url, title, loading)| BrowserInfo { url, title, loading })
 }
 
+/// A project's terminal tabs, in order.
+#[tauri::command]
+fn terminal_tabs(state: State<'_, AppState>, project: String) -> Vec<TabInfo> {
+    state.terminals.tabs(&project)
+}
+
+/// Opens a terminal tab in the project's main folder, or in a chat's worktree
+/// folder (named `label` when nothing runs in it).
+#[tauri::command]
+async fn terminal_new(
+    state: State<'_, AppState>,
+    project: String,
+    worktree: Option<String>,
+    label: Option<String>,
+    cols: u16,
+    rows: u16,
+) -> Result<TabInfo, String> {
+    let terminals = state.terminals.clone();
+    tauri::async_runtime::spawn_blocking(move || terminals.open(&project, worktree, label, cols, rows))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Where a tab's output goes: everything kept so far, then what comes.
+#[tauri::command]
+fn terminal_attach(state: State<'_, AppState>, tab: String, on_data: Channel<InvokeResponseBody>) -> Result<(), String> {
+    state.terminals.attach(&tab, on_data)
+}
+
+/// What the user typed in a tab. Starts a fresh shell in a closed one.
+#[tauri::command]
+async fn terminal_write(state: State<'_, AppState>, tab: String, data: String) -> Result<(), String> {
+    let terminals = state.terminals.clone();
+    tauri::async_runtime::spawn_blocking(move || terminals.write(&tab, &data))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn terminal_resize(state: State<'_, AppState>, tab: String, cols: u16, rows: u16) -> Result<(), String> {
+    state.terminals.resize(&tab, cols, rows)
+}
+
+/// Which tab is on screen, if any.
+#[tauri::command]
+fn terminal_place(state: State<'_, AppState>, tab: Option<String>, visible: bool) {
+    state.terminals.place(tab, visible);
+}
+
+/// What runs in a tab besides its shell, for asking before closing it.
+#[tauri::command]
+async fn terminal_running(state: State<'_, AppState>, tab: String) -> Result<Option<String>, String> {
+    let terminals = state.terminals.clone();
+    tauri::async_runtime::spawn_blocking(move || terminals.running(&tab))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn terminal_close(state: State<'_, AppState>, tab: String) {
+    state.terminals.close(&tab);
+}
+
+/// A tab's output as plain text, as the agent reads it. For the self-test.
+#[tauri::command]
+fn terminal_text(state: State<'_, AppState>, tab: String, lines: usize) -> Result<String, String> {
+    state.terminals.text(&tab, lines)
+}
+
+/// Closes the window: Cmd+W outside a terminal, as the default menu did.
+#[tauri::command]
+fn close_window(window: tauri::Window) -> Result<(), String> {
+    window.close().map_err(|e| e.to_string())
+}
+
 /// The models the agent offers. Starts a short-lived agent process, so it runs
 /// off the main thread and takes about 7 seconds (it also reads each model's
 /// default effort). The window shows the last list meanwhile.
@@ -499,6 +578,7 @@ fn close_session(state: State<'_, AppState>, session_id: String) {
 ///   HARNESS_TRASH_SECONDS      how long put-away branches and trashed chats are kept
 ///   HARNESS_GH                 a program to use in place of GitHub's `gh`
 ///   HARNESS_BROWSER_IDLE_SECONDS  time a browser sits off screen and unused before its page is put away
+///   HARNESS_TERMINAL_IDLE_SECONDS  time a terminal tab sits unused before its shell is closed
 #[derive(serde::Serialize)]
 struct AutoTest {
     folder: String,
@@ -539,6 +619,73 @@ fn autotest_report(text: String) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| e.to_string())
 }
 
+/// The Mac menu: Tauri's default one, except Close Window (Cmd+W) asks the
+/// window first, so a terminal with focus can close a tab instead.
+#[cfg(target_os = "macos")]
+fn app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let info = app.package_info();
+    let about = AboutMetadata {
+        name: Some(info.name.clone()),
+        version: Some(info.version.to_string()),
+        ..Default::default()
+    };
+    Menu::with_items(
+        app,
+        &[
+            &Submenu::with_items(
+                app,
+                info.name.clone(),
+                true,
+                &[
+                    &PredefinedMenuItem::about(app, None, Some(about))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::services(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::hide(app, None)?,
+                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::quit(app, None)?,
+                ],
+            )?,
+            &Submenu::with_items(
+                app,
+                "File",
+                true,
+                &[&MenuItem::with_id(app, CLOSE_KEY, "Close Window", true, Some("CmdOrCtrl+W"))?],
+            )?,
+            &Submenu::with_items(
+                app,
+                "Edit",
+                true,
+                &[
+                    &PredefinedMenuItem::undo(app, None)?,
+                    &PredefinedMenuItem::redo(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::cut(app, None)?,
+                    &PredefinedMenuItem::copy(app, None)?,
+                    &PredefinedMenuItem::paste(app, None)?,
+                    &PredefinedMenuItem::select_all(app, None)?,
+                ],
+            )?,
+            &Submenu::with_items(app, "View", true, &[&PredefinedMenuItem::fullscreen(app, None)?])?,
+            &Submenu::with_items(
+                app,
+                "Window",
+                true,
+                &[
+                    &PredefinedMenuItem::minimize(app, None)?,
+                    &PredefinedMenuItem::maximize(app, None)?,
+                ],
+            )?,
+        ],
+    )
+}
+
+/// The menu item Cmd+W runs.
+#[cfg(target_os = "macos")]
+const CLOSE_KEY: &str = "close-key";
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -559,27 +706,65 @@ pub fn run() {
                     }
                 })
             };
+            #[cfg(target_os = "macos")]
+            {
+                app.set_menu(app_menu(app.handle())?)?;
+                let out = out.clone();
+                app.on_menu_event(move |_, event| {
+                    if event.id() == CLOSE_KEY {
+                        out(Envelope { session_id: String::new(), event: AgentEvent::CloseKey {} });
+                    }
+                });
+            }
             let adapter = Arc::new(ClaudeCodeAdapter);
             let side = SideChats::new(adapter.clone(), store.clone(), out.clone(), dir.join("notes"));
             let browsers = Browsers::new(app.handle().clone(), out.clone());
+            let terminals = Terminals::new(out.clone(), store.clone());
             let sessions = SessionManager::new(adapter, store.clone(), out, dir);
-            // Every chat's agent can drive that chat's browser.
+            // Every chat's agent can drive that chat's browser and read its
+            // project's terminal.
             {
                 let browsers = browsers.clone();
-                sessions.set_app_tools(Arc::new(move |chat_id: &str| {
-                    let browsers = browsers.clone();
-                    let chat_id = chat_id.to_string();
-                    AppTools {
-                        server: browser::SERVER,
-                        instruction: browser::INSTRUCTION,
-                        list: browser::tools(),
-                        call: Arc::new(move |tool, args| {
-                            let browsers = browsers.clone();
-                            let chat_id = chat_id.clone();
-                            Box::pin(async move { browsers.call(&chat_id, &tool, &args).await })
-                        }),
-                    }
+                let terminals = terminals.clone();
+                sessions.set_app_tools(Arc::new(move |chat_id: &str, project: &str| {
+                    let browser_tools = {
+                        let browsers = browsers.clone();
+                        let chat_id = chat_id.to_string();
+                        AppTools {
+                            server: browser::SERVER,
+                            instruction: browser::INSTRUCTION,
+                            list: browser::tools(),
+                            call: Arc::new(move |tool, args| {
+                                let browsers = browsers.clone();
+                                let chat_id = chat_id.clone();
+                                Box::pin(async move { browsers.call(&chat_id, &tool, &args).await })
+                            }),
+                        }
+                    };
+                    let terminal_tools = {
+                        let terminals = terminals.clone();
+                        let project = project.to_string();
+                        AppTools {
+                            server: terminal::SERVER,
+                            instruction: terminal::INSTRUCTION,
+                            list: terminal::tools(),
+                            call: Arc::new(move |tool, args| {
+                                let terminals = terminals.clone();
+                                let project = project.clone();
+                                Box::pin(async move { terminals.call(&project, &tool, &args).await })
+                            }),
+                        }
+                    };
+                    vec![browser_tools, terminal_tools]
                 }));
+            }
+            // Worktree cleanup checks for and tells the terminal.
+            {
+                let (a, b) = (terminals.clone(), terminals.clone());
+                sessions.set_terminal_hooks(TerminalHooks {
+                    in_use: Arc::new(move |root: &Path| a.in_worktree(root)),
+                    gone: Arc::new(move |root: &Path, why: &str| b.worktree_gone(root, why)),
+                });
             }
             // Images of chats that are gone, and of new chats never sent.
             {
@@ -600,6 +785,7 @@ pub fn run() {
                 sessions,
                 side,
                 browsers,
+                terminals,
                 store,
                 channel,
                 binary: Mutex::new(None),
@@ -637,6 +823,16 @@ pub fn run() {
             browser_place,
             browser_close,
             browser_current,
+            terminal_tabs,
+            terminal_new,
+            terminal_attach,
+            terminal_write,
+            terminal_resize,
+            terminal_place,
+            terminal_running,
+            terminal_close,
+            terminal_text,
+            close_window,
             save_image,
             read_image,
             read_image_file,
@@ -653,6 +849,7 @@ pub fn run() {
             // Quitting: ask every chat's process to finish up, and wait briefly.
             if let RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<AppState>() {
+                    state.terminals.shutdown();
                     state.side.shutdown();
                     state.sessions.shutdown(QUIT_WAIT);
                 }
