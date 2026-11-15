@@ -568,8 +568,7 @@ setTimeout(() => {
     buttons.find((b) => b.textContent?.includes(title))?.click();
     if (wanted.has("browser")) {
       setTimeout(() => {
-        const bar = [...document.querySelectorAll<HTMLButtonElement>("header.bar button")];
-        bar.find((b) => b.textContent?.includes("browser") || b.textContent?.includes("◂"))?.click();
+        document.querySelector<HTMLButtonElement>('header.bar button[title="browser"]')?.click();
       }, 200);
     }
   }, 100);

@@ -1021,6 +1021,18 @@ Mocked up on the same board:
   the normal title bar there. In Mac full screen the window buttons hide and
   the sidebar's top strip stays empty; accepted for now. Renaming the chat
   from the bar is not built.
+  **Changed 2026-11-14 (branch `harness/harness-browser-pane-0ac457`):** the
+  views became three drawn icons (`PanelIcon.svelte`, drawn like the branch
+  mark: a document, a chat bubble, a globe) at the right of the chat's half of
+  the bar, against the panel's line. Clicking one opens the panel on it;
+  clicking the one on show hides the panel; ◂ and ▸ are gone. The docs icon is
+  faded and does nothing until there is a plan or document, and turns the
+  accent colour while a plan waits under another view (the ● is gone). The bar
+  over the open panel now holds that view's own row (`PanelBar.svelte`): docs'
+  tabs, the side chat's name and ×, or the browser's address, ↻ and ×. The
+  panel itself has no row, so every view starts right under the bar. The user
+  liked it in the Magic Patterns canvas "Panel Picker Icons" (it trimmed the
+  browser from three stacked rows to one).
 - **Model picker: built** (the user asked for it on 2026-11-13). A selector
   in the line under the message box lists the models Claude Code itself
   reports, by their real names ("Opus 5.5", "Default (Fable 5.2)"), including
@@ -1220,9 +1232,9 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   plan's: "Page · localhost:5173 · open browser" (a `page` item, rebuilt from
   history on replay; only the latest line has the button, which loads the
   address again if the browser was closed since). No marks in the bars: the
-  user disliked a ● beside ◂ (2026-11-14). With the panel
-  closed, ◂ always shows; with nothing else in the panel it opens the browser's
-  address line. A chat loaded after its page was opened asks `browser_current`.
+  user disliked a ● beside ◂ (2026-11-14). The globe icon in the top bar
+  opens the view at any time; with no page yet it shows an empty address line
+  in the bar, and typing there makes the browser. A chat loaded after its page was opened asks `browser_current`.
 - **Self-test:** `@browser <url>` types an address (waits for the load),
   `@settings` toggles settings; the report has `browser {on, page, pageLines, slot}`.
 
