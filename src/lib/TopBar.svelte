@@ -94,12 +94,12 @@
   .views button {
     display: flex;
   }
-  /* The view on show is in the accent colour, like the chosen model in the
-     model menu; a plain bright icon stood out more than anything else in the
-     bar. Pointing at one shows the same colour. */
-  .views button.on,
   .views button:hover {
-    color: var(--accent);
+    color: var(--fg);
+  }
+  /* The view on show is bright, like the open chat in the sidebar. */
+  .views button.on {
+    color: var(--bright);
   }
   .views button.empty {
     opacity: 0.45;
