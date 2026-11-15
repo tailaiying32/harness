@@ -24,7 +24,6 @@
       if (!next) return chat.openBrowser();
       chat.panelView = next;
     }
-    if (chat.panelView === "browser") chat.browserUnseen = false;
     chat.panelOpen = true;
   }
 </script>
@@ -46,19 +45,15 @@
         </button>
       {/if}
       <button class:on={chat.panelView === "side"} onclick={() => chat.showView("side")}>side chat</button>
-      <button class:on={chat.panelView === "browser"} onclick={() => chat.showView("browser")}>
-        {#if chat.browserUnseen}<span class="accent">●</span>{/if}
-        browser
-      </button>
+      <button class:on={chat.panelView === "browser"} onclick={() => chat.showView("browser")}>browser</button>
       <span class="spacer" data-tauri-drag-region></span>
       <button title="Hide the panel" onclick={() => (chat.panelOpen = false)}>▸</button>
     {:else}
       <!-- Closed: one mark brings the panel back. (A plan opens the panel by
-           itself; one left waiting after hiding it shows in the chat.) With
-           nothing in it, the mark opens the browser's address line. -->
-      <button title="Show the panel" onclick={reopen}>
-        {#if chat.browserUnseen}<span class="accent">●</span>{/if}◂
-      </button>
+           itself; one left waiting after hiding it shows in the chat, as does
+           a page Claude opened.) With nothing in it, the mark opens the
+           browser's address line. -->
+      <button title="Show the panel" onclick={reopen}>◂</button>
     {/if}
     </span>
   </span>

@@ -75,7 +75,7 @@ merged): the side panel's third view, a localhost page that Claude can drive
 (open, read, click, type, console, run, screenshot). See "Browser (`browser.rs`)".
 **Tested** live with the self-test (Haiku): all seven tools on a test page,
 with no approval cards; a page Claude opened while the panel showed docs
-(parked, the ● mark, screenshot still right); a non-localhost address
+(parked, screenshot still right); a non-localhost address
 refused; Harness's own preview page loading cleanly in it. Not checked by eye
 in the real window (the screen couldn't be captured): the page lining up over
 the panel, following the panel's drag, hiding under Settings and the image
@@ -1215,12 +1215,16 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   so the long edge is at most 1568 px, sent as PNG. They work while parked.
   Other systems say they aren't supported yet.
 - **Window side:** `Chat.browser` (page), `browserOn` (view open, maybe with
-  no page yet: an empty address line), `browserUnseen` (the ● on "browser"
-  and on ◂). Claude opening a page never switches the panel. With the panel
+  no page yet: an empty address line). Claude opening a page never switches
+  the panel; instead a successful `open` adds a line to the chat, like a
+  plan's: "Page · localhost:5173 · open browser" (a `page` item, rebuilt from
+  history on replay; only the latest line has the button, which loads the
+  address again if the browser was closed since). No marks in the bars: the
+  user disliked a ● beside ◂ (2026-11-14). With the panel
   closed, ◂ always shows; with nothing else in the panel it opens the browser's
   address line. A chat loaded after its page was opened asks `browser_current`.
 - **Self-test:** `@browser <url>` types an address (waits for the load),
-  `@settings` toggles settings; the report has `browser {on, page, unseen, slot}`.
+  `@settings` toggles settings; the report has `browser {on, page, pageLines, slot}`.
 
 ### Preview page
 

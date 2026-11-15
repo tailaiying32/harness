@@ -350,7 +350,11 @@ const looksChat: AgentEvent[] = [
   text("k-m3", "All 31 tests pass, including two new ones for the idle clock."),
   ended,
   { kind: "user_message", text: "and the window side?" },
-  text("k-m4", "Nothing to run there yet: the window has no tests of its own. I checked by hand that a hidden window now shuts down on time."),
+  tool("k6", "mcp__harness_browser__open", { url: "localhost:1420" }),
+  result("k6", "Opened http://localhost:1420/ (Harness)"),
+  tool("k7", "mcp__harness_browser__screenshot", {}),
+  result("k7", ""),
+  text("k-m4", "I opened the app in the browser and checked it: the chat's idle mark now clears on time."),
   ended,
 ];
 

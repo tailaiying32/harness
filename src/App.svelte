@@ -299,7 +299,7 @@
           browser: {
             on: current.browserOn,
             page: current.browser,
-            unseen: current.browserUnseen,
+            pageLines: current.items.filter((item) => item.type === "page").length,
             slot: (() => {
               const r = document.querySelector<HTMLElement>(".slot")?.getBoundingClientRect();
               return r ? { x: r.left, y: r.top, width: r.width, height: r.height } : null;

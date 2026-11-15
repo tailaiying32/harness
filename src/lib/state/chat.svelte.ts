@@ -3,6 +3,7 @@
 import {
   answerApproval,
   browserClose,
+  browserNavigate,
   browserCurrent,
   closeSession,
   chooseWorktree,
@@ -32,6 +33,15 @@ import { docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools
 
 /** What the side panel shows. */
 export type PanelView = "docs" | "side" | "browser";
+
+/** The browser tool that opens a page (see browser.rs). */
+const BROWSER_OPEN = "mcp__harness_browser__open";
+
+/** A string field of a tool's input, or "". */
+function field(input: unknown, key: string): string {
+  const value = input && typeof input === "object" ? (input as Record<string, unknown>)[key] : undefined;
+  return typeof value === "string" ? value : "";
+}
 
 export type UserItem = {
   id: number;
@@ -73,6 +83,8 @@ export type ApprovalItem = {
 export type ErrorItem = { id: number; type: "error"; text: string };
 /** A faint one-line remark from the app, e.g. "stopped". */
 export type NoteItem = { id: number; type: "note"; text: string };
+/** Claude opened a page in the browser; the chat's line for it, with a way to look. */
+export type PageItem = { id: number; type: "page"; url: string };
 /** Claude Code isn't signed in. "done" once signed in, or once a later turn went through. */
 export type SignInItem = {
   id: number;
@@ -113,7 +125,7 @@ function imagesIn(content: unknown): ImageRef[] {
     .map((part) => ({ n: part.n, media_type: String(part.media_type) }));
 }
 
-export type Item = UserItem | TextItem | ThinkingItem | ToolItem | ApprovalItem | ErrorItem | NoteItem | SignInItem;
+export type Item = UserItem | TextItem | ThinkingItem | ToolItem | ApprovalItem | ErrorItem | NoteItem | SignInItem | PageItem;
 
 type NewItem =
   | Omit<UserItem, "id">
@@ -122,6 +134,7 @@ type NewItem =
   | Omit<ToolItem, "id">
   | Omit<ApprovalItem, "id">
   | Omit<ErrorItem, "id">
+  | Omit<PageItem, "id">
   | Omit<NoteItem, "id">
   | Omit<SignInItem, "id">;
 
@@ -254,9 +267,6 @@ export class Chat {
   browserOn = $state(false);
   /** The page it shows, once there is one. Lives in the core, not saved. */
   browser = $state<BrowserInfo | null>(null);
-  /** Claude opened or changed the page while the browser wasn't on show. */
-  browserUnseen = $state(false);
-
   /** The browser is what the panel shows right now. */
   get browserShown(): boolean {
     return this.panelOpen && this.panelView === "browser";
@@ -265,9 +275,20 @@ export class Chat {
   /** Opens the browser view: the page if there is one, an empty address line if not. */
   openBrowser(): void {
     this.browserOn = true;
-    this.browserUnseen = false;
     this.panelView = "browser";
     this.panelOpen = true;
+  }
+
+  /** From a page line in the chat: shows the browser, loading `url` again if the browser was closed since. */
+  async showPage(url: string): Promise<void> {
+    if (this.owner) return this.owner.showPage(url);
+    this.openBrowser();
+    if (this.browser) return;
+    try {
+      await browserNavigate(this.sessionId, url);
+    } catch (e) {
+      this.showError(String(e));
+    }
   }
 
   /** Closes the browser and its page. The panel goes back to another view, or closes. */
@@ -286,7 +307,6 @@ export class Chat {
   private leaveBrowser(): void {
     this.browserOn = false;
     this.browser = null;
-    this.browserUnseen = false;
     if (this.panelView !== "browser") return;
     this.panelView = this.side ? "side" : "docs";
     this.panelOpen = this.panelOpen && this.panelHasContent;
@@ -547,6 +567,11 @@ export class Chat {
           const images = imagesIn(event.content);
           if (images.length) tool.images = images;
           if (!event.is_error) this.trackDocument(tool);
+          // A page Claude opened gets its own line, like a plan, with a way to look at it.
+          if (!event.is_error && tool.name === BROWSER_OPEN) {
+            const url = field(tool.input, "url").trim();
+            this.push({ type: "page", url: /^https?:\/\//.test(url) ? url : `http://${url.replace(/^:/, "localhost:")}` });
+          }
         }
         break;
       }
@@ -675,11 +700,10 @@ export class Chat {
         break;
 
       // Claude or the user opened or moved the page. The panel isn't switched
-      // for Claude; the browser view gets a mark instead, like a plan in side chat.
+      // for Claude; the chat's page line (see tool_result) is how to look.
       case "browser_state":
         this.browser = { url: event.url, title: event.title, loading: event.loading };
         this.browserOn = true;
-        if (!this.browserShown) this.browserUnseen = true;
         break;
 
       case "browser_closed":
