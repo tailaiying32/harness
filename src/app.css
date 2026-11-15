@@ -15,8 +15,9 @@
   --side: 228px;
   /* The top bar, the height of a Mac title bar with its window buttons. */
   --bar: 38px;
-  /* Where the sidebar's show/hide button sits: the far left, or after a
-     Mac's window buttons (placed at x 14 in tauri.conf.json, 52px wide). */
+  /* Where the sidebar's show/hide button sits while the sidebar is hidden:
+     the far left, or after a Mac's window buttons (placed at x 14 in
+     tauri.conf.json, 52px wide) with a clear gap so it isn't read as one. */
   --toggle-x: calc(var(--pad-x) * 0.6);
 
   /* The bottom rows of the sidebar, the message box and the side panel sit
@@ -48,7 +49,7 @@
 }
 
 :root.mac {
-  --toggle-x: 78px;
+  --toggle-x: 88px;
 }
 
 :root[data-size="compact"] {

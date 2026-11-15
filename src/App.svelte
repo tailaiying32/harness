@@ -490,18 +490,21 @@
     display: flex;
     position: relative;
   }
-  /* Always in the same spot: in the top strip, after the window buttons on a
-     Mac, at the far left elsewhere. Over the sidebar when it shows, over the
-     top bar's start when it doesn't (the top bar leaves room, see TopBar). */
+  /* In the top strip. With the sidebar showing: at its right edge, in line
+     with the end of its rows (the sidebar is --side plus its side padding).
+     Hidden: at the top bar's start (the top bar leaves room, see TopBar). */
   .side-toggle {
     position: absolute;
     top: 0;
-    left: var(--toggle-x);
+    left: calc(var(--side) + var(--pad-x) * 0.6 - 1em);
     height: var(--bar);
     display: flex;
     align-items: center;
     color: var(--faint);
     z-index: 2;
+  }
+  .bare .side-toggle {
+    left: var(--toggle-x);
   }
   .side-toggle:hover {
     color: var(--fg);
