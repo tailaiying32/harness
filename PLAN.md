@@ -1254,7 +1254,10 @@ dropped because it pulls in HTML, CSS and JavaScript support: 500 KB to
 307 KB, about 100 KB gzipped). It loads on demand, the first time notes or a
 waiting plan are shown (`LiveMarkdown.svelte` shows the formatted text until
 then). A shown link is followed on click, not edited. Escape leaves the
-editor. Empty notes get the cursor. Saved 400 ms after typing stops and when editing
+editor. Empty notes get the cursor. Lists edit like the message box, through the same
+`editing.ts` functions: Enter in a list starts the next item (an empty item
+steps back a level or ends the list), Tab and Shift+Tab indent, and numbered
+lists stay in order. Tested with key presses in the editor. Saved 400 ms after typing stops and when editing
 ends (`write_notes`), read lazily the first time the tab shows (`read_notes`).
 - Stored in the app's data folder, `notes/<chat id>/notes.md` (`notes.rs`),
   never in the repo; written to a side file then moved into place; 1 MB cap.

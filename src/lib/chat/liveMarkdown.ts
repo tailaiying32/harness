@@ -5,9 +5,10 @@
 // what was typed. Loaded on demand (see LiveMarkdown.svelte): CodeMirror is
 // the biggest library in the window, and only notes and plans use it.
 
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, insertNewline } from "@codemirror/commands";
 import { defineLanguageFacet, Language, LanguageSupport, syntaxTree } from "@codemirror/language";
 import { GFM, parser as markdownParser } from "@lezer/markdown";
+import { indent, newLine, outdent, renumbered, type Edit } from "./editing";
 import { EditorState, type Range } from "@codemirror/state";
 import {
   Decoration,
@@ -224,6 +225,28 @@ const look = EditorView.theme({
   ".cm-md-codeblock": { backgroundColor: "var(--panel)", paddingLeft: "1ch !important" },
 });
 
+/**
+ * The message box's list editing (editing.ts), so notes and plans behave the
+ * same: Enter in a list starts the next item (an empty one steps back or ends
+ * the list), Tab and Shift+Tab indent, and numbered lists stay in order.
+ */
+function listCommand(make: (text: string, start: number, end: number) => Edit | null) {
+  return (view: EditorView): boolean => {
+    const text = view.state.doc.toString();
+    const { from, to } = view.state.selection.main;
+    const edit = make(text, from, to);
+    if (!edit) return false;
+    const done = renumbered(text, edit);
+    view.dispatch({
+      changes: { from: done.from, to: done.to, insert: done.insert },
+      selection: { anchor: done.selStart, head: done.selEnd },
+      scrollIntoView: true,
+      userEvent: "input",
+    });
+    return true;
+  };
+}
+
 /** Makes the editor in `host`. Escape leaves it (blurs), as clicking away does. */
 export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): EditorView {
   return new EditorView({
@@ -240,6 +263,9 @@ export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): Edi
               return true;
             },
           },
+          { key: "Enter", run: (view) => listCommand(newLine)(view) || insertNewline(view) },
+          { key: "Tab", run: listCommand(indent) },
+          { key: "Shift-Tab", run: (view) => listCommand(outdent)(view) || true },
           ...historyKeymap,
           ...defaultKeymap,
         ]),
