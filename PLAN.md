@@ -1164,7 +1164,9 @@ Mocked up on the same board:
 
 A page beside the chat, for localhost frontend work: the user looks at it,
 Claude drives it. One per chat, made the first time either of them opens an
-address; closed by its tab's × or when the chat is deleted. Only http(s) on
+address; closed by its tab's × or when the chat is deleted; put away when
+left unused (below). Not tied to the chat's Claude Code process: an idle close
+leaves the page as it is. Only http(s) on
 `localhost`, `127.0.0.1` or `[::1]` loads; a link anywhere else opens in the
 default browser (`on_navigation`). The side chat gets no browser tools.
 
@@ -1201,6 +1203,14 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   setter as fallback. Errors and warnings (console, uncaught, failed loads of
   scripts and images) are kept in `sessionStorage`, so they outlast a reload;
   `open` clears them, `console` reads and clears them.
+- **Putting away:** a browser off screen and unused (no tool call, not on
+  screen) for 10 minutes has its page closed, which frees its page process
+  (gone 15 to 30 s later); the chat keeps the address and the window keeps
+  its tab. The agent's next tool call, showing the view, or ↻ loads it again,
+  so page state (form input, scroll) is lost, as a reload would. Checked every
+  30 s; `HARNESS_BROWSER_IDLE_SECONDS` overrides the 10 minutes. The user
+  asked for this (2026-11-14): they leave chats sitting with a page open and
+  don't want to remember to close it. **Tested** with 5 s.
 - **Screenshots:** Mac only, `WKWebView takeSnapshotWithConfiguration`, shrunk
   so the long edge is at most 1568 px, sent as PNG. They work while parked.
   Other systems say they aren't supported yet.

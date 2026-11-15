@@ -306,8 +306,9 @@ async fn browser_navigate(state: State<'_, AppState>, chat_id: String, url: Stri
 }
 
 #[tauri::command]
-fn browser_reload(state: State<'_, AppState>, chat_id: String) -> Result<(), String> {
-    state.browsers.reload(&chat_id)
+async fn browser_reload(state: State<'_, AppState>, chat_id: String) -> Result<(), String> {
+    let browsers = state.browsers.clone();
+    browsers.reload(&chat_id).await
 }
 
 /// Where the side panel's body is, in the window's logical pixels, and whether
@@ -391,6 +392,7 @@ fn close_session(state: State<'_, AppState>, session_id: String) {
 ///   HARNESS_WORKTREE_IDLE_SECONDS  time without a message before a worktree is put away
 ///   HARNESS_TRASH_SECONDS      how long put-away branches and trashed chats are kept
 ///   HARNESS_GH                 a program to use in place of GitHub's `gh`
+///   HARNESS_BROWSER_IDLE_SECONDS  time a browser sits off screen and unused before its page is put away
 #[derive(serde::Serialize)]
 struct AutoTest {
     folder: String,

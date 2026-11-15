@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tauri::webview::{PageLoadEvent, WebviewBuilder};
@@ -38,6 +38,11 @@ const LOAD_WAIT: Duration = Duration::from_secs(20);
 const CLICK_SETTLE: Duration = Duration::from_millis(400);
 /// Where a hidden browser is parked: far left of the window, out of sight.
 const PARK_X: f64 = -20_000.0;
+/// How long a browser may sit off screen and unused before its page is put
+/// away (`HARNESS_BROWSER_IDLE_SECONDS` overrides it, for tests).
+const PUT_AWAY_AFTER: Duration = Duration::from_secs(10 * 60);
+/// How often put-away is checked.
+const SWEEP_EVERY: Duration = Duration::from_secs(30);
 /// Longest image edge sent to the agent, in pixels (larger ones are shrunk by it anyway).
 const SHOT_MAX_EDGE: f64 = 1568.0;
 
@@ -150,9 +155,8 @@ pub struct Rect {
 
 struct Page {
     webview: Webview,
-    /// Where the panel body last was; None until the window has placed it.
-    rect: Option<Rect>,
-    visible: bool,
+    /// Last time the agent used it or the user had it on screen.
+    used: Instant,
     loading: bool,
     url: String,
     title: String,
@@ -160,10 +164,27 @@ struct Page {
     load_waiters: Vec<oneshot::Sender<()>>,
 }
 
+/// Where the window wants a chat's browser. Kept apart from the page, so it
+/// holds before the page is made and while it is put away.
+#[derive(Clone, Copy, Default)]
+struct Place {
+    /// The panel body; None until the window has placed it.
+    rect: Option<Rect>,
+    visible: bool,
+}
+
+/// A page put away after sitting unused: what it showed, to bring it back.
+struct Away {
+    url: String,
+    title: String,
+}
+
 struct Inner {
     app: AppHandle,
     out: Out,
     pages: Mutex<HashMap<String, Page>>,
+    places: Mutex<HashMap<String, Place>>,
+    away: Mutex<HashMap<String, Away>>,
     /// Numbers web view labels, which can't hold every character a chat ID may.
     next: Mutex<u64>,
     /// Numbers actions run in pages.
@@ -177,14 +198,80 @@ pub struct Browsers(Arc<Inner>);
 
 impl Browsers {
     pub fn new(app: AppHandle, out: Out) -> Self {
-        Self(Arc::new(Inner {
+        let browsers = Self(Arc::new(Inner {
             app,
             out,
             pages: Mutex::default(),
+            places: Mutex::default(),
+            away: Mutex::default(),
             next: Mutex::new(0),
             next_action: Mutex::new(0),
             make_lock: tokio::sync::Mutex::new(()),
-        }))
+        }));
+        // Put away pages left unused; ends with the app.
+        let weak = Arc::downgrade(&browsers.0);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(SWEEP_EVERY).await;
+                let Some(inner) = weak.upgrade() else { return };
+                Browsers(inner).put_away_unused(put_away_after());
+            }
+        });
+        browsers
+    }
+
+    /// Closes the pages of browsers off screen and unused for `after`, keeping
+    /// their address: going back to one (the user, or the agent's next tool
+    /// call) loads it again. The window isn't told; its tab and address stay.
+    fn put_away_unused(&self, after: Duration) {
+        let visible: Vec<String> = {
+            let places = self.0.places.lock().unwrap();
+            places.iter().filter(|(_, p)| p.visible).map(|(chat, _)| chat.clone()).collect()
+        };
+        let stale: Vec<(String, Page)> = {
+            let mut pages = self.0.pages.lock().unwrap();
+            let now = Instant::now();
+            for chat in &visible {
+                if let Some(page) = pages.get_mut(chat) {
+                    page.used = now;
+                }
+            }
+            let chats: Vec<String> = pages
+                .iter()
+                .filter(|(_, p)| !p.loading && p.load_waiters.is_empty() && now.duration_since(p.used) >= after)
+                .map(|(chat, _)| chat.clone())
+                .collect();
+            chats.into_iter().filter_map(|c| pages.remove(&c).map(|p| (c, p))).collect()
+        };
+        let mut away = self.0.away.lock().unwrap();
+        for (chat, page) in stale {
+            let _ = page.webview.close();
+            away.insert(
+                chat,
+                Away {
+                    url: page.url,
+                    title: page.title,
+                },
+            );
+        }
+    }
+
+    /// Brings a put-away page back, waiting for it to load when `wait` is set.
+    /// False if the chat had nothing put away.
+    async fn bring_back(&self, chat: &str, wait: bool) -> Result<bool, String> {
+        let Some(away) = self.0.away.lock().unwrap().remove(chat) else {
+            return Ok(false);
+        };
+        let url = tauri::Url::parse(&away.url).map_err(|e| e.to_string())?;
+        self.load(chat, url, wait).await?;
+        Ok(true)
+    }
+
+    /// The page is in use now.
+    fn touch(&self, chat: &str) {
+        if let Some(page) = self.0.pages.lock().unwrap().get_mut(chat) {
+            page.used = Instant::now();
+        }
     }
 
     fn send(&self, chat: &str, event: AgentEvent) {
@@ -219,35 +306,61 @@ impl Browsers {
         self.load(chat, url, false).await.map(|_| ())
     }
 
-    pub fn reload(&self, chat: &str) -> Result<(), String> {
+    pub async fn reload(&self, chat: &str) -> Result<(), String> {
+        if self.bring_back(chat, false).await? {
+            return Ok(());
+        }
         let webview = self.webview(chat).ok_or("No page open")?;
+        self.touch(chat);
         webview.reload().map_err(|e| e.to_string())
     }
 
-    /// Where the panel body is, and whether the browser should show there.
+    /// Where the panel body is, and whether the browser should show there. A
+    /// put-away page shown again is loaded again.
     pub fn place(&self, chat: &str, rect: Rect, visible: bool) {
-        let mut pages = self.0.pages.lock().unwrap();
-        let Some(page) = pages.get_mut(chat) else { return };
-        if rect.width > 0.0 && rect.height > 0.0 {
-            page.rect = Some(rect);
+        let place = {
+            let mut places = self.0.places.lock().unwrap();
+            let place = places.entry(chat.to_string()).or_default();
+            if rect.width > 0.0 && rect.height > 0.0 {
+                place.rect = Some(rect);
+            }
+            place.visible = visible;
+            *place
+        };
+        if let Some(webview) = self.webview(chat) {
+            apply_place(&webview, place);
+            if visible {
+                self.touch(chat);
+            }
+        } else if visible && self.0.away.lock().unwrap().contains_key(chat) {
+            let browsers = self.clone();
+            let chat = chat.to_string();
+            tauri::async_runtime::spawn(async move {
+                let _ = browsers.bring_back(&chat, false).await;
+            });
         }
-        page.visible = visible;
-        apply_place(page);
     }
 
-    /// Closes the chat's browser, if it has one.
+    /// Closes the chat's browser, if it has one, put away or not.
     pub fn close(&self, chat: &str) {
         let page = self.0.pages.lock().unwrap().remove(chat);
-        if let Some(page) = page {
+        let away = self.0.away.lock().unwrap().remove(chat);
+        self.0.places.lock().unwrap().remove(chat);
+        if let Some(page) = &page {
             let _ = page.webview.close();
+        }
+        if page.is_some() || away.is_some() {
             self.send(chat, AgentEvent::BrowserClosed {});
         }
     }
 
-    /// The chat's browser, if any, for the window's report after a reload.
+    /// The chat's browser, if any (put away counts), for a chat the window loads later.
     pub fn current(&self, chat: &str) -> Option<(String, String, bool)> {
-        let pages = self.0.pages.lock().unwrap();
-        pages.get(chat).map(|p| (p.url.clone(), p.title.clone(), p.loading))
+        if let Some(p) = self.0.pages.lock().unwrap().get(chat) {
+            return Some((p.url.clone(), p.title.clone(), p.loading));
+        }
+        let away = self.0.away.lock().unwrap();
+        away.get(chat).map(|a| (a.url.clone(), a.title.clone(), false))
     }
 
     // ---- Loading ----
@@ -255,6 +368,8 @@ impl Browsers {
     /// Shows `url` in the chat's browser, making it first if needed, and waits
     /// for the load when `wait` is set. Returns the page's address and title.
     async fn load(&self, chat: &str, url: tauri::Url, wait: bool) -> Result<(String, String), String> {
+        // A new address replaces whatever was put away.
+        self.0.away.lock().unwrap().remove(chat);
         let done = {
             let _guard = self.0.make_lock.lock().await;
             let (tx, rx) = oneshot::channel();
@@ -263,6 +378,7 @@ impl Browsers {
                 let mut pages = self.0.pages.lock().unwrap();
                 match pages.get_mut(chat) {
                     Some(page) => {
+                        page.used = Instant::now();
                         page.load_waiters.extend(tx.take());
                         page.loading = true;
                         page.url = url.to_string();
@@ -359,14 +475,18 @@ impl Browsers {
             chat.to_string(),
             Page {
                 webview: webview.clone(),
-                rect: None,
-                visible: false,
+                used: Instant::now(),
                 loading: true,
                 url: url.to_string(),
                 title: String::new(),
                 load_waiters: vec![loaded],
             },
         );
+        // Where the window last wanted it, if it said already.
+        let place = self.0.places.lock().unwrap().get(chat).copied();
+        if let Some(place) = place {
+            apply_place(&webview, place);
+        }
         webview.navigate(url).map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -423,6 +543,11 @@ impl Browsers {
     /// Runs one of the agent's tool calls. Returns MCP content items.
     pub async fn call(&self, chat: &str, tool: &str, args: &Value) -> Result<Vec<Value>, String> {
         let text = |s: String| Ok(vec![json!({ "type": "text", "text": s })]);
+        // A page put away while unused comes back for the agent's next look.
+        if tool != "open" {
+            self.bring_back(chat, true).await?;
+        }
+        self.touch(chat);
         match tool {
             "open" => {
                 let url = local_url(args["url"].as_str().unwrap_or_default())?;
@@ -516,12 +641,20 @@ impl Browsers {
     }
 }
 
+fn put_away_after() -> Duration {
+    std::env::var("HARNESS_BROWSER_IDLE_SECONDS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(PUT_AWAY_AFTER)
+}
+
 /// Places a page: over the panel body when visible, parked out of sight otherwise.
-fn apply_place(page: &Page) {
-    let Some(rect) = page.rect else { return };
-    let x = if page.visible { rect.x } else { PARK_X };
-    let _ = page.webview.set_size(LogicalSize::new(rect.width, rect.height));
-    let _ = page.webview.set_position(LogicalPosition::new(x, rect.y));
+fn apply_place(webview: &Webview, place: Place) {
+    let Some(rect) = place.rect else { return };
+    let x = if place.visible { rect.x } else { PARK_X };
+    let _ = webview.set_size(LogicalSize::new(rect.width, rect.height));
+    let _ = webview.set_position(LogicalPosition::new(x, rect.y));
 }
 
 /// What `eval_with_callback` hands back: the script's value as JSON. The
@@ -701,7 +834,10 @@ const BRIDGE_JS: &str = r#"
     const s = getComputedStyle(el);
     return s.visibility !== "hidden" && s.display !== "none";
   };
-  const labelOf = (el) => (el.getAttribute("aria-label") || el.innerText || el.value || el.placeholder ||
+  const isField = (el) => el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT";
+  // A field's label never comes from its value: that is shown on its own.
+  const labelOf = (el) => (el.getAttribute("aria-label") || (el.labels && el.labels[0] && el.labels[0].innerText) ||
+    (isField(el) ? "" : el.innerText || el.value) || el.placeholder ||
     el.getAttribute("title") || el.getAttribute("alt") || el.name || el.id || "").trim().replace(/\s+/g, " ").slice(0, 80);
   const refOf = (el) => {
     let r = el.getAttribute("data-harness-ref");
@@ -713,8 +849,7 @@ const BRIDGE_JS: &str = r#"
     if (el.type && el.tagName !== "BUTTON") d += "[type=" + el.type + "]";
     const label = labelOf(el);
     if (label) d += ' "' + label + '"';
-    if ((el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT") && el.value && label !== el.value)
-      d += " value=" + JSON.stringify(String(el.value).slice(0, 60));
+    if (isField(el) && el.value) d += " value=" + JSON.stringify(String(el.value).slice(0, 60));
     if (el.disabled) d += " (disabled)";
     if (el.checked) d += " (checked)";
     return d;
