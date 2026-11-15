@@ -69,6 +69,7 @@ let projects: ProjectRow[] = [
     path: `${home}/code/harness`,
     sessions: [
       row("planning", `${home}/code/harness`, "Idle timeout for chat processes", 1),
+      row("images", `${home}/code/harness`, "Settings list cut off", 1.5),
       row("saved", `${home}/code/harness`, "Add a sidebar with saved chats", 2, "harness/add-a-sidebar-9f2c1e", "open"),
       row("working", `${home}/code/harness`, "Why is the idle timer late when hidden?", 9, "harness/idle-timer-late-4be0a1"),
       row("waiting", `${home}/code/harness`, "Bump dependencies and run the tests", 30),
@@ -145,6 +146,62 @@ const movedChat: AgentEvent[] = [
   text("v3", "Done: the core now times it."),
   ended,
 ];
+
+/** A chat with a pasted screenshot, and one a tool took. For images. */
+const imagesChat: AgentEvent[] = [
+  {
+    kind: "user_message",
+    text: "The theme list on the settings page gets cut off at the bottom. [image 1]",
+    images: [{ n: 1, media_type: "image/png" }],
+  },
+  { kind: "session_started", agent_session_id: "agent-images", model: "claude-opus-5-5", mode: "default" },
+  text("i1", "I see it: the list stops at Tokyo Night and there's no way to scroll. Checking the layout."),
+  tool("it1", "Read", { file_path: `${home}/code/harness/src/lib/Settings.svelte` }),
+  result("it1", "…"),
+  text("i2", "The list had a fixed height taller than the window. It now fills the space left and scrolls. Here's the page after the change:"),
+  tool("it2", "Edit", {
+    file_path: `${home}/code/harness/src/lib/Settings.svelte`,
+    old_string: "  height: 640px;",
+    new_string: "  flex: 1;\n  min-height: 0;\n  overflow-y: auto;",
+  }),
+  result("it2", "ok"),
+  tool("it3", "Read", { file_path: `${home}/code/harness/after.png` }),
+  {
+    kind: "tool_result",
+    tool_id: "it3",
+    content: [{ type: "image_ref", n: 2, media_type: "image/png" }],
+    is_error: false,
+    parent_tool_id: null,
+  },
+  ended,
+];
+
+/** Images pasted in the preview, by chat, numbered from 1 like the core does. */
+const pasted = new Map<string, ArrayBuffer[]>();
+
+/** A stand-in screenshot for the sample chat's images. */
+async function sampleImage(n: number): Promise<ArrayBuffer> {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1440;
+  canvas.height = 900;
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = "#111210";
+  ctx.fillRect(0, 0, 1440, 900);
+  ctx.fillStyle = "#1a1b17";
+  ctx.fillRect(380, 200, 420, n === 1 ? 700 : 470);
+  ctx.font = "20px Menlo, monospace";
+  ["Harness Dark", "Harness Light", "Solarized Dark", "Solarized Light", "Gruvbox Dark", "Gruvbox Light", "Dracula", "Nord", "Tokyo Ni"]
+    .slice(0, n === 1 ? 9 : 8)
+    .forEach((name, i) => {
+      ctx.fillStyle = i === 0 ? "#d9a35b" : "#cfccc2";
+      ctx.fillText(name, 404, 245 + i * 72);
+    });
+  ctx.fillStyle = "#d9a35b";
+  ctx.font = "bold 26px Menlo, monospace";
+  ctx.fillText(n === 1 ? "Settings (before)" : "Settings (after)", 380, 120);
+  const blob = await new Promise<Blob>((done) => canvas.toBlob((b) => done(b!), "image/png"));
+  return blob.arrayBuffer();
+}
 
 const savedChat: AgentEvent[] = [
   { kind: "user_message", text: "Add a sidebar with saved chats. Keep the look." },
@@ -385,7 +442,7 @@ const commands: Record<string, (args: Args) => unknown> = {
   },
   load_session: (args) => ({
     session: [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === args.sessionId),
-    events: args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : args.sessionId === "looks" ? looksChat : args.sessionId === "waiting" ? askingChat : args.sessionId === "working" ? movedChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
+    events: args.sessionId === "images" ? imagesChat : args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : args.sessionId === "looks" ? looksChat : args.sessionId === "waiting" ? askingChat : args.sessionId === "working" ? movedChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
     live: args.sessionId === "planning" || args.sessionId === "waiting",
   }),
   rename_session: (args) => {
@@ -435,6 +492,27 @@ const commands: Record<string, (args: Args) => unknown> = {
   "plugin:dialog|open": () => null,
   "plugin:opener|open_url": () => undefined,
   "plugin:opener|reveal_item_in_dir": () => undefined,
+  save_image: (args: Args) => {
+    const id = String(args.sessionId);
+    const list = pasted.get(id) ?? [];
+    pasted.set(id, list);
+    // Like the core: the full-size original is what's looked at.
+    const shown = args.original?.data ?? args.data;
+    const bytes = Uint8Array.from(atob(String(shown)), (c) => c.charCodeAt(0));
+    list.push(bytes.buffer);
+    // The sample chat's own two images come first.
+    const n = list.length + (id === "images" ? 2 : 0);
+    return { n, media_type: args.mediaType };
+  },
+  read_image: (args: Args) => {
+    const id = String(args.sessionId);
+    const n = Number(args.n);
+    const first = id === "images" ? 2 : 0;
+    if (n <= first) return sampleImage(n);
+    const bytes = pasted.get(id)?.[n - first - 1];
+    if (!bytes) throw "Image gone";
+    return bytes;
+  },
   read_doc: (args: Args) => {
     const path = String(args.path);
     if (path.endsWith("gone.md")) throw "That file doesn't exist.";

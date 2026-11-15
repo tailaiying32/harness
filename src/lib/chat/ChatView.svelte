@@ -3,8 +3,9 @@
   // bottom like a terminal unless the user scrolls up.
   import { onMount, tick, untrack } from "svelte";
   import { contentClick } from "../clicks";
-  import { PLAN_TAB, planOutcome, type Chat, type Item, type ToolItem } from "../state/chat.svelte";
+  import { PLAN_TAB, planOutcome, withImages, type Chat, type Item, type ToolItem } from "../state/chat.svelte";
   import ApprovalCard from "./ApprovalCard.svelte";
+  import ImageWord from "./ImageWord.svelte";
   import Markdown from "./Markdown.svelte";
   import WorkRun from "./WorkRun.svelte";
 
@@ -145,11 +146,12 @@
             elapsed={working && group === lastGroup ? elapsed : 0}
             docs={docPaths}
             onopen={(path) => chat.openPanel(path)}
+            onimage={(image) => chat.openImage(image)}
           />
         </div>
       {:else if group.item.type === "user"}
         <div class="row block mine">
-          <div class="body user">{group.item.text}</div>
+          <div class="body user">{#each withImages(group.item.text, group.item.images) as piece, i (i)}{#if piece.image}<ImageWord image={piece.image} onopen={(image) => chat.openImage(image)} />{:else}{piece.text}{/if}{/each}</div>
           <!-- Claude reads a message sent mid-turn after its current step,
                unless the user would rather cut that step short. -->
           {#if group.item.queued}

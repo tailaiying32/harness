@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{AgentAdapter, EventSink, RunningAgent, SpawnOptions};
+use super::{AgentAdapter, EventSink, ImagePayload, RunningAgent, SpawnOptions};
 use crate::events::{AgentEvent, ApprovalKind, Block, Decision, ModelInfo, SessionState};
 
 /// How many stderr lines to keep for an error message when the process dies.
@@ -499,15 +499,36 @@ impl ClaudeCodeProcess {
     }
 }
 
+/// A user message as Claude Code reads it on stdin. With images, the content
+/// is a list: the images first, in order, then the text.
+fn user_message(text: &str, images: &[ImagePayload], id: &str) -> Value {
+    let content = if images.is_empty() {
+        json!(text)
+    } else {
+        let mut parts: Vec<Value> = images
+            .iter()
+            .map(|image| {
+                json!({
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": image.media_type, "data": image.data_b64 },
+                })
+            })
+            .collect();
+        parts.push(json!({ "type": "text", "text": text }));
+        Value::Array(parts)
+    };
+    json!({
+        "type": "user",
+        "uuid": id,
+        "message": { "role": "user", "content": content },
+    })
+}
+
 impl RunningAgent for ClaudeCodeProcess {
-    fn send_user_message(&self, text: &str, id: &str) -> Result<(), String> {
+    fn send_user_message(&self, text: &str, images: &[ImagePayload], id: &str) -> Result<(), String> {
         // Claude Code echoes the message back under this ID when it takes it in.
         self.sent.lock().unwrap().insert(id.to_string());
-        self.send(json!({
-            "type": "user",
-            "uuid": id,
-            "message": { "role": "user", "content": text },
-        }))?;
+        self.send(user_message(text, images, id))?;
         (self.sink)(AgentEvent::Status {
             state: SessionState::Working,
         });
@@ -916,6 +937,27 @@ mod tests {
         assert_eq!(settings["permissions"]["ask"][0], "EnterWorktree");
         assert!(args.windows(2).any(|w| w == ["--resume", "abc"]));
         assert!(args.windows(2).any(|w| w == ["--permission-mode", "plan"]));
+    }
+
+    #[test]
+    fn a_message_with_images_sends_them_first_and_plain_text_stays_a_string() {
+        let plain = user_message("hi", &[], "u1");
+        assert_eq!(plain["message"]["content"], json!("hi"));
+        assert_eq!(plain["uuid"], "u1");
+
+        let images = [
+            ImagePayload { media_type: "image/png".into(), data_b64: "AAA".into() },
+            ImagePayload { media_type: "image/jpeg".into(), data_b64: "BBB".into() },
+        ];
+        let with = user_message("see [image 1] and [image 2]", &images, "u2");
+        assert_eq!(
+            with["message"]["content"],
+            json!([
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "AAA" } },
+                { "type": "image", "source": { "type": "base64", "media_type": "image/jpeg", "data": "BBB" } },
+                { "type": "text", "text": "see [image 1] and [image 2]" },
+            ])
+        );
     }
 
     #[test]

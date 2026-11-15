@@ -10,8 +10,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::agent::{AgentAdapter, EventSink, RunningAgent, SpawnOptions};
+use crate::agent::{AgentAdapter, EventSink, ImagePayload, RunningAgent, SpawnOptions};
 use crate::events::{AgentEvent, Block, Decision, Envelope, SessionState};
+use crate::images::{self, ImageRef, Images};
 use crate::store::Store;
 use crate::worktree;
 
@@ -94,6 +95,8 @@ struct Inner {
     timings: Timings,
     /// The app's data folder; worktrees are kept in it.
     data_dir: PathBuf,
+    /// Pasted images and images from tool results.
+    images: Images,
     /// Finds a branch's pull request (GitHub in the app, a stand-in in tests).
     pr_lookup: PrLookup,
     /// One cleanup sweep at a time.
@@ -135,6 +138,7 @@ impl SessionManager {
             sessions: Mutex::default(),
             start_lock: tokio::sync::Mutex::default(),
             timings,
+            images: Images::new(data_dir.join("images")),
             data_dir,
             pr_lookup,
             sweep_lock: tokio::sync::Mutex::default(),
@@ -142,6 +146,19 @@ impl SessionManager {
             pr_links: Mutex::default(),
             pr_learn_lock: tokio::sync::Mutex::default(),
         }))
+    }
+
+    /// Chats' images.
+    pub fn images(&self) -> &Images {
+        &self.0.images
+    }
+
+    /// Removes images left by chats that don't exist. Run once at start.
+    pub fn sweep_images(&self) {
+        match self.0.store.session_ids() {
+            Ok(ids) => self.0.images.sweep(&ids),
+            Err(e) => eprintln!("harness: couldn't list chats to tidy images: {e}"),
+        }
     }
 
     /// The agent adapter, for calls that don't belong to one chat.
@@ -191,9 +208,10 @@ impl SessionManager {
         model: Option<String>,
         effort: Option<String>,
         text: &str,
+        images: &[u32],
         message_id: &str,
     ) -> Result<(), String> {
-        self.send_inner(session_id, binary, project_path, mode, model, effort, text, message_id, true)
+        self.send_inner(session_id, binary, project_path, mode, model, effort, text, images, message_id, true)
             .await
     }
 
@@ -210,10 +228,27 @@ impl SessionManager {
         // None keeps the saved one.
         effort: Option<String>,
         text: &str,
+        // Numbers of the chat's saved images to send with the text.
+        images: &[u32],
         message_id: &str,
         show: bool,
     ) -> Result<(), String> {
         let inner = &self.0;
+
+        // Read before anything is saved: a missing image fails the send.
+        let mut refs = Vec::new();
+        let mut payloads = Vec::new();
+        for &n in images {
+            let (bytes, media_type) = inner.images.read(session_id, n)?;
+            refs.push(ImageRef {
+                n,
+                media_type: media_type.clone(),
+            });
+            payloads.push(ImagePayload {
+                media_type,
+                data_b64: images::encode_base64(&bytes),
+            });
+        }
 
         // A process that was asked to exit can't take messages. Stop it now
         // rather than wait: chats are only closed with nothing running in the
@@ -251,6 +286,7 @@ impl SessionManager {
                 AgentEvent::UserMessage {
                     text: text.to_string(),
                     id: Some(message_id.to_string()),
+                    images: refs,
                 },
             );
         }
@@ -310,7 +346,7 @@ impl SessionManager {
             }
         }
 
-        self.agent(session_id)?.send_user_message(text, message_id)
+        self.agent(session_id)?.send_user_message(text, &payloads, message_id)
     }
 
     /// Waits for the chat's process to be gone, after a stop.
@@ -401,9 +437,37 @@ impl SessionManager {
                 }
                 _ => {}
             }
+            manager.keep_tool_images(&id, &mut event);
             event.cap_tool_result(TOOL_RESULT_MAX_CHARS);
             manager.record(&id, event);
         })
+    }
+
+    /// Moves the pictures in a tool result into the image store, leaving
+    /// `{"type":"image_ref","n":..,"media_type":..}` in their place, so neither
+    /// the window nor the saved history carries the picture itself.
+    fn keep_tool_images(&self, session_id: &str, event: &mut AgentEvent) {
+        let AgentEvent::ToolResult { content, .. } = event else {
+            return;
+        };
+        let Some(parts) = content.as_array_mut() else {
+            return;
+        };
+        for part in parts.iter_mut().filter(|p| p["type"] == "image") {
+            let source = &part["source"];
+            let kept = match (source["type"].as_str(), source["media_type"].as_str(), source["data"].as_str()) {
+                (Some("base64"), Some(media_type), Some(data)) => images::decode_base64(data)
+                    .and_then(|bytes| self.0.images.save(session_id, media_type, &bytes)),
+                _ => Err("not a base64 image".to_string()),
+            };
+            *part = match kept {
+                Ok(image) => serde_json::json!({ "type": "image_ref", "n": image.n, "media_type": image.media_type }),
+                Err(e) => {
+                    eprintln!("harness: couldn't keep an image from a tool: {e}");
+                    serde_json::json!({ "type": "text", "text": "[image could not be saved]" })
+                }
+            };
+        }
     }
 
     fn on_state(&self, session_id: &str, run: u64, state: &SessionState) {
@@ -698,8 +762,12 @@ mod tests {
     }
 
     impl RunningAgent for FakeAgent {
-        fn send_user_message(&self, text: &str, _id: &str) -> Result<(), String> {
-            self.told.lock().unwrap().push(format!("say {text}"));
+        fn send_user_message(&self, text: &str, images: &[ImagePayload], _id: &str) -> Result<(), String> {
+            let mut said = format!("say {text}");
+            for image in images {
+                said += &format!(" +{}:{}", image.media_type, image.data_b64);
+            }
+            self.told.lock().unwrap().push(said);
             (self.sink)(AgentEvent::Status {
                 state: SessionState::Working,
             });
@@ -812,7 +880,7 @@ mod tests {
     impl Rig {
         async fn send(&self, text: &str) {
             self.manager
-                .send_message("s1", "claude".into(), "/work".into(), Some("plan".into()), None, None, text, "m1")
+                .send_message("s1", "claude".into(), "/work".into(), Some("plan".into()), None, None, text, &[], "m1")
                 .await
                 .unwrap();
         }
@@ -858,11 +926,71 @@ mod tests {
             vec![AgentEvent::UserMessage {
                 text: "Hello there".into(),
                 id: Some("m1".into()),
+                images: vec![],
             }]
         );
         // A second message goes to the same process.
         rig.send("And again").await;
         assert_eq!(rig.fake.spawns.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn images_go_with_the_message_and_only_their_numbers_are_saved() {
+        let rig = rig(LONG);
+        let images = rig.manager.images();
+        images.save("s1", "image/png", b"one").unwrap();
+        images.save("s1", "image/jpeg", b"two").unwrap();
+        rig.manager
+            .send_message("s1", "claude".into(), "/work".into(), None, None, None, "[image 2] [image 1]", &[2, 1], "m1")
+            .await
+            .unwrap();
+        assert_eq!(rig.told(), vec!["say [image 2] [image 1] +image/jpeg:dHdv +image/png:b25l"]);
+        let AgentEvent::UserMessage { images, .. } = &rig.store.events("s1").unwrap()[0] else {
+            panic!("not a user message");
+        };
+        assert_eq!(
+            images,
+            &vec![
+                ImageRef { n: 2, media_type: "image/jpeg".into() },
+                ImageRef { n: 1, media_type: "image/png".into() },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_image_fails_the_send_before_anything_is_saved() {
+        let rig = rig(LONG);
+        let sent = rig
+            .manager
+            .send_message("s1", "claude".into(), "/work".into(), None, None, None, "[image 4]", &[4], "m1")
+            .await;
+        assert!(sent.is_err());
+        assert!(rig.told().is_empty());
+        assert!(rig.store.session("s1").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn pictures_in_tool_results_are_kept_as_files_not_in_history() {
+        let rig = rig(LONG);
+        rig.send("Look at the logo").await;
+        rig.agent_says(AgentEvent::ToolResult {
+            tool_id: "t1".into(),
+            content: serde_json::json!([
+                { "type": "text", "text": "a picture" },
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "cGljdHVyZQ==" } },
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "not base64!" } },
+            ]),
+            is_error: false,
+            parent_tool_id: None,
+        });
+        let saved = rig.store.events("s1").unwrap();
+        let AgentEvent::ToolResult { content, .. } = saved.last().unwrap() else {
+            panic!("not a tool result");
+        };
+        assert_eq!(content[1], serde_json::json!({ "type": "image_ref", "n": 1, "media_type": "image/png" }));
+        assert_eq!(content[2]["type"], "text");
+        assert!(!serde_json::to_string(content).unwrap().contains("cGljdHVyZQ"));
+        assert_eq!(rig.manager.images().read("s1", 1).unwrap().0, b"picture".to_vec());
     }
 
     #[tokio::test]
@@ -1080,7 +1208,7 @@ mod tests {
     impl Rig {
         async fn send_at(&self, folder: &Path, mode: &str, text: &str) {
             self.manager
-                .send_message("s1", "claude".into(), folder.into(), Some(mode.into()), None, None, text, "m")
+                .send_message("s1", "claude".into(), folder.into(), Some(mode.into()), None, None, text, &[], "m")
                 .await
                 .unwrap();
         }
@@ -1316,7 +1444,7 @@ mod tests {
         rig.background(1);
         rig.turn_ends();
         rig.manager
-            .send_message("s2", "claude".into(), "/work".into(), None, None, None, "hi", "m2")
+            .send_message("s2", "claude".into(), "/work".into(), None, None, None, "hi", &[], "m2")
             .await
             .unwrap();
         rig.agent_says(AgentEvent::TurnEnded {

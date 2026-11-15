@@ -7,6 +7,7 @@
   import ChatView from "./lib/chat/ChatView.svelte";
   import Composer from "./lib/chat/Composer.svelte";
   import SidePanel from "./lib/panel/SidePanel.svelte";
+  import ImageViewer from "./lib/ImageViewer.svelte";
   import Settings from "./lib/Settings.svelte";
   import Sidebar from "./lib/Sidebar.svelte";
   import {
@@ -22,6 +23,7 @@
     type WorktreeChoice,
     type SetupInfo,
   } from "./lib/ipc";
+  import { attach } from "./lib/chat/images";
   import { loadCachedModels, saveCachedModels } from "./lib/models";
   import { AppState } from "./lib/state/app.svelte";
   import type { Chat } from "./lib/state/chat.svelte";
@@ -118,6 +120,20 @@
   // Self-test: send scripted messages through this same window, answer every
   // approval, then write out what the window ended up showing. Turned on by
   // environment variables; see `autotest` in src-tauri/src/lib.rs.
+  /** For the self-test: a PNG of a word in large black letters on white. */
+  async function pictureOf(word: string): Promise<Blob> {
+    const canvas = document.createElement("canvas");
+    canvas.width = 800;
+    canvas.height = 300;
+    const ctx = canvas.getContext("2d")!;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, 800, 300);
+    ctx.fillStyle = "#000000";
+    ctx.font = "bold 96px sans-serif";
+    ctx.fillText(word, 40, 190);
+    return new Promise((resolve) => canvas.toBlob((blob) => resolve(blob!), "image/png"));
+  }
+
   async function runSelfTest() {
     const test = await autotest();
     if (!test) return;
@@ -140,6 +156,8 @@
     let worktreeAnswer: WorktreeChoice | null = null;
     let stopAfter = 0;
     let background = false;
+    /** `[image n]` words of pictures attached for the next message. */
+    let imageWords: string[] = [];
     // Timed by the core: a hidden window's own timers run late.
     const pause = (ms: number) => autotestWait(ms);
     /** Resolves when the chat's process has exited. Driven by the event, not a timer. */
@@ -171,11 +189,12 @@
       //   @delete <n>    delete the nth chat in the sidebar
       //   @close         shut the open chat's process down, as going idle does
       //   @exited        wait until the open chat's process has exited (idle shutdown)
+      //   @image <word>  attach a picture of <word>, as a paste would, to the next message
       //   @wait <ms>     do nothing for a while. With the window hidden or the screen
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
-        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait)(?:\s+(\S+))?$/) ??
+        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|image)(?:\s+(\S+))?$/) ??
         [];
       const current = app.current;
       if (directive === "model") await current.changeModel(value);
@@ -200,6 +219,7 @@
       if (directive === "open") await app.open(nth(value) ?? "");
       if (directive === "delete") await app.remove(nth(value) ?? "");
       if (directive === "wait") await pause(Number(value));
+      if (directive === "image") imageWords.push(await attach(current, await pictureOf(value)));
       if (directive === "close") await closeSession(current.sessionId);
       if (directive === "close" || directive === "exited") await exited(current);
       if (directive) {
@@ -210,7 +230,8 @@
       current.autoAnswer = answer;
       current.autoWorktree = worktreeAnswer;
       const done = new Promise<void>((resolve) => (current.onTurnEnd = resolve));
-      await current.send(message);
+      await current.send([...imageWords, message].join(" "));
+      imageWords = [];
       if (stopAfter) void pause(stopAfter).then(() => current.stop());
       stopAfter = 0;
       if (background) {
@@ -268,7 +289,12 @@
   }
 </script>
 
-<svelte:window onkeydown={onKey} />
+<!-- A file dropped anywhere but the message box would replace the page. -->
+<svelte:window
+  onkeydown={onKey}
+  ondragover={(e) => e.dataTransfer?.types.includes("Files") && e.preventDefault()}
+  ondrop={(e) => e.dataTransfer?.types.includes("Files") && e.preventDefault()}
+/>
 
 <div class="app" class:paneled={panelOpen}>
   <Sidebar {app} onsettings={() => (showSettings = !showSettings)} />
@@ -294,6 +320,11 @@
     {/key}
   {/if}
   <!-- Drawn over the chat and panel, which stay as they are underneath. -->
+  {#if chat.viewing}
+    {#key chat.sessionId}
+      <ImageViewer {chat} />
+    {/key}
+  {/if}
   {#if showSettings}
     <Settings {app} bind:darkTheme bind:lightTheme bind:appearance bind:size bind:fontSize onclose={() => (showSettings = false)} />
   {/if}

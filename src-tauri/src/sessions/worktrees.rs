@@ -363,6 +363,7 @@ impl SessionManager {
             Some(saved.model),
             None,
             &note,
+            &[],
             &message_id,
             false,
         )
@@ -655,6 +656,7 @@ impl SessionManager {
         if let Err(e) = self.0.store.delete_session(&row.id) {
             eprintln!("harness: couldn't delete a chat: {e}");
         }
+        self.0.images.delete_session(&row.id);
         self.0.pr_checked.lock().unwrap().remove(&row.id);
     }
 }

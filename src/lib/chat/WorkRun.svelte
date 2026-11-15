@@ -16,7 +16,9 @@
     title,
     type ToolCall,
   } from "../tools";
+  import type { ImageRef } from "../ipc";
   import Clipped from "./Clipped.svelte";
+  import ImageWord from "./ImageWord.svelte";
 
   let {
     tools,
@@ -26,6 +28,7 @@
     elapsed = 0,
     docs = [],
     onopen,
+    onimage,
   }: {
     tools: ToolCall[];
     root?: string;
@@ -36,7 +39,13 @@
     docs?: string[];
     /** Opens a file's tab. */
     onopen?: (path: string) => void;
+    /** Opens an image's tab. */
+    onimage?: (image: ImageRef) => void;
   } = $props();
+
+  // Pictures the run's tools handed Claude. Their words sit after the summary,
+  // outside its cut-off, so they always show while the run is folded.
+  const images = $derived(tools.flatMap((tool) => tool.images ?? []));
 
   let open = $state(false);
 
@@ -91,6 +100,9 @@
       {#if counts.added > 0}<span class="ok">+{counts.added}</span>{/if}
       {#if counts.removed > 0}<span class="bad">-{counts.removed}</span>{/if}
     </span>
+    {#if images.length}
+      <span class="images">{#each images as image (image.n)}<ImageWord {image} onopen={onimage} />{/each}</span>
+    {/if}
     {#if active}<span class="faint">{elapsed}s</span>{/if}
     <span class="faint">{open ? "▾" : "▸"}</span>
   </div>
@@ -110,6 +122,7 @@
             {:else}
               <span class="target">{name.target}</span>
             {/if}
+            {#each tool.images ?? [] as image (image.n)}<ImageWord {image} onopen={onimage} />{/each}
             {#if tool.result === undefined}<span class="faint">{active ? "running" : "waiting"}</span>{/if}
             {#if skipped(tool)}<span class="faint">not run</span>{:else if tool.isError && !tool.declined}<span class="bad">failed</span>{/if}
           </div>
@@ -154,6 +167,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .images {
+    display: flex;
+    gap: 1ch;
+    flex-shrink: 0;
   }
   .ok {
     color: var(--ok);
