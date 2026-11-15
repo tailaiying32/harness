@@ -540,6 +540,11 @@ Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-roll
   main folder was on when the chat began (`start_branch`, saved on the first
   message); then the chat resumes there (same session ID: `--resume` works
   from any folder) with a hidden note telling Claude where it is.
+- **A message instead of a pick** (2026-11-14): the question closes as
+  "skipped" with nothing saved, and the call is turned down with "read the
+  message; ask again before any file changes if the work still needs a
+  worktree". Before, the message queued behind the open call, and a later
+  "New worktree" stopped the process and lost it.
 - **Ignored files** (builds, packages, `.env`) are copied from the main folder
   with `clonefile` (copy-on-write, no space until changed); off APFS, files
   are copied plainly and folders skipped. Folders holding a `.git` (nested
@@ -990,6 +995,14 @@ Mocked up on the same board:
   `Status: Working`, which covers a message taken in after a turn has ended.
   Replay gives the same order. A chat reloaded with no live process clears
   every mark; a message lost because the process died gets no warning.
+- **A message answers what Claude waits on** (2026-11-14). Sent while a plan,
+  tool approval or question is open, it first turns each one down with "the
+  user sent a message instead; read it and go by it" (a plan: keep
+  planning), then goes in as usual, so Claude reads it next. Left open, the
+  request held the turn and the message queued behind it, which looked
+  stuck. The open requests come from the adapter (`open_requests`), so the
+  ones it answers itself are never touched. **Tested** live by the user
+  (2026-11-15): a plan and the worktree question, each answered by typing.
 - **Plans always open in the side panel** (2026-11-13, the user's request).
   Every launch appends an instruction to Claude Code's system prompt
   (`PLAN_INSTRUCTION` in `claude_code.rs`): when asked for a plan in any mode,

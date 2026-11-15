@@ -34,6 +34,8 @@ const TOOL_RESULT_MAX_CHARS: usize = 20_000;
 const PR_CREATE: &str = "gh pr create";
 /// How long a process asked to exit may take before it is stopped.
 const CLOSE_GRACE: Duration = Duration::from_secs(30);
+/// What a request is told when the user writes instead of answering it.
+const REPLIED: &str = "The user sent a message instead of answering this. Read it and go by it.";
 /// How long a new message waits for a stopped process to exit.
 const STOP_WAIT: Duration = Duration::from_secs(10);
 /// On quit, how long processes that had to be stopped get to exit.
@@ -385,7 +387,34 @@ impl SessionManager {
             }
         }
 
-        self.agent(session_id)?.send_user_message(text, &payloads, message_id)
+        let agent = self.agent(session_id)?;
+        if show {
+            self.answer_by_message(session_id, agent.as_ref());
+        }
+        agent.send_user_message(text, &payloads, message_id)
+    }
+
+    /// The user wrote while Claude waited on a question (a plan, a tool, the
+    /// worktree question...). The message is the answer: each open request is
+    /// turned down with a note pointing Claude at the message, which follows.
+    /// Left open, they would hold the turn, and the message queued behind it.
+    fn answer_by_message(&self, session_id: &str, agent: &dyn RunningAgent) {
+        self.reply_closes_ask(session_id, agent);
+        for request_id in agent.open_requests() {
+            if agent
+                .answer_approval(&request_id, Decision::Deny, Some(REPLIED.to_string()), None, None)
+                .is_ok()
+            {
+                self.record(
+                    session_id,
+                    AgentEvent::ApprovalAnswered {
+                        request_id,
+                        decision: Decision::Deny,
+                        answers: None,
+                    },
+                );
+            }
+        }
     }
 
     /// Waits for the chat's process to be gone, after a stop.
@@ -803,12 +832,15 @@ mod tests {
         told: Arc<Mutex<Vec<String>>>,
         /// Plays a process that ignores being asked to exit.
         hang_on_close: Arc<AtomicBool>,
+        /// Requests waiting for an answer, as the real adapter keeps them.
+        open: Arc<Mutex<Vec<String>>>,
     }
 
     struct FakeAgent {
         sink: EventSink,
         told: Arc<Mutex<Vec<String>>>,
         hang_on_close: Arc<AtomicBool>,
+        open: Arc<Mutex<Vec<String>>>,
     }
 
     impl RunningAgent for FakeAgent {
@@ -832,11 +864,15 @@ mod tests {
             _: Option<String>,
         ) -> Result<(), String> {
             let decision = format!("{decision:?}").to_lowercase();
+            self.open.lock().unwrap().retain(|id| id != request_id);
             self.told.lock().unwrap().push(format!("answer {request_id} {decision}"));
             (self.sink)(AgentEvent::Status {
                 state: SessionState::Working,
             });
             Ok(())
+        }
+        fn open_requests(&self) -> Vec<String> {
+            self.open.lock().unwrap().clone()
         }
         fn interrupt(&self) -> Result<(), String> {
             self.told.lock().unwrap().push("stop".into());
@@ -875,7 +911,18 @@ mod tests {
         fn spawn(&self, opts: SpawnOptions, sink: EventSink) -> Result<Box<dyn RunningAgent>, String> {
             self.spawns.lock().unwrap().push((opts.resume_id, opts.mode));
             self.folders.lock().unwrap().push(opts.project_path);
-            self.sinks.lock().unwrap().push(sink.clone());
+            // What the test plays as the agent passes the adapter first, which
+            // keeps the requests that wait for an answer.
+            let open = self.open.clone();
+            let inner = sink.clone();
+            self.sinks.lock().unwrap().push(Arc::new(move |event: AgentEvent| {
+                match &event {
+                    AgentEvent::ApprovalRequest { request_id, .. } => open.lock().unwrap().push(request_id.clone()),
+                    AgentEvent::ApprovalCancelled { request_id } => open.lock().unwrap().retain(|id| id != request_id),
+                    _ => {}
+                }
+                inner(event)
+            }));
             sink(AgentEvent::Status {
                 state: SessionState::Starting,
             });
@@ -883,6 +930,7 @@ mod tests {
                 sink,
                 told: self.told.clone(),
                 hang_on_close: self.hang_on_close.clone(),
+                open: self.open.clone(),
             }))
         }
         fn list_models(&self, _: &Path) -> Result<Vec<ModelInfo>, String> {
@@ -1139,6 +1187,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_message_sent_while_claude_waits_answers_what_it_waits_on() {
+        let rig = rig(LONG);
+        rig.send("make a plan").await;
+        rig.agent_says(AgentEvent::ApprovalRequest {
+            request_id: "p1".into(),
+            approval: crate::events::ApprovalKind::Plan,
+            tool_name: "ExitPlanMode".into(),
+            title: "ExitPlanMode".into(),
+            input: serde_json::json!({ "plan": "do it" }),
+            tool_id: None,
+            always_label: None,
+        });
+        rig.send("smaller, please").await;
+        let told = rig.told();
+        let at = |line: &str| told.iter().position(|t| t == line).unwrap_or_else(|| panic!("{line}: {told:?}"));
+        assert!(at("answer p1 deny") < at("say smaller, please"));
+        let saved = rig.store.events("s1").unwrap();
+        assert!(saved.iter().any(|e| matches!(
+            e,
+            AgentEvent::ApprovalAnswered { request_id, decision: Decision::Deny, .. } if request_id == "p1"
+        )));
+        // Nothing open: a message is just a message.
+        rig.send("thanks").await;
+        assert_eq!(rig.told().iter().filter(|t| t.starts_with("answer")).count(), 1);
+    }
+
+    #[tokio::test]
     async fn deleting_a_chat_forgets_it() {
         let rig = rig(LONG);
         rig.send("hi").await;
@@ -1336,6 +1411,34 @@ mod tests {
         // The agent may ask again later, for other work.
         rig.agent_says(worktree_call("r3", "other"));
         assert_eq!(asks(&rig), 2);
+    }
+
+    #[tokio::test]
+    async fn a_message_answers_the_worktree_question_with_nothing_chosen() {
+        let rig = rig(LONG);
+        let repo = scratch_repo();
+        rig.send_at(&repo, "default", "fix it").await;
+        rig.agent_says(worktree_call("r1", "fix it"));
+        rig.agent_says(worktree_call("r2", "fix it"));
+        rig.send_at(&repo, "default", "actually, rename it too").await;
+
+        let told = rig.told();
+        let at = |line: &str| told.iter().position(|t| t == line).unwrap_or_else(|| panic!("{line}: {told:?}"));
+        assert!(at("answer r1 deny") < at("say actually, rename it too"));
+        assert!(at("answer r2 deny") < at("say actually, rename it too"));
+        // Each request is answered once: the worktree's note, not the general one.
+        assert_eq!(told.iter().filter(|t| t.starts_with("answer r1")).count(), 1);
+        assert_eq!(
+            rig.saw(|e| matches!(e, AgentEvent::ApprovalAnswered { request_id, .. } if request_id == "r1")),
+            1
+        );
+        assert!(rig.manager.choose_worktree("s1", "r1", "here", "claude".into()).await.is_err());
+        assert!(rig.worktree().is_none());
+        assert_eq!(rig.store.chat_git("s1").unwrap().unwrap().choice, None);
+
+        // Claude may ask again after reading the message.
+        rig.agent_says(worktree_call("r3", "fix it"));
+        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::WorktreeAsk { .. })), 2);
     }
 
     #[tokio::test]
