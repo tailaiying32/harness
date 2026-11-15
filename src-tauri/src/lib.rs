@@ -2,6 +2,7 @@ mod agent;
 mod docs;
 mod events;
 mod github;
+mod images;
 mod locate;
 mod sessions;
 mod side_chat;
@@ -146,6 +147,8 @@ async fn send_message(
     model: Option<String>,
     effort: Option<String>,
     text: String,
+    // Numbers of the chat's saved images to send with it.
+    images: Option<Vec<u32>>,
     message_id: String,
 ) -> Result<(), String> {
     let binary = state
@@ -162,7 +165,7 @@ async fn send_message(
     // The manager is cloned so nothing borrowed from `state` is held while waiting.
     let sessions = state.sessions.clone();
     sessions
-        .send_message(&session_id, binary, project_path, mode, model, effort, &text, &message_id)
+        .send_message(&session_id, binary, project_path, mode, model, effort, &text, &images.unwrap_or_default(), &message_id)
         .await
 }
 
@@ -237,6 +240,48 @@ fn set_model(state: State<'_, AppState>, session_id: String, model: String) -> R
 #[tauri::command]
 fn set_effort(state: State<'_, AppState>, session_id: String, effort: String) -> Result<(), String> {
     state.sessions.set_effort(&session_id, &effort)
+}
+
+/// Keeps a pasted or dropped image for a chat. `data` is base64. When it was
+/// shrunk to fit the agent's limits, `original` is the full-size one, kept for
+/// looking at. Returns the image's number, which its `[image n]` word uses.
+#[tauri::command]
+async fn save_image(
+    state: State<'_, AppState>,
+    session_id: String,
+    media_type: String,
+    data: String,
+    original: Option<OriginalImage>,
+) -> Result<images::ImageRef, String> {
+    let sessions = state.sessions.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = images::decode_base64(&data)?;
+        let original = match &original {
+            Some(o) => Some((o.media_type.as_str(), images::decode_base64(&o.data)?)),
+            None => None,
+        };
+        let original = original.as_ref().map(|(t, b)| (*t, b.as_slice()));
+        sessions.images().save_with_original(&session_id, &media_type, &bytes, original)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(serde::Deserialize)]
+struct OriginalImage {
+    media_type: String,
+    data: String,
+}
+
+/// A chat's image as raw bytes, for looking at: the full-size original of a
+/// shrunk paste.
+#[tauri::command]
+async fn read_image(state: State<'_, AppState>, session_id: String, n: u32) -> Result<tauri::ipc::Response, String> {
+    let sessions = state.sessions.clone();
+    let (bytes, _) = tauri::async_runtime::spawn_blocking(move || sessions.images().read_largest(&session_id, n))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// A markdown file's text, for a link opened in the side panel.
@@ -363,6 +408,11 @@ pub fn run() {
             let adapter = Arc::new(ClaudeCodeAdapter);
             let side = SideChats::new(adapter.clone(), store.clone(), out.clone());
             let sessions = SessionManager::new(adapter, store.clone(), out, dir);
+            // Images of chats that are gone, and of new chats never sent.
+            {
+                let sessions = sessions.clone();
+                tauri::async_runtime::spawn_blocking(move || sessions.sweep_images());
+            }
             // The worktree cleanup pass: at start, then every hour.
             {
                 let sessions = sessions.clone();
@@ -406,6 +456,8 @@ pub fn run() {
             side_end,
             close_session,
             read_doc,
+            save_image,
+            read_image,
             autotest,
             autotest_wait,
             autotest_report,

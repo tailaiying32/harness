@@ -17,6 +17,7 @@ import {
   type AgentEvent,
   type ApprovalKind,
   type Decision,
+  type ImageRef,
   type Mode,
   type PrInfo,
   type SessionRow,
@@ -34,6 +35,8 @@ export type UserItem = {
   messageId?: string;
   /** Sent while Claude was working, and not taken in yet. */
   queued?: boolean;
+  /** Images sent with it; `[image n]` in the text points at them. */
+  images?: ImageRef[];
 };
 export type TextItem = { id: number; type: "text"; messageId: string; text: string; streaming: boolean };
 export type ThinkingItem = { id: number; type: "thinking"; text: string };
@@ -77,6 +80,32 @@ export type DocTab = { path: string; text: string; /** Its tab was closed; the t
 
 /** The plan's tab in the side panel. Documents use their file path. */
 export const PLAN_TAB = "plan";
+
+/** The `[image n]` words in a text, in order. */
+export const IMAGE_WORD = /\[image (\d+)\]/g;
+
+/** A text in pieces: plain text, and the words of the given images. */
+export function withImages(text: string, images: ImageRef[] = []): { text: string; image?: ImageRef }[] {
+  if (!images.length) return [{ text }];
+  const out: { text: string; image?: ImageRef }[] = [];
+  let at = 0;
+  for (const match of text.matchAll(IMAGE_WORD)) {
+    const image = images.find((i) => i.n === Number(match[1]));
+    if (!image) continue;
+    out.push({ text: text.slice(at, match.index) }, { text: match[0], image });
+    at = match.index + match[0].length;
+  }
+  out.push({ text: text.slice(at) });
+  return out;
+}
+
+/** The image refs a tool result carries in place of its pictures. */
+function imagesIn(content: unknown): ImageRef[] {
+  if (!Array.isArray(content)) return [];
+  return content
+    .filter((part) => part?.type === "image_ref" && typeof part.n === "number")
+    .map((part) => ({ n: part.n, media_type: String(part.media_type) }));
+}
 
 export type Item = UserItem | TextItem | ThinkingItem | ToolItem | ApprovalItem | ErrorItem | NoteItem | SignInItem;
 
@@ -169,6 +198,8 @@ export class Chat {
 
   /** What is typed in the message box but not sent yet. */
   draft = $state("");
+  /** Images pasted into the draft. One goes with the message only if its word is still in the text. */
+  draftImages = $state<ImageRef[]>([]);
   items = $state<Item[]>([]);
   status = $state<SessionState | "none">("none");
   /** The model Claude Code reports it is using. Known after the first turn starts. */
@@ -271,6 +302,30 @@ export class Chat {
     }
     const doc = this.docs.find((d) => d.path === tab);
     if (doc) doc.closed = true;
+  }
+
+  /** Shows a problem in the chat, e.g. an image that couldn't be attached. */
+  showError(text: string): void {
+    this.push({ type: "error", text });
+  }
+
+  // ---- Looking at images ----
+  /** The image drawn over the chat and panel, if any. */
+  viewing = $state<ImageRef | null>(null);
+
+  openImage(image: ImageRef): void {
+    this.viewing = image;
+  }
+
+  /** Every image in the chat, the draft's included, by number: what ← and → step through. */
+  get allImages(): ImageRef[] {
+    const found = new Map<number, ImageRef>();
+    for (const item of this.items) {
+      const images = item.type === "user" || item.type === "tool" ? item.images : undefined;
+      for (const image of images ?? []) found.set(image.n, image);
+    }
+    for (const image of this.draftImages) found.set(image.n, image);
+    return [...found.values()].sort((a, b) => a.n - b.n);
   }
 
   /**
@@ -427,6 +482,8 @@ export class Chat {
           tool.isError = event.is_error;
           // Output that is never shown (a file that was read, say) isn't kept.
           tool.result = showsOutput(tool) ? resultText(event.content) : "";
+          const images = imagesIn(event.content);
+          if (images.length) tool.images = images;
           if (!event.is_error) this.trackDocument(tool);
         }
         break;
@@ -567,7 +624,13 @@ export class Chat {
       // Live, the message is already on screen from when it was sent.
       case "user_message":
         if (this.replaying) {
-          this.push({ type: "user", text: event.text, messageId: event.id ?? undefined, queued: !!event.id });
+          this.push({
+            type: "user",
+            text: event.text,
+            messageId: event.id ?? undefined,
+            queued: !!event.id,
+            images: event.images?.length ? event.images : undefined,
+          });
         }
         break;
 
@@ -583,7 +646,9 @@ export class Chat {
     }
   }
 
-  async send(text: string): Promise<void> {
+  /** Sends a message, with the draft's images whose `[image n]` word is in it. */
+  /** `from` is where the images come from: the draft's, or a sent message's when it is sent again. */
+  async send(text: string, from: ImageRef[] = this.draftImages): Promise<void> {
     const message = text.trim();
     if (!message) return;
     // `/btw` goes to the side chat, never to Claude Code (which can't run it headless).
@@ -595,15 +660,31 @@ export class Chat {
       return;
     }
     const messageId = crypto.randomUUID();
-    this.push({ type: "user", text: message, messageId, queued: this.busy });
+    const images: ImageRef[] = [];
+    for (const [, n] of message.matchAll(IMAGE_WORD)) {
+      const image = from.find((i) => i.n === Number(n));
+      if (image && !images.includes(image)) images.push(image);
+    }
+    if (from === this.draftImages) this.draftImages = [];
+    this.push({ type: "user", text: message, messageId, queued: this.busy, images: images.length ? images : undefined });
     this.stopping = false;
     if (this.turnStartedAt === null) this.turnStartedAt = Date.now();
     try {
       const owner = this.owner;
       if (owner) {
+        // Pictures are for the main chat; a side chat gets the words only.
         await sideSend(owner.sessionId, owner.projectPath.trim(), owner.modelChoice, owner.effortChoice, message, messageId);
       } else {
-        await sendMessage(this.sessionId, this.projectPath.trim(), this.mode, this.modelChoice, this.effortChoice, message, messageId);
+        await sendMessage(
+          this.sessionId,
+          this.projectPath.trim(),
+          this.mode,
+          this.modelChoice,
+          this.effortChoice,
+          message,
+          messageId,
+          images.map((i) => i.n),
+        );
         this.onSent?.();
       }
     } catch (e) {
@@ -631,7 +712,7 @@ export class Chat {
     // new one. Asked to close, it is replaced by a fresh one on the next send.
     await closeSession(this.sessionId);
     const last = [...this.items].reverse().find((i): i is UserItem => i.type === "user");
-    if (last) await this.send(last.text);
+    if (last) await this.send(last.text, last.images ?? []);
   }
 
   async answer(

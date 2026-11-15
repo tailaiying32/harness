@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::agent::{AgentAdapter, EventSink, RunningAgent, SideOptions, SpawnOptions};
+#[cfg(test)]
+use crate::agent::ImagePayload;
 use crate::events::{AgentEvent, Envelope, SessionState};
 use crate::sessions::{Out, configured_idle};
 use crate::store::Store;
@@ -132,7 +134,8 @@ impl SideChats {
                 agent
             }
         };
-        agent.send_user_message(text, message_id)
+        // Pictures are for the main chat; a side question is words only.
+        agent.send_user_message(text, &[], message_id)
     }
 
     /// Names the side chat from its first question, the way chats are named.
@@ -292,7 +295,7 @@ mod tests {
     }
 
     impl RunningAgent for FakeAgent {
-        fn send_user_message(&self, text: &str, _: &str) -> Result<(), String> {
+        fn send_user_message(&self, text: &str, _: &[ImagePayload], _: &str) -> Result<(), String> {
             self.told.lock().unwrap().push(format!("say {text}"));
             Ok(())
         }

@@ -6,9 +6,10 @@
   import BranchMark from "../BranchMark.svelte";
   import { pickFolder, type Mode, type ModelInfo } from "../ipc";
   import { prLabel, prShort, shortPath } from "../paths";
-  import type { Chat } from "../state/chat.svelte";
+  import { IMAGE_WORD, type Chat } from "../state/chat.svelte";
   import { savePrefs } from "../themes";
   import { indent, newLine, outdent, renumbered, type Edit } from "./editing";
+  import { attach, imageFiles } from "./images";
 
   let {
     chat,
@@ -20,6 +21,7 @@
 
   let box: HTMLTextAreaElement;
   let frame: HTMLElement;
+  let mirror = $state<HTMLElement>();
 
   // Opening a chat puts the cursor in its message box, sized to any unsent text.
   onMount(() => {
@@ -112,6 +114,92 @@
     box.style.height = "auto";
     box.style.height = `${box.scrollHeight}px`;
     frame.style.height = "";
+    syncMirror();
+  }
+
+  // ---- Images ----
+  // A pasted or dropped image becomes an `[image n]` word in the text. A plain
+  // text area can't colour part of its text, so while the draft has any, a
+  // copy of the text sits behind the box with the words coloured, and the
+  // box's own text is drawn see-through on top of it.
+
+  /** The draft in pieces: plain text, and the words of images it carries. */
+  const pieces = $derived.by(() => {
+    if (!chat.draftImages.length) return null;
+    const out: { text: string; image?: boolean }[] = [];
+    let at = 0;
+    for (const match of chat.draft.matchAll(IMAGE_WORD)) {
+      if (!chat.draftImages.some((i) => i.n === Number(match[1]))) continue;
+      out.push({ text: chat.draft.slice(at, match.index) }, { text: match[0], image: true });
+      at = match.index + match[0].length;
+    }
+    if (at === 0) return null;
+    // A final newline needs something after it to take up its line.
+    out.push({ text: chat.draft.slice(at) + "\u200b" });
+    return out;
+  });
+
+  /** Keeps the copy behind the box lined up: same width (less any scroll bar) and scroll. */
+  function syncMirror() {
+    if (!mirror) return;
+    mirror.style.width = `${box.clientWidth}px`;
+    mirror.scrollTop = box.scrollTop;
+  }
+
+  $effect(() => {
+    if (pieces) void tick().then(syncMirror);
+  });
+
+  /** Keeps the images and puts their words where the cursor is, as typing would. */
+  async function addImages(files: File[]) {
+    for (const file of files) {
+      let word: string;
+      try {
+        word = await attach(chat, file);
+      } catch (e) {
+        chat.showError(e instanceof Error ? e.message : String(e));
+        continue;
+      }
+      const { selectionStart: from, selectionEnd: to } = box;
+      const before = chat.draft.slice(0, from);
+      const insert = (before && !/\s$/.test(before) ? " " : "") + word;
+      await apply({ from, to, insert, selStart: from + insert.length, selEnd: from + insert.length });
+    }
+  }
+
+  // Only a paste with no text in it becomes an image: copied spreadsheet cells
+  // carry a picture of themselves too, and should paste as text.
+  function onPaste(e: ClipboardEvent) {
+    const data = e.clipboardData;
+    if (!data || data.getData("text/plain")) return;
+    const files = imageFiles([...data.items].filter((i) => i.kind === "file").map((i) => i.getAsFile()));
+    if (!files.length) return;
+    e.preventDefault();
+    void addImages(files);
+  }
+
+  function onDragOver(e: DragEvent) {
+    if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+  }
+
+  function onDrop(e: DragEvent) {
+    const files = imageFiles(e.dataTransfer?.files ?? []);
+    if (!files.length) return;
+    e.preventDefault();
+    box.focus();
+    void addImages(files);
+  }
+
+  // Clicking inside an image's word opens the image in the side panel.
+  function onClick() {
+    const { selectionStart: at, selectionEnd } = box;
+    if (at !== selectionEnd || !chat.draftImages.length) return;
+    for (const match of chat.draft.matchAll(IMAGE_WORD)) {
+      if (at <= match.index || at >= match.index + match[0].length) continue;
+      const image = chat.draftImages.find((i) => i.n === Number(match[1]));
+      if (image) chat.openImage(image);
+      return;
+    }
   }
 
   async function send() {
@@ -161,18 +249,29 @@
   }
 </script>
 
-<div class="composer" bind:this={frame}>
+<div class="composer" bind:this={frame} ondragover={onDragOver} ondrop={onDrop} role="group">
   <div class="inner">
     <div class="prompt">
       <span class="marker">&gt;</span>
-      <textarea
-        bind:this={box}
-        bind:value={chat.draft}
-        oninput={grow}
-        onkeydown={onKey}
-        rows="1"
-        placeholder="Message Claude Code"
-      ></textarea>
+      <div class="field">
+        {#if pieces}
+          <div class="mirror" bind:this={mirror} aria-hidden="true">
+            {#each pieces as piece, i (i)}{#if piece.image}<span class="image">{piece.text}</span>{:else}{piece.text}{/if}{/each}
+          </div>
+        {/if}
+        <textarea
+          bind:this={box}
+          bind:value={chat.draft}
+          class:see-through={!!pieces}
+          oninput={grow}
+          onkeydown={onKey}
+          onpaste={onPaste}
+          onclick={onClick}
+          onscroll={syncMirror}
+          rows="1"
+          placeholder="Message Claude Code"
+        ></textarea>
+      </div>
       {#if chat.busy}
         <button class="stop" onclick={() => chat.stop()}>stop</button>
       {/if}
@@ -269,6 +368,31 @@
     width: 2.5ch;
     flex-shrink: 0;
     color: var(--accent);
+  }
+  .field {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    display: flex;
+  }
+  /* Behind the box, drawn exactly as the box draws its text. */
+  .mirror {
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    overflow: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    color: var(--bright);
+    pointer-events: none;
+  }
+  .mirror .image {
+    color: var(--accent);
+  }
+  textarea.see-through {
+    position: relative;
+    color: transparent;
   }
   textarea {
     flex: 1;

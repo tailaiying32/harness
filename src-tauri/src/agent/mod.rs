@@ -37,10 +37,18 @@ pub struct SideOptions {
     pub fork_from: Option<String>,
 }
 
+/// An image to send with a message.
+pub struct ImagePayload {
+    /// "image/png", "image/jpeg", "image/gif" or "image/webp".
+    pub media_type: String,
+    /// The image's bytes, base64-encoded.
+    pub data_b64: String,
+}
+
 /// A live agent process. Every method only queues a message, so none of them block.
 pub trait RunningAgent: Send + Sync {
     /// `id` names the message; `MessageSeen` carries it back when the agent takes the message in.
-    fn send_user_message(&self, text: &str, id: &str) -> Result<(), String>;
+    fn send_user_message(&self, text: &str, images: &[ImagePayload], id: &str) -> Result<(), String>;
     /// `message` goes with a denial. `answers` goes with a question: each
     /// question's text mapped to the chosen answer.
     fn answer_approval(

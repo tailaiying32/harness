@@ -15,6 +15,7 @@
         "title": "Harness",
         "width": 1400,
         "height": 900,
+        "dragDropEnabled": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "trafficLightPosition": { "x": 14, "y": 19 }
