@@ -310,6 +310,92 @@ async fn read_image(state: State<'_, AppState>, session_id: String, n: u32) -> R
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// Image files a drop turns into `[image n]`, by extension.
+const IMAGE_EXTENSIONS: [&str; 11] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", "heic", "heif", "tif", "tiff"];
+/// The largest image file read for the page; larger ones go as plain files.
+const MAX_IMAGE_FILE: u64 = 45 * 1024 * 1024;
+
+fn extension(path: &Path) -> String {
+    path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase()
+}
+
+/// A dropped image file's bytes. Only image files, and only up to a size.
+fn read_image_file_at(path: &Path) -> Result<Vec<u8>, String> {
+    if !IMAGE_EXTENSIONS.contains(&extension(path).as_str()) {
+        return Err("That isn't an image file".to_string());
+    }
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if size > MAX_IMAGE_FILE {
+        return Err("That image is too large".to_string());
+    }
+    std::fs::read(path).map_err(|e| e.to_string())
+}
+
+/// A dropped image file as raw bytes, for the page to shrink and keep as `[image n]`.
+#[tauri::command]
+async fn read_image_file(path: String) -> Result<tauri::ipc::Response, String> {
+    let bytes = tauri::async_runtime::spawn_blocking(move || read_image_file_at(Path::new(&path)))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// "folder" or "file" (also for a path that isn't there).
+#[tauri::command]
+fn file_kind(path: String) -> &'static str {
+    if Path::new(&path).is_dir() { "folder" } else { "file" }
+}
+
+/// Whether clicking a file's word should show it in its folder instead of
+/// opening it: folders (apps are folders on the Mac) and anything that would
+/// run. A click must never run something.
+fn only_reveal(path: &Path) -> bool {
+    if path.is_dir() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        ["exe", "bat", "cmd", "com", "msi", "ps1", "vbs", "js", "lnk", "scr"].contains(&extension(path).as_str())
+    }
+}
+
+/// Opens a dropped file in its own app, or shows it in its folder when
+/// opening would run it.
+#[tauri::command]
+fn open_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let at = Path::new(&path);
+    if !at.exists() {
+        return Err(format!("{path} isn't there any more"));
+    }
+    if only_reveal(at) {
+        app.opener().reveal_item_in_dir(at).map_err(|e| e.to_string())
+    } else {
+        app.opener().open_path(path, None::<&str>).map_err(|e| e.to_string())
+    }
+}
+
+/// Paths of the files on the system clipboard, as copied in Finder or
+/// Explorer. Empty when it holds something else.
+#[tauri::command]
+async fn clipboard_files() -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        arboard::Clipboard::new()
+            .and_then(|mut clipboard| clipboard.get().file_list())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|path| path.to_str().map(str::to_owned))
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// A markdown file's text, for a link opened in the side panel.
 #[tauri::command]
 async fn read_doc(path: String) -> Result<String, String> {
@@ -553,6 +639,10 @@ pub fn run() {
             browser_current,
             save_image,
             read_image,
+            read_image_file,
+            file_kind,
+            open_file,
+            clipboard_files,
             autotest,
             autotest_wait,
             autotest_report,

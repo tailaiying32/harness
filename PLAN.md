@@ -672,8 +672,8 @@ can't close a chat that has been used since.
   Otherwise each image is shrunk to fit Claude Code's limits if needed (PNG
   kept as PNG when it fits, else JPEG at falling quality), saved with
   `save_image`, and its word is inserted at the cursor as typing would, so
-  undo works. Dropping works the same; the window's `dragDropEnabled` is off
-  so the page gets real drop events. A pasted image whose word is deleted
+  undo works. A dropped image file comes by path (see "Files") and is read
+  with `read_image_file`, then goes the same way. A pasted image whose word is deleted
   isn't sent, but keeps its number, so a later one may skip a number.
 - **The word in the box:** a textarea can't colour part of its text, so
   while the draft holds an image word a copy of the text sits behind it with
@@ -699,6 +699,42 @@ can't close a chat that has been used since.
 - **Cleanup:** a chat's images go when it is deleted for good (purge), not
   when it is trashed. At start, folders of chats that don't exist are removed:
   pastes into a new chat that was never sent leave one.
+
+### Files (`chat/files.ts`, built 2026-11-14)
+
+Any file can be dropped on the window, or copied in Finder and pasted. It
+is never copied: the message carries its path and Claude opens it itself,
+so Claude sees the file as it is now.
+
+- **Dropping:** the window's native drag-drop is on (the page's own drop
+  events never carry a path). `onFileDrop` in `ipc.ts` hands the paths to
+  the message box, wherever on the window the drop landed; not while
+  settings or an image is drawn over the chat. An image file (by extension)
+  becomes `[image n]`; one that can't be read, and everything else, becomes
+  a file word.
+- **Pasting:** a paste that carries files asks the core for the clipboard's
+  file paths (`clipboard_files`, the `arboard` crate). With none, it does
+  what it did before: text pastes as text, a lone picture becomes an image.
+- **The word:** `[report.pdf]` in the message box (a folder ends in `/`; a
+  second file of the same name shows its folder, `[b/report.pdf]`), kept in
+  `Chat.draftFiles` with its path and coloured like an image's word. On
+  send, `toLinks` writes each word still in the text as
+  `[report.pdf](</full/path>)`. That text is what is sent and saved, so
+  nothing else is stored: `withWords` finds the form again and
+  `FileWord.svelte` draws the word. A path with `>` or a newline can't be
+  written that way and goes in as plain text. Chat titles cut from a first
+  message leave the paths out (`without_file_paths` in `store.rs`).
+- **Clicking a word** (`open_file`): a markdown file opens as a side panel
+  tab; any other file in its own app. Folders, apps and files marked
+  runnable are shown in their folder instead, so a click never runs anything.
+- **Reading without a card:** `send_user_message` in `claude_code.rs`
+  remembers the paths a message links (`file_links`). When Claude Code asks
+  to use Read or Grep on exactly one of them, `quiet_read` allows it and no
+  card shows. Not its folder, not other tools (a shell `head` still asks),
+  and the list is per running process, so after a restart an old file asks
+  once.
+- **Not built:** a key or command to pick a file, `@` file search, folding
+  long pasted text.
 
 ### Store (`store.rs`)
 
@@ -1392,8 +1428,9 @@ before building it. Only `claude_code.rs` would change.
    into the next message), `@background` (don't wait for the next message's
    answer), `@new`, `@open <n>` and `@delete <n>` (the nth chat in the
    sidebar, from 0), `@close` (shut the open chat's process down), `@exited`
-   (wait for it to exit), `@wait <ms>` and `@image <word>` (attach a picture
-   of that word to the next message, through the same code a paste uses). Set `HARNESS_DATA_DIR` so a test
+   (wait for it to exit), `@wait <ms>`, `@image <word>` (attach a picture
+   of that word to the next message, through the same code a paste uses) and
+   `@file <path>` (add that file to the next message, as a drop would). Set `HARNESS_DATA_DIR` so a test
    never touches the real saved chats, and `HARNESS_IDLE_SECONDS` to test idle
    shutdown quickly. With the window hidden or the screen locked the page is
    frozen while nothing happens, so `@wait` never ends there: wait on an event

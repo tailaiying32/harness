@@ -194,6 +194,7 @@
       //   @endside       end the open chat's side chat
       //   A message starting with /btw goes to the side chat; the test waits for its answer.
       //   @image <word>  attach a picture of <word>, as a paste would, to the next message
+      //   @file <path>   add the file at <path>, as a drop would, to the next message
       //   @browser <url> open the browser view and type <url> in its address line;
       //                  waits for the page to load. `@browser` alone only shows the view.
       //   @settings      open or close settings (drawn over the panel, hiding the page)
@@ -203,7 +204,7 @@
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
-        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|image|browser|settings)(?:\s+(\S+))?$/) ??
+        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|image|file|browser|settings)(?:\s+(\S+))?$/) ??
         message.match(/^@(notes|planedit)\s+(.+)$/s) ??
         [];
       const current = app.current;
@@ -233,6 +234,7 @@
       if (directive === "wait") await pause(Number(value));
       if (directive === "endside") await current.endSide();
       if (directive === "image") imageWords.push(await attach(current, await pictureOf(value)));
+      if (directive === "file") imageWords.push(await current.addDraftFile(value));
       if (directive === "browser") {
         current.openBrowser();
         if (value) {
@@ -351,7 +353,7 @@
     <!-- Each chat gets its own view, so scroll position and open folds don't leak between chats. -->
     {#key chat.sessionId}
       <ChatView {chat} problem={setup?.problem ?? null} />
-      <Composer {chat} ready={!!setup?.binary} home={app.home} {models} focus={app.focusBox} />
+      <Composer {chat} ready={!!setup?.binary} home={app.home} {models} focus={app.focusBox} drops={!showSettings && !chat.viewing} />
     {/key}
   </main>
   {#if panelOpen}

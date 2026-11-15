@@ -4,11 +4,12 @@
   import { onMount, tick } from "svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import BranchMark from "../BranchMark.svelte";
-  import { pickFolder, type Mode, type ModelInfo } from "../ipc";
+  import { clipboardFiles, onFileDrop, pickFolder, readImageFile, type Mode, type ModelInfo } from "../ipc";
   import { prLabel, prShort, shortPath } from "../paths";
   import { IMAGE_WORD, type Chat } from "../state/chat.svelte";
   import { savePrefs } from "../themes";
   import { indent, newLine, outdent, renumbered, type Edit } from "./editing";
+  import { imageType } from "./files";
   import { attach, imageFiles } from "./images";
 
   let {
@@ -17,7 +18,16 @@
     home,
     models,
     focus = 0,
-  }: { chat: Chat; ready: boolean; home: string; models: ModelInfo[]; focus?: number } = $props();
+    drops = true,
+  }: {
+    chat: Chat;
+    ready: boolean;
+    home: string;
+    models: ModelInfo[];
+    focus?: number;
+    /** Whether dropped files land here now; not while something is drawn over the chat. */
+    drops?: boolean;
+  } = $props();
 
   let box: HTMLTextAreaElement;
   let frame: HTMLElement;
@@ -27,6 +37,12 @@
   onMount(() => {
     grow();
     box.focus();
+    // Files dropped anywhere on the window land in the message box.
+    return onFileDrop((paths) => {
+      if (!drops) return;
+      box.focus();
+      void addPaths(paths);
+    });
   });
 
   // Asking for a new chat while already on an empty one changes nothing on
@@ -117,21 +133,36 @@
     syncMirror();
   }
 
-  // ---- Images ----
-  // A pasted or dropped image becomes an `[image n]` word in the text. A plain
-  // text area can't colour part of its text, so while the draft has any, a
-  // copy of the text sits behind the box with the words coloured, and the
-  // box's own text is drawn see-through on top of it.
+  // ---- Images and files ----
+  // A pasted or dropped image becomes an `[image n]` word in the text, and a
+  // file a `[name]` word. A plain text area can't colour part of its text, so
+  // while the draft has any, a copy of the text sits behind the box with the
+  // words coloured, and the box's own text is drawn see-through on top of it.
 
-  /** The draft in pieces: plain text, and the words of images it carries. */
-  const pieces = $derived.by(() => {
-    if (!chat.draftImages.length) return null;
-    const out: { text: string; image?: boolean }[] = [];
-    let at = 0;
+  /** The words in the draft that stand for an image or a file, in order. */
+  function words(): { at: number; text: string; open: () => void }[] {
+    const out: { at: number; text: string; open: () => void }[] = [];
     for (const match of chat.draft.matchAll(IMAGE_WORD)) {
-      if (!chat.draftImages.some((i) => i.n === Number(match[1]))) continue;
-      out.push({ text: chat.draft.slice(at, match.index) }, { text: match[0], image: true });
-      at = match.index + match[0].length;
+      const image = chat.draftImages.find((i) => i.n === Number(match[1]));
+      if (image) out.push({ at: match.index, text: match[0], open: () => chat.openImage(image) });
+    }
+    for (const file of chat.draftFiles) {
+      for (let at = chat.draft.indexOf(file.word); at >= 0; at = chat.draft.indexOf(file.word, at + file.word.length)) {
+        out.push({ at, text: file.word, open: () => chat.openDropped(file.path) });
+      }
+    }
+    return out.sort((a, b) => a.at - b.at);
+  }
+
+  /** The draft in pieces: plain text, and the words of images and files it carries. */
+  const pieces = $derived.by(() => {
+    if (!chat.draftImages.length && !chat.draftFiles.length) return null;
+    const out: { text: string; word?: boolean }[] = [];
+    let at = 0;
+    for (const word of words()) {
+      if (word.at < at) continue;
+      out.push({ text: chat.draft.slice(at, word.at) }, { text: word.text, word: true });
+      at = word.at + word.text.length;
     }
     if (at === 0) return null;
     // A final newline needs something after it to take up its line.
@@ -150,57 +181,131 @@
     if (pieces) void tick().then(syncMirror);
   });
 
-  /** Keeps the images and puts their words where the cursor is, as typing would. */
-  async function addImages(files: File[]) {
+  /** Puts a word where the cursor is, as typing would, so undo works. */
+  async function insertWord(word: string) {
+    const { selectionStart: from, selectionEnd: to } = box;
+    const before = chat.draft.slice(0, from);
+    const insert = (before && !/\s$/.test(before) ? " " : "") + word;
+    await apply({ from, to, insert, selStart: from + insert.length, selEnd: from + insert.length });
+  }
+
+  /** Keeps the images and puts their words where the cursor is. */
+  async function addImages(files: Blob[]) {
     for (const file of files) {
-      let word: string;
       try {
-        word = await attach(chat, file);
+        await insertWord(await attach(chat, file));
       } catch (e) {
         chat.showError(e instanceof Error ? e.message : String(e));
-        continue;
       }
-      const { selectionStart: from, selectionEnd: to } = box;
-      const before = chat.draft.slice(0, from);
-      const insert = (before && !/\s$/.test(before) ? " " : "") + word;
-      await apply({ from, to, insert, selStart: from + insert.length, selEnd: from + insert.length });
     }
   }
 
-  // Only a paste with no text in it becomes an image: copied spreadsheet cells
+  /**
+   * Takes dropped or pasted files by path. An image becomes `[image n]`, as a
+   * pasted one does; anything else, or an image that can't be read, becomes
+   * a file word, and Claude opens the file itself.
+   */
+  async function addPaths(paths: string[]) {
+    for (const path of paths) {
+      const type = imageType(path);
+      if (type) {
+        try {
+          const bytes = await readImageFile(path);
+          await insertWord(await attach(chat, new Blob([bytes], { type })));
+          continue;
+        } catch {
+          // Not an image the app can take in: it goes as a file.
+        }
+      }
+      await insertWord(await chat.addDraftFile(path));
+    }
+  }
+
+  // A paste with files in it may be files copied in Finder; the page is given
+  // their names but not where they are, so the core is asked. Otherwise only
+  // a paste with no text in it becomes an image: copied spreadsheet cells
   // carry a picture of themselves too, and should paste as text.
   function onPaste(e: ClipboardEvent) {
     const data = e.clipboardData;
-    if (!data || data.getData("text/plain")) return;
-    const files = imageFiles([...data.items].filter((i) => i.kind === "file").map((i) => i.getAsFile()));
-    if (!files.length) return;
+    if (!data) return;
+    const items = [...data.items].filter((i) => i.kind === "file");
+    if (!items.length && !data.types.includes("Files")) return;
+    const text = data.getData("text/plain");
+    const images = imageFiles(items.map((i) => i.getAsFile()));
     e.preventDefault();
-    void addImages(files);
+    void (async () => {
+      const paths = await clipboardFiles().catch(() => []);
+      if (paths.length) await addPaths(paths);
+      else if (text) {
+        const { selectionStart: from, selectionEnd: to } = box;
+        await apply({ from, to, insert: text, selStart: from + text.length, selEnd: from + text.length });
+      } else await addImages(images);
+    })();
   }
 
-  function onDragOver(e: DragEvent) {
-    if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
-  }
-
-  function onDrop(e: DragEvent) {
-    const files = imageFiles(e.dataTransfer?.files ?? []);
-    if (!files.length) return;
-    e.preventDefault();
-    box.focus();
-    void addImages(files);
-  }
-
-  // Clicking inside an image's word opens the image in the side panel.
+  // Clicking inside an image's or a file's word opens it.
   function onClick() {
     const { selectionStart: at, selectionEnd } = box;
-    if (at !== selectionEnd || !chat.draftImages.length) return;
-    for (const match of chat.draft.matchAll(IMAGE_WORD)) {
-      if (at <= match.index || at >= match.index + match[0].length) continue;
-      const image = chat.draftImages.find((i) => i.n === Number(match[1]));
-      if (image) chat.openImage(image);
-      return;
+    if (at !== selectionEnd) return;
+    words()
+      .find((w) => at > w.at && at < w.at + w.text.length)
+      ?.open();
+  }
+
+  // A word is one thing: the cursor steps over it, never into it, and a
+  // selection takes all of it or none.
+
+  /** Where the moving end of the selection last came to rest. */
+  let lastFocus = 0;
+  /** While the mouse is down the cursor is left alone, so a click can land inside a word and open it. */
+  let pressing = false;
+
+  /**
+   * Moves a selection end that sits inside a word to one of the word's edges:
+   * onward in the direction it was moving, or to the nearer edge when
+   * `nearest` (after a click).
+   */
+  function snap(nearest = false) {
+    if (!box || document.activeElement !== box) return;
+    const { selectionStart: start, selectionEnd: end } = box;
+    const backward = box.selectionDirection === "backward";
+    const focus = backward ? start : end;
+    const anchor = backward ? end : start;
+    const list = start === lastFocus && end === lastFocus ? [] : words();
+    const around = (at: number) => list.find((w) => at > w.at && at < w.at + w.text.length);
+    let to = focus;
+    const word = around(focus);
+    if (word) {
+      const [from, till] = [word.at, word.at + word.text.length];
+      const onward = nearest || focus === lastFocus ? focus - from >= till - focus : focus > lastFocus;
+      to = onward ? till : from;
+    }
+    let base = start === end ? to : anchor;
+    const held = start === end ? undefined : around(anchor);
+    if (held) base = anchor <= to ? held.at : held.at + held.text.length;
+    lastFocus = to;
+    if (to !== focus || base !== anchor) {
+      box.setSelectionRange(Math.min(base, to), Math.max(base, to), to < base ? "backward" : "forward");
     }
   }
+
+  $effect(() => {
+    const moved = () => {
+      if (!pressing) snap();
+    };
+    const released = () => {
+      if (!pressing) return;
+      pressing = false;
+      // After the click itself, which opens a word the cursor landed in.
+      setTimeout(() => snap(true));
+    };
+    document.addEventListener("selectionchange", moved);
+    window.addEventListener("pointerup", released);
+    return () => {
+      document.removeEventListener("selectionchange", moved);
+      window.removeEventListener("pointerup", released);
+    };
+  });
 
   async function send() {
     const text = chat.draft;
@@ -233,6 +338,15 @@
   function onKey(e: KeyboardEvent) {
     if (e.isComposing) return;
     const { selectionStart: start, selectionEnd: end } = box;
+    // Backspace just after a word, or Delete just before one, removes all of it.
+    if ((e.key === "Backspace" || e.key === "Delete") && start === end && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      const word = words().find((w) => (e.key === "Backspace" ? w.at + w.text.length : w.at) === start);
+      if (word) {
+        e.preventDefault();
+        void apply({ from: word.at, to: word.at + word.text.length, insert: "", selStart: word.at, selEnd: word.at });
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void send();
@@ -249,14 +363,14 @@
   }
 </script>
 
-<div class="composer" bind:this={frame} ondragover={onDragOver} ondrop={onDrop} role="group">
+<div class="composer" bind:this={frame}>
   <div class="inner">
     <div class="prompt">
       <span class="marker">&gt;</span>
       <div class="field">
         {#if pieces}
           <div class="mirror" bind:this={mirror} aria-hidden="true">
-            {#each pieces as piece, i (i)}{#if piece.image}<span class="image">{piece.text}</span>{:else}{piece.text}{/if}{/each}
+            {#each pieces as piece, i (i)}{#if piece.word}<span class="word">{piece.text}</span>{:else}{piece.text}{/if}{/each}
           </div>
         {/if}
         <textarea
@@ -267,6 +381,8 @@
           onkeydown={onKey}
           onpaste={onPaste}
           onclick={onClick}
+          onpointerdown={() => (pressing = true)}
+          onkeyup={() => snap()}
           onscroll={syncMirror}
           rows="1"
           placeholder="Message Claude Code"
@@ -387,7 +503,7 @@
     color: var(--bright);
     pointer-events: none;
   }
-  .mirror .image {
+  .mirror .word {
     color: var(--accent);
   }
   textarea.see-through {
