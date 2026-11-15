@@ -412,6 +412,13 @@ function finish(id: string) {
 
 type Args = Record<string, any>;
 
+const notesByChat = new Map<string, string>([
+  [
+    "planning",
+    "## Idle timeout\n\n- Five minutes feels right, but **measure** first.\n- Background work must never be cut off.\n\nSee [the plan file](../PLAN.md).",
+  ],
+]);
+
 const commands: Record<string, (args: Args) => unknown> = {
   subscribe: (args) => {
     channel = args.onEvent.id;
@@ -470,6 +477,9 @@ const commands: Record<string, (args: Args) => unknown> = {
     if (waiting) waiting.push(args.messageId);
     else void play(args.sessionId, args.messageId);
   },
+  // Notes live in memory here; the "planning" chat starts with some.
+  read_notes: (args) => notesByChat.get(String(args.chatId)) ?? "",
+  write_notes: (args) => void notesByChat.set(String(args.chatId), String(args.text)),
   answer_approval: (args) =>
     String(args.requestId).startsWith("plan-") ? void afterPlan(args.sessionId, args.decision) : finish(args.sessionId),
   interrupt: (args) => {
@@ -576,8 +586,7 @@ setTimeout(() => {
     buttons.find((b) => b.textContent?.includes(title))?.click();
     if (wanted.has("browser")) {
       setTimeout(() => {
-        const bar = [...document.querySelectorAll<HTMLButtonElement>("header.bar button")];
-        bar.find((b) => b.textContent?.includes("browser") || b.textContent?.includes("◂"))?.click();
+        document.querySelector<HTMLButtonElement>('header.bar button[title="browser"]')?.click();
       }, 200);
     }
   }, 100);

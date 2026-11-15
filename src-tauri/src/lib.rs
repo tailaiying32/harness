@@ -5,6 +5,7 @@ mod events;
 mod github;
 mod images;
 mod locate;
+mod notes;
 mod sessions;
 mod side_chat;
 mod store;
@@ -222,10 +223,29 @@ fn answer_approval(
     decision: Decision,
     message: Option<String>,
     answers: Option<BTreeMap<String, String>>,
+    // A plan the user edited before approving it.
+    plan: Option<String>,
 ) -> Result<(), String> {
     state
         .sessions
-        .answer_approval(&session_id, &request_id, decision, message, answers)
+        .answer_approval(&session_id, &request_id, decision, message, answers, plan)
+}
+
+/// The chat's notes, written in the side panel; empty if there are none yet.
+#[tauri::command]
+async fn read_notes(state: State<'_, AppState>, chat_id: String) -> Result<String, String> {
+    let sessions = state.sessions.clone();
+    tauri::async_runtime::spawn_blocking(move || sessions.notes().read(&chat_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn write_notes(state: State<'_, AppState>, chat_id: String, text: String) -> Result<(), String> {
+    let sessions = state.sessions.clone();
+    tauri::async_runtime::spawn_blocking(move || sessions.notes().write(&chat_id, &text))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -540,7 +560,7 @@ pub fn run() {
                 })
             };
             let adapter = Arc::new(ClaudeCodeAdapter);
-            let side = SideChats::new(adapter.clone(), store.clone(), out.clone());
+            let side = SideChats::new(adapter.clone(), store.clone(), out.clone(), dir.join("notes"));
             let browsers = Browsers::new(app.handle().clone(), out.clone());
             let sessions = SessionManager::new(adapter, store.clone(), out, dir);
             // Every chat's agent can drive that chat's browser.
@@ -564,7 +584,7 @@ pub fn run() {
             // Images of chats that are gone, and of new chats never sent.
             {
                 let sessions = sessions.clone();
-                tauri::async_runtime::spawn_blocking(move || sessions.sweep_images());
+                tauri::async_runtime::spawn_blocking(move || sessions.sweep_chat_files());
             }
             // The worktree cleanup pass: at start, then every hour.
             {
@@ -610,6 +630,8 @@ pub fn run() {
             side_end,
             close_session,
             read_doc,
+            read_notes,
+            write_notes,
             browser_navigate,
             browser_reload,
             browser_place,

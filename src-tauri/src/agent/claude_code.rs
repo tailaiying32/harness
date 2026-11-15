@@ -85,6 +85,36 @@ const SIDE_INSTRUCTION: &str = "This is a side conversation about the chat above
 quick questions here while the main chat carries on. You can read and search files but not change \
 anything or run commands. Answer briefly.";
 
+/// A plan the user edited replaces the agent's in the approved input: Claude
+/// Code works from that text (tested on CLI 2.1.322; no file write needed).
+/// Only a plan request has a `plan` field; anything else is left alone.
+fn apply_plan_edit(input: &mut Value, plan: Option<String>) {
+    if let (Some(plan), Some(input)) = (plan, input.as_object_mut()) {
+        if input.contains_key("plan") {
+            input.insert("plan".to_string(), json!(plan));
+        }
+    }
+}
+
+/// Read access to the folder holding the chat's notes, without asking (tested
+/// on CLI 2.1.322, in default mode and with a side chat's read-only tools).
+fn notes_access(notes: &Path) -> Vec<String> {
+    match notes.parent() {
+        Some(folder) => vec!["--add-dir".to_string(), folder.display().to_string()],
+        None => Vec::new(),
+    }
+}
+
+/// Where the chat's notes are, for the agent's instructions. Read only when the
+/// user mentions them, so nothing changes from turn to turn.
+fn notes_instruction(notes: &Path) -> String {
+    format!(
+        "The user keeps notes for this chat in {} (markdown; it may not exist yet). Read it when \
+they mention their notes. Don't write to it.",
+        notes.display()
+    )
+}
+
 /// The command line for one chat's process.
 fn launch_args(opts: &SpawnOptions) -> Vec<String> {
     if let Some(side) = &opts.side {
@@ -111,6 +141,11 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
         args.extend(["--mcp-config".to_string(), mcp_config(tools)]);
         instructions.push_str("\n\n");
         instructions.push_str(tools.instruction);
+    }
+    if let Some(notes) = &opts.notes {
+        args.extend(notes_access(notes));
+        instructions.push_str("\n\n");
+        instructions.push_str(&notes_instruction(notes));
     }
     // Per launch: a resumed session does not remember it.
     args.extend(["--append-system-prompt".to_string(), instructions]);
@@ -148,11 +183,16 @@ fn side_args(opts: &SpawnOptions, side: &SideOptions) -> Vec<String> {
         "--tools",
         "Read,Grep,Glob",
         "--strict-mcp-config",
-        "--append-system-prompt",
-        SIDE_INSTRUCTION,
     ]
     .map(String::from)
     .to_vec();
+    let mut instructions = SIDE_INSTRUCTION.to_string();
+    if let Some(notes) = &opts.notes {
+        args.extend(notes_access(notes));
+        instructions.push_str("\n\n");
+        instructions.push_str(&notes_instruction(notes));
+    }
+    args.extend(["--append-system-prompt".to_string(), instructions]);
     if let Some(id) = &opts.resume_id {
         args.extend(["--resume".to_string(), id.clone()]);
         // The first start copies the main chat; later ones resume the copy.
@@ -724,6 +764,7 @@ impl RunningAgent for ClaudeCodeProcess {
         decision: Decision,
         message: Option<String>,
         answers: Option<BTreeMap<String, String>>,
+        plan: Option<String>,
     ) -> Result<(), String> {
         let mut approval = self
             .pending
@@ -737,6 +778,7 @@ impl RunningAgent for ClaudeCodeProcess {
         if let (Some(answers), Some(input)) = (answers, approval.input.as_object_mut()) {
             input.insert("answers".to_string(), json!(answers));
         }
+        apply_plan_edit(&mut approval.input, plan);
         let response = match decision {
             Decision::Allow => json!({ "behavior": "allow", "updatedInput": approval.input }),
             Decision::AlwaysAllow => {
@@ -1272,6 +1314,7 @@ mod tests {
                 effort: effort.map(str::to_owned),
                 side: None,
                 tools: None,
+                notes: None,
             })
         };
         let args = with(Some("max"));
@@ -1292,6 +1335,7 @@ mod tests {
             effort: None,
             side: None,
             tools: None,
+            notes: None,
         });
         assert!(args.contains(&"--replay-user-messages".to_string()));
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
@@ -1333,6 +1377,7 @@ mod tests {
             effort: None,
             side: None,
             tools: Some(echo_tools()),
+            notes: None,
         });
         let at = args.iter().position(|a| a == "--mcp-config").unwrap();
         let config: Value = serde_json::from_str(&args[at + 1]).unwrap();
@@ -1343,6 +1388,40 @@ mod tests {
         assert_eq!(settings["permissions"]["ask"][0], "EnterWorktree");
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
         assert!(args[at + 1].ends_with("Use the app tools."));
+    }
+
+    #[test]
+    fn a_chat_and_its_side_chat_may_read_the_notes() {
+        let opts = |side: Option<SideOptions>| SpawnOptions {
+            binary: "claude".into(),
+            project_path: "/work".into(),
+            resume_id: None,
+            mode: None,
+            model: None,
+            effort: None,
+            side,
+            tools: None,
+            notes: Some("/data/notes/chat-1/notes.md".into()),
+        };
+        for args in [launch_args(&opts(None)), launch_args(&opts(Some(SideOptions::default())))] {
+            assert!(args.windows(2).any(|w| w == ["--add-dir", "/data/notes/chat-1"]));
+            let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
+            assert!(args[at + 1].contains("/data/notes/chat-1/notes.md"));
+        }
+    }
+
+    #[test]
+    fn an_edited_plan_replaces_the_agents() {
+        let mut input = json!({ "plan": "do it", "planFilePath": "/p.md" });
+        apply_plan_edit(&mut input, Some("do it better".into()));
+        assert_eq!(input["plan"], "do it better");
+        assert_eq!(input["planFilePath"], "/p.md");
+        let mut other = json!({ "command": "ls" });
+        apply_plan_edit(&mut other, Some("x".into()));
+        assert_eq!(other, json!({ "command": "ls" }));
+        let mut kept = json!({ "plan": "same" });
+        apply_plan_edit(&mut kept, None);
+        assert_eq!(kept["plan"], "same");
     }
 
     #[tokio::test]
@@ -1797,6 +1876,7 @@ mod tests {
                     fork_from: Some("main-1".into()),
                 }),
                 tools: None,
+                notes: None,
             })
         };
         let first = side(Some("main-1"));

@@ -14,7 +14,8 @@ use crate::agent::{AgentAdapter, EventSink, RunningAgent, SideOptions, SpawnOpti
 #[cfg(test)]
 use crate::agent::ImagePayload;
 use crate::events::{AgentEvent, Envelope, SessionState};
-use crate::sessions::{Out, configured_idle};
+use crate::notes::Notes;
+use crate::sessions::{Out, configured_idle, notes_for};
 use crate::store::Store;
 
 /// Longest tool result kept in memory, as for chats.
@@ -45,6 +46,8 @@ struct Inner {
     adapter: Arc<dyn AgentAdapter>,
     store: Arc<Store>,
     out: Out,
+    /// The chats' notes: a side chat may read its chat's.
+    notes: Notes,
     sides: Mutex<HashMap<String, Side>>,
     /// Fixed idle time for tests. None = the chats' setting.
     idle: Option<Option<Duration>>,
@@ -55,11 +58,12 @@ struct Inner {
 pub struct SideChats(Arc<Inner>);
 
 impl SideChats {
-    pub fn new(adapter: Arc<dyn AgentAdapter>, store: Arc<Store>, out: Out) -> Self {
+    pub fn new(adapter: Arc<dyn AgentAdapter>, store: Arc<Store>, out: Out, notes_root: PathBuf) -> Self {
         Self(Arc::new(Inner {
             adapter,
             store,
             out,
+            notes: Notes::new(notes_root),
             sides: Mutex::default(),
             idle: None,
             forget_after: FORGET_AFTER,
@@ -120,6 +124,7 @@ impl SideChats {
                         effort,
                         side: Some(SideOptions { fork_from }),
                         tools: None,
+                        notes: notes_for(&self.0.notes, chat_id),
                     },
                     self.sink(chat_id, run),
                 )?);
@@ -306,6 +311,7 @@ mod tests {
             _: Decision,
             _: Option<String>,
             _: Option<BTreeMap<String, String>>,
+            _: Option<String>,
         ) -> Result<(), String> {
             Ok(())
         }
@@ -375,7 +381,7 @@ mod tests {
             let seen = seen.clone();
             Arc::new(move |e: Envelope| seen.lock().unwrap().push(e))
         };
-        let mut chats = SideChats::new(fake.clone(), store, out);
+        let mut chats = SideChats::new(fake.clone(), store, out, std::env::temp_dir().join("harness-side-notes-test"));
         let inner = Arc::get_mut(&mut chats.0).unwrap();
         inner.idle = Some(idle);
         inner.forget_after = Duration::from_millis(10);

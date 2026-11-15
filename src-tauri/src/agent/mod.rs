@@ -33,6 +33,9 @@ pub struct SpawnOptions {
     pub side: Option<SideOptions>,
     /// Tools the app itself offers this chat (the side panel's browser).
     pub tools: Option<AppTools>,
+    /// The chat's notes file, which the user writes in the side panel. The
+    /// agent is told where it is and may read it; it may not exist yet.
+    pub notes: Option<PathBuf>,
 }
 
 /// A running tool call's result: MCP content items, or an error message.
@@ -73,13 +76,15 @@ pub trait RunningAgent: Send + Sync {
     /// `id` names the message; `MessageSeen` carries it back when the agent takes the message in.
     fn send_user_message(&self, text: &str, images: &[ImagePayload], id: &str) -> Result<(), String>;
     /// `message` goes with a denial. `answers` goes with a question: each
-    /// question's text mapped to the chosen answer.
+    /// question's text mapped to the chosen answer. `plan` goes with an
+    /// approved plan the user edited: the agent works from that text instead.
     fn answer_approval(
         &self,
         request_id: &str,
         decision: Decision,
         message: Option<String>,
         answers: Option<BTreeMap<String, String>>,
+        plan: Option<String>,
     ) -> Result<(), String>;
     /// Stop the current turn. The chat stays usable.
     fn interrupt(&self) -> Result<(), String>;

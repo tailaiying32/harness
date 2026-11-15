@@ -1057,6 +1057,21 @@ Mocked up on the same board:
   the normal title bar there. In Mac full screen the window buttons hide and
   the sidebar's top strip stays empty; accepted for now. Renaming the chat
   from the bar is not built.
+  **Changed 2026-11-14 (branch `harness/harness-browser-pane-0ac457`):** the
+  views became three drawn icons (`PanelIcon.svelte`, drawn like the branch
+  mark: a document, a chat bubble, a globe) at the right of the chat's half of
+  the bar, against the panel's line. Clicking one opens the panel on it;
+  clicking the one on show hides the panel; ◂ and ▸ are gone. The docs icon is
+  faded and does nothing until there is a plan or document. The icon on show
+  is bright, like the open chat in the sidebar (orange was tried and dropped).
+  Plans carry no dot or colour anywhere (not on the docs icon or plan tab, not
+  in the chat line): "Plan · ready for your review · open plan", the link
+  alone is the cue (the user's call). The bar
+  over the open panel now holds that view's own row (`PanelBar.svelte`): docs'
+  tabs, the side chat's name and ×, or the browser's address, ↻ and ×. The
+  panel itself has no row, so every view starts right under the bar. The user
+  liked it in the Magic Patterns canvas "Panel Picker Icons" (it trimmed the
+  browser from three stacked rows to one).
 - **Model picker: built** (the user asked for it on 2026-11-13). A selector
   in the line under the message box lists the models Claude Code itself
   reports, by their real names ("Opus 5.5", "Default (Fable 5.2)"), including
@@ -1256,11 +1271,56 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   plan's: "Page · localhost:5173 · open browser" (a `page` item, rebuilt from
   history on replay; only the latest line has the button, which loads the
   address again if the browser was closed since). No marks in the bars: the
-  user disliked a ● beside ◂ (2026-11-14). With the panel
-  closed, ◂ always shows; with nothing else in the panel it opens the browser's
-  address line. A chat loaded after its page was opened asks `browser_current`.
+  user disliked a ● beside ◂ (2026-11-14). The globe icon in the top bar
+  opens the view at any time; with no page yet it shows an empty address line
+  in the bar, and typing there makes the browser. A chat loaded after its page was opened asks `browser_current`.
 - **Self-test:** `@browser <url>` types an address (waits for the load),
   `@settings` toggles settings; the report has `browser {on, page, pageLines, slot}`.
+
+### Notes and plan edits (built 2026-11-14, branch `harness/chat-notes`)
+
+**Notes.** Every chat has a `notes` tab, always first in the docs row and
+never closed, for longer thinking than a message. Markdown edited in place
+while shown formatted, like Obsidian's live preview (the user's choice over a
+separate edit mode and over Notion-style editing): headings, bold, code and
+links look as when read, and their marks show only on the line the cursor is
+on, so the file is exactly what was typed (`liveMarkdown.ts`, CodeMirror 6
+with the `@lezer/markdown` parser plus GFM; `@codemirror/lang-markdown` was
+dropped because it pulls in HTML, CSS and JavaScript support: 500 KB to
+307 KB, about 100 KB gzipped). It loads on demand, the first time notes or a
+waiting plan are shown (`LiveMarkdown.svelte` shows the formatted text until
+then). A shown link is followed on click, not edited. Escape leaves the
+editor. Empty notes get the cursor. Lists edit like the message box, through the same
+`editing.ts` functions: Enter in a list starts the next item (an empty item
+steps back a level or ends the list), Tab and Shift+Tab indent, and numbered
+lists stay in order. Tested with key presses in the editor. Saved 400 ms after typing stops and when editing
+ends (`write_notes`), read lazily the first time the tab shows (`read_notes`).
+- Stored in the app's data folder, `notes/<chat id>/notes.md` (`notes.rs`),
+  never in the repo; written to a side file then moved into place; 1 MB cap.
+  Purged with the chat when the trash is emptied; swept at start for chats
+  that don't exist (a new chat never sent), like images.
+- The agent reads them only when the user mentions them (the user's choice:
+  "I wrote some notes, take a look"). Each launch, main and side chat, gets
+  `--add-dir <notes folder>` (no permission prompt, tested on CLI 2.1.322) and
+  a line in its instructions with the file's path. Nothing is sent per turn,
+  so prompt caching isn't disturbed.
+- The docs icon is never faded now. Ending the side chat or closing the
+  browser still closes the panel when only the notes are left
+  (`Chat.hasPanelWork`).
+
+**Plan edits.** A waiting plan is editable the same way, in the same editor. Approve (and the
+"always" variant) sends the edit: `answer_approval` takes `plan`, which
+replaces `plan` in the approved input; Claude Code works from that text (tested
+on CLI 2.1.322: no write to its plan file needed). A saved `PlanEdited` event,
+recorded before the answer, keeps the edited plan after a restart. Keep
+planning with an edit sends the whole edited plan in the message. An answered
+plan is read-only.
+
+**Tested** live with the self-test (Haiku): notes read by the main chat with
+no approval card, and by the side chat; an edited plan (GOODBYE added)
+followed exactly and still shown after a restart. Checked in the preview: the
+tab order, formatted notes, editing. Self-test: `@notes <text>`,
+`@planedit <text>`; report `notes` and `plans`.
 
 ### Preview page
 

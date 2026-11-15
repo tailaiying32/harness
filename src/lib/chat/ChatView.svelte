@@ -182,15 +182,16 @@
           </details>
         </div>
       {:else if group.item.type === "approval" && group.item.approval === "plan"}
-        <!-- The plan itself is in the side panel; the chat keeps one line. -->
+        <!-- The plan itself is in the side panel; the chat keeps one line, and its
+             link is the only cue that a plan waits (no dot, no colour). -->
         {@const plan = group.item}
         {@const waiting = !plan.answered && !plan.cancelled}
         {@const latest = plan.requestId === chat.plan?.requestId}
         <div class="row block">
-          <span class="marker accent">{waiting ? "●" : ""}</span>
+          <span class="marker"></span>
           <div class="body" class:faint={!waiting}>
             {#if waiting}
-              <span class="accent">Plan</span> <span class="dim">· ready for your review</span>
+              <span class="dim">Plan · ready for your review</span>
             {:else}
               Plan · {planOutcome(plan)}
             {/if}
