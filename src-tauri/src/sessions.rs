@@ -7,10 +7,10 @@ mod worktrees;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::agent::{AgentAdapter, EventSink, ImagePayload, RunningAgent, SpawnOptions};
+use crate::agent::{AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SpawnOptions};
 use crate::events::{AgentEvent, Block, Decision, Envelope, SessionState};
 use crate::images::{self, ImageRef, Images};
 use crate::store::Store;
@@ -20,6 +20,9 @@ pub use worktrees::{PrLookup, SWEEP_EVERY};
 
 /// Where every chat's events go once saved: the window.
 pub type Out = Arc<dyn Fn(Envelope) + Send + Sync>;
+
+/// Makes the app's own tools for one chat, given its ID.
+pub type ToolsFor = Arc<dyn Fn(&str) -> AppTools + Send + Sync>;
 
 /// How long a chat sits idle before its process is asked to exit.
 const DEFAULT_IDLE_SECONDS: u64 = 300;
@@ -118,6 +121,8 @@ struct Inner {
     /// oldest first; and the lock that has them looked up one at a time.
     pr_links: Mutex<VecDeque<(String, String)>>,
     pr_learn_lock: tokio::sync::Mutex<()>,
+    /// The app's own tools for each chat's agent; set once at start.
+    app_tools: OnceLock<ToolsFor>,
 }
 
 #[derive(Clone)]
@@ -156,7 +161,13 @@ impl SessionManager {
             pr_checked: Mutex::default(),
             pr_links: Mutex::default(),
             pr_learn_lock: tokio::sync::Mutex::default(),
+            app_tools: OnceLock::new(),
         }))
+    }
+
+    /// Gives every chat's agent started from now on the app's own tools.
+    pub fn set_app_tools(&self, tools: ToolsFor) {
+        let _ = self.0.app_tools.set(tools);
     }
 
     /// Chats' images.
@@ -332,6 +343,7 @@ impl SessionManager {
                     model,
                     effort: saved.map(|s| s.effort),
                     side: None,
+                    tools: inner.app_tools.get().map(|tools| tools(session_id)),
                 },
                 self.sink(session_id, run),
             );

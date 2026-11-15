@@ -4,8 +4,12 @@
 pub mod claude_code;
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
+
+use serde_json::Value;
 
 use crate::events::{AgentEvent, Decision, ModelInfo};
 
@@ -27,6 +31,25 @@ pub struct SpawnOptions {
     pub effort: Option<String>,
     /// Set for a side chat: a read-only conversation that starts as a copy of a chat.
     pub side: Option<SideOptions>,
+    /// Tools the app itself offers this chat (the side panel's browser).
+    pub tools: Option<AppTools>,
+}
+
+/// A running tool call's result: MCP content items, or an error message.
+pub type ToolFuture = Pin<Box<dyn Future<Output = Result<Vec<Value>, String>> + Send>>;
+
+/// Tools the app offers the agent, served by the app itself. Agent-agnostic:
+/// the adapter decides how the agent reaches them.
+#[derive(Clone)]
+pub struct AppTools {
+    /// The name the agent knows the group by.
+    pub server: &'static str,
+    /// A line added to the agent's instructions about when to use them.
+    pub instruction: &'static str,
+    /// MCP tool definitions.
+    pub list: Value,
+    /// Runs a call: tool name and arguments.
+    pub call: Arc<dyn Fn(String, Value) -> ToolFuture + Send + Sync>,
 }
 
 /// How a side chat starts.

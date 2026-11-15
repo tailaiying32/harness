@@ -1,19 +1,23 @@
 <script lang="ts">
-  // The side panel: a tabbed space beside the chat, in one of two views picked
-  // in the top bar. Docs: one tab for the plan and one for each markdown file
+  // The side panel: a tabbed space beside the chat, in one of three views picked
+  // in the top bar. Browser: a localhost page Claude can drive too (see
+  // BrowserView). Docs: one tab for the plan and one for each markdown file
   // the chat wrote or a link opened; the plan's answer buttons live at the foot
   // of its tab while Claude waits (mouse only, like every approval: no key
   // approves a plan). Side chat: one tab for the side conversation, its own
   // message box at the foot. Showing and hiding the panel is the top bar's.
   import { contentClick } from "../clicks";
   import ChatView from "../chat/ChatView.svelte";
+  import BrowserView from "./BrowserView.svelte";
   import Markdown from "../chat/Markdown.svelte";
   import { PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
   import { folderOf } from "../paths";
   import { applyPanelWidth, DEFAULT_PANEL_WIDTH, savePrefs } from "../themes";
   import { baseName, planOf } from "../tools";
 
-  let { chat }: { chat: Chat } = $props();
+  // `covered`: something is drawn over the panel (settings, an image), so the
+  // browser's page, which would sit on top of it, is put out of sight.
+  let { chat, covered = false }: { chat: Chat; covered?: boolean } = $props();
 
   // A relative link in a document starts from that document's folder, as in
   // any markdown viewer; in the plan, from the folder Claude works in.
@@ -110,7 +114,9 @@
 <aside class="panel" bind:this={panel}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="grip" title="Drag to resize; double-click to reset" onpointerdown={startDrag} ondblclick={resetWidth}></div>
-  {#if side}
+  {#if chat.panelView === "browser"}
+    <BrowserView {chat} {covered} />
+  {:else if side}
     <!-- Drawn as a tab, like a document's; its × ends the side chat. -->
     <div class="bar">
       <div class="tabs">

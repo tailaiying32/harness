@@ -181,6 +181,14 @@ pub enum AgentEvent {
     PrsChanged {
         prs: Vec<crate::worktree::PrInfo>,
     },
+    /// The chat's side-panel browser: what it shows. Not saved.
+    BrowserState {
+        url: String,
+        title: String,
+        loading: bool,
+    },
+    /// The chat's browser was closed. Not saved.
+    BrowserClosed {},
 }
 
 impl AgentEvent {
@@ -196,6 +204,8 @@ impl AgentEvent {
                 | AgentEvent::BackgroundWork { .. }
                 | AgentEvent::TitleChanged { .. }
                 | AgentEvent::PrsChanged { .. }
+                | AgentEvent::BrowserState { .. }
+                | AgentEvent::BrowserClosed { .. }
         )
     }
 

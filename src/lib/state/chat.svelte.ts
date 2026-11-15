@@ -2,6 +2,9 @@
 
 import {
   answerApproval,
+  browserClose,
+  browserNavigate,
+  browserCurrent,
   closeSession,
   chooseWorktree,
   interrupt,
@@ -16,6 +19,7 @@ import {
   setModel,
   type AgentEvent,
   type ApprovalKind,
+  type BrowserInfo,
   type Decision,
   type ImageRef,
   type Mode,
@@ -26,6 +30,18 @@ import {
   type WorktreeStatus,
 } from "../ipc";
 import { docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
+
+/** What the side panel shows. */
+export type PanelView = "docs" | "side" | "browser";
+
+/** The browser tool that opens a page (see browser.rs). */
+const BROWSER_OPEN = "mcp__harness_browser__open";
+
+/** A string field of a tool's input, or "". */
+function field(input: unknown, key: string): string {
+  const value = input && typeof input === "object" ? (input as Record<string, unknown>)[key] : undefined;
+  return typeof value === "string" ? value : "";
+}
 
 export type UserItem = {
   id: number;
@@ -67,6 +83,8 @@ export type ApprovalItem = {
 export type ErrorItem = { id: number; type: "error"; text: string };
 /** A faint one-line remark from the app, e.g. "stopped". */
 export type NoteItem = { id: number; type: "note"; text: string };
+/** Claude opened a page in the browser; the chat's line for it, with a way to look. */
+export type PageItem = { id: number; type: "page"; url: string };
 /** Claude Code isn't signed in. "done" once signed in, or once a later turn went through. */
 export type SignInItem = {
   id: number;
@@ -107,7 +125,7 @@ function imagesIn(content: unknown): ImageRef[] {
     .map((part) => ({ n: part.n, media_type: String(part.media_type) }));
 }
 
-export type Item = UserItem | TextItem | ThinkingItem | ToolItem | ApprovalItem | ErrorItem | NoteItem | SignInItem;
+export type Item = UserItem | TextItem | ThinkingItem | ToolItem | ApprovalItem | ErrorItem | NoteItem | SignInItem | PageItem;
 
 type NewItem =
   | Omit<UserItem, "id">
@@ -116,6 +134,7 @@ type NewItem =
   | Omit<ToolItem, "id">
   | Omit<ApprovalItem, "id">
   | Omit<ErrorItem, "id">
+  | Omit<PageItem, "id">
   | Omit<NoteItem, "id">
   | Omit<SignInItem, "id">;
 
@@ -234,13 +253,76 @@ export class Chat {
   title = $state("");
 
   // ---- The side panel ----
-  /** The panel's two views: the plan and documents, or the side chat. */
-  panelView = $state<"docs" | "side">("docs");
+  /** The panel's views: the plan and documents, the side chat, or the browser. */
+  panelView = $state<PanelView>("docs");
   /** The side chat (`/btw`), while one is open. It is never saved. */
   side = $state<Chat | null>(null);
   /** The panel has something to show. */
   get panelHasContent(): boolean {
-    return this.tabCount > 0 || this.side !== null;
+    return this.tabCount > 0 || this.side !== null || this.browserOn;
+  }
+
+  // ---- The browser (a localhost page beside the chat; Claude can drive it) ----
+  /** The browser view is open, with or without a page yet. */
+  browserOn = $state(false);
+  /** The page it shows, once there is one. Lives in the core, not saved. */
+  browser = $state<BrowserInfo | null>(null);
+  /** The browser is what the panel shows right now. */
+  get browserShown(): boolean {
+    return this.panelOpen && this.panelView === "browser";
+  }
+
+  /** Opens the browser view: the page if there is one, an empty address line if not. */
+  openBrowser(): void {
+    this.browserOn = true;
+    this.panelView = "browser";
+    this.panelOpen = true;
+  }
+
+  /** From a page line in the chat: shows the browser, loading `url` again if the browser was closed since. */
+  async showPage(url: string): Promise<void> {
+    if (this.owner) return this.owner.showPage(url);
+    this.openBrowser();
+    if (this.browser) return;
+    try {
+      await browserNavigate(this.sessionId, url);
+    } catch (e) {
+      this.showError(String(e));
+    }
+  }
+
+  /** Closes the browser and its page. The panel goes back to another view, or closes. */
+  async closeBrowser(): Promise<void> {
+    const hadPage = this.browser !== null;
+    this.leaveBrowser();
+    if (hadPage) {
+      try {
+        await browserClose(this.sessionId);
+      } catch {
+        // Already gone.
+      }
+    }
+  }
+
+  private leaveBrowser(): void {
+    this.browserOn = false;
+    this.browser = null;
+    if (this.panelView !== "browser") return;
+    this.panelView = this.side ? "side" : "docs";
+    this.panelOpen = this.panelOpen && this.panelHasContent;
+  }
+
+  /** A chat opened again after a reload of the window: pick up its live page. */
+  async loadBrowser(): Promise<void> {
+    try {
+      const info = await browserCurrent(this.sessionId);
+      if (info) {
+        this.browser = info;
+        this.browserOn = true;
+      }
+    } catch {
+      // No core (the preview) or nothing open.
+    }
   }
   /** The latest plan Claude presented. A revised plan replaces it. */
   plan = $state<ApprovalItem | null>(null);
@@ -485,6 +567,11 @@ export class Chat {
           const images = imagesIn(event.content);
           if (images.length) tool.images = images;
           if (!event.is_error) this.trackDocument(tool);
+          // A page Claude opened gets its own line, like a plan, with a way to look at it.
+          if (!event.is_error && tool.name === BROWSER_OPEN) {
+            const url = field(tool.input, "url").trim();
+            this.push({ type: "page", url: /^https?:\/\//.test(url) ? url : `http://${url.replace(/^:/, "localhost:")}` });
+          }
         }
         break;
       }
@@ -610,6 +697,17 @@ export class Chat {
 
       case "title_changed":
         this.title = event.title;
+        break;
+
+      // Claude or the user opened or moved the page. The panel isn't switched
+      // for Claude; the chat's page line (see tool_result) is how to look.
+      case "browser_state":
+        this.browser = { url: event.url, title: event.title, loading: event.loading };
+        this.browserOn = true;
+        break;
+
+      case "browser_closed":
+        this.leaveBrowser();
         break;
 
       // Earlier items stay on screen; Claude now sees a summary of them.
@@ -793,8 +891,9 @@ export class Chat {
   }
 
   /** Shows a view in the panel, opening the panel if it was hidden. Hiding it is the panel toggle's job. */
-  showView(view: "docs" | "side"): void {
+  showView(view: PanelView): void {
     if (view === "side") this.openSide();
+    else if (view === "browser") this.openBrowser();
     else this.openPanel();
   }
 

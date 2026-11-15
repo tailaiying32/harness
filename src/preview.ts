@@ -350,7 +350,11 @@ const looksChat: AgentEvent[] = [
   text("k-m3", "All 31 tests pass, including two new ones for the idle clock."),
   ended,
   { kind: "user_message", text: "and the window side?" },
-  text("k-m4", "Nothing to run there yet: the window has no tests of its own. I checked by hand that a hidden window now shuts down on time."),
+  tool("k6", "mcp__harness_browser__open", { url: "localhost:1420" }),
+  result("k6", "Opened http://localhost:1420/ (Harness)"),
+  tool("k7", "mcp__harness_browser__screenshot", {}),
+  result("k7", ""),
+  text("k-m4", "I opened the app in the browser and checked it: the chat's idle mark now clears on time."),
   ended,
 ];
 
@@ -513,6 +517,20 @@ const commands: Record<string, (args: Args) => unknown> = {
     if (!bytes) throw "Image gone";
     return bytes;
   },
+  // The browser: no page is drawn here (the real one is a separate web view
+  // the core places over the panel); the tab and address line still work.
+  browser_navigate: (args: Args) => {
+    const url = String(args.url).trim();
+    if (!/^(https?:\/\/)?(localhost|127\.0\.0\.1|\[::1\])?(:\d+)?(\/|$)/.test(url)) throw `Only localhost pages can be opened here, not ${url}.`;
+    const full = url.includes("://") ? url : `http://${url.startsWith(":") ? "localhost" + url : url}`;
+    emit(String(args.chatId), { kind: "browser_state", url: full, title: "", loading: true });
+    setTimeout(() => emit(String(args.chatId), { kind: "browser_state", url: full, title: "Sample page", loading: false }), 400);
+  },
+  browser_reload: () => {},
+  browser_place: () => {},
+  browser_close: (args: Args) => emit(String(args.chatId), { kind: "browser_closed" }),
+  browser_current: (args: Args) =>
+    args.chatId === "planning" ? { url: "http://localhost:5173/", title: "My app", loading: false } : null,
   read_doc: (args: Args) => {
     const path = String(args.path);
     if (path.endsWith("gone.md")) throw "That file doesn't exist.";
@@ -538,8 +556,8 @@ const commands: Record<string, (args: Args) => unknown> = {
 
 mount(App, { target: document.getElementById("app")! });
 
-// For screenshots: `#open=<chat id>` opens that chat, and `&trash` opens the
-// sidebar's trash list.
+// For screenshots: `#open=<chat id>` opens that chat, `&trash` opens the
+// sidebar's trash list, and `&browser` the panel's browser view.
 const wanted = new URLSearchParams(location.hash.slice(1));
 setTimeout(() => {
   const title = [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === wanted.get("open"))?.title;
@@ -548,5 +566,11 @@ setTimeout(() => {
     if (!title) return;
     const buttons = [...document.querySelectorAll<HTMLButtonElement>("aside button.open")];
     buttons.find((b) => b.textContent?.includes(title))?.click();
+    if (wanted.has("browser")) {
+      setTimeout(() => {
+        const bar = [...document.querySelectorAll<HTMLButtonElement>("header.bar button")];
+        bar.find((b) => b.textContent?.includes("browser") || b.textContent?.includes("◂"))?.click();
+      }, 200);
+    }
   }, 100);
 }, 400);
