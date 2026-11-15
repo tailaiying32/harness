@@ -3,25 +3,34 @@
   // is remembered. Also home to things that aren't part of the work at hand,
   // like the trash.
   import type { AppState } from "./state/app.svelte";
-  import { applyFontSize, applySize, applyTheme, fontSizes, savePrefs, sizes, themes, type Size } from "./themes";
+  import { appearances, applyFontSize, applySize, fontSizes, savePrefs, sizes, themes, type Appearance, type Size } from "./themes";
 
   let {
     app,
-    theme = $bindable(),
+    darkTheme = $bindable(),
+    lightTheme = $bindable(),
+    appearance = $bindable(),
     size = $bindable(),
     fontSize = $bindable(),
     onclose,
-  }: { app: AppState; theme: string; size: Size; fontSize: number; onclose: () => void } = $props();
+  }: { app: AppState; darkTheme: string; lightTheme: string; appearance: Appearance; size: Size; fontSize: number; onclose: () => void } = $props();
 
-  const groups = [
-    { name: "dark", list: themes.filter((t) => t.dark) },
-    { name: "light", list: themes.filter((t) => !t.dark) },
-  ];
+  // One pick per side. The app shows whichever side the appearance says, so
+  // picking for the other side changes nothing on screen. App.svelte applies it.
+  const groups = $derived([
+    { name: "dark", picked: darkTheme, list: themes.filter((t) => t.dark) },
+    { name: "light", picked: lightTheme, list: themes.filter((t) => !t.dark) },
+  ]);
 
-  function pickTheme(id: string) {
-    theme = id;
-    applyTheme(id);
-    savePrefs({ theme: id });
+  function pickTheme(id: string, dark: boolean) {
+    if (dark) darkTheme = id;
+    else lightTheme = id;
+    savePrefs(dark ? { darkTheme: id } : { lightTheme: id });
+  }
+
+  function pickAppearance(value: Appearance) {
+    appearance = value;
+    savePrefs({ appearance: value });
   }
 
   function pickSize(value: Size) {
@@ -94,13 +103,24 @@
     </section>
 
     <section>
+      <div class="label">Appearance</div>
+      <div class="choices">
+        {#each appearances as a (a)}
+          <button class:on={a === appearance} onclick={() => pickAppearance(a)}>
+            <span class="mark">{a === appearance ? "(•)" : "( )"}</span>{a}
+          </button>
+        {/each}
+      </div>
+    </section>
+
+    <section>
       <div class="label">Theme</div>
       {#each groups as group (group.name)}
         <div class="sub">{group.name}</div>
         <div class="choices grid">
           {#each group.list as t (t.id)}
-            <button class:on={t.id === theme} onclick={() => pickTheme(t.id)}>
-              <span class="mark">{t.id === theme ? "(•)" : "( )"}</span>{t.name}
+            <button class:on={t.id === group.picked} onclick={() => pickTheme(t.id, t.dark)}>
+              <span class="mark">{t.id === group.picked ? "(•)" : "( )"}</span>{t.name}
             </button>
           {/each}
         </div>

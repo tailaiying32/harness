@@ -163,7 +163,40 @@ export const themes: Theme[] = [
 export const sizes = ["compact", "regular", "roomy"] as const;
 export type Size = (typeof sizes)[number];
 
-export const DEFAULT_THEME = "harness-dark";
+export const DEFAULT_DARK_THEME = "harness-dark";
+export const DEFAULT_LIGHT_THEME = "harness-light";
+
+/** Which of the two picked themes shows: always one, or whichever the system is in. */
+export const appearances = ["auto", "light", "dark"] as const;
+export type Appearance = (typeof appearances)[number];
+export const DEFAULT_APPEARANCE: Appearance = "auto";
+
+const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
+
+export function systemIsDark(): boolean {
+  return systemDark.matches;
+}
+
+/** Calls `changed` when the system goes light or dark. The browser sends one event per switch; nothing polls. */
+export function watchSystem(changed: (dark: boolean) => void): void {
+  systemDark.addEventListener("change", (e) => changed(e.matches));
+}
+
+/** The theme to show: the dark pick or the light pick, as the appearance says. */
+export function shownTheme(appearance: Appearance, darkTheme: string, lightTheme: string, systemDark: boolean): string {
+  const dark = appearance === "auto" ? systemDark : appearance === "dark";
+  return dark ? darkTheme : lightTheme;
+}
+
+/** A palette's other half, for filling in the side that had no pick before there were two. */
+const pairs: [dark: string, light: string][] = [
+  ["harness-dark", "harness-light"],
+  ["solarized-dark", "solarized-light"],
+  ["gruvbox-dark", "gruvbox-light"],
+  ["catppuccin-mocha", "catppuccin-latte"],
+  ["github-dark", "github-light"],
+  ["rose-pine", "rose-pine-dawn"],
+];
 export const DEFAULT_SIZE: Size = "regular";
 
 /** Switching a theme only sets custom properties; nothing re-renders. */
@@ -211,7 +244,10 @@ export function applyFontSize(px: number): void {
 
 /** `size` is the spacing: line height, gaps and margins. */
 type Prefs = {
-  theme: string;
+  /** The theme shown when the app is dark, and the one shown when it is light. */
+  darkTheme: string;
+  lightTheme: string;
+  appearance: Appearance;
   size: Size;
   model: string;
   fontSize: number;
@@ -232,10 +268,22 @@ const modes = ["default", "acceptEdits", "auto"];
 // Stored in the window's own storage until there is a settings page.
 export function loadPrefs(): Prefs {
   try {
-    const saved = JSON.parse(localStorage.getItem("harness.prefs") ?? "{}") as Partial<Prefs>;
+    const saved = JSON.parse(localStorage.getItem("harness.prefs") ?? "{}") as Partial<Prefs> & { theme?: string };
+    // Before there were two picks there was one `theme`: it becomes the pick
+    // for its side, and its other half (or the default) the pick for the other.
+    const old = themes.find((t) => t.id === saved.theme);
+    const pick = (dark: boolean, savedId: string | undefined, fallback: string): string => {
+      if (themes.some((t) => t.id === savedId && t.dark === dark)) return savedId!;
+      if (!old) return fallback;
+      if (old.dark === dark) return old.id;
+      const pair = pairs.find((p) => p.includes(old.id));
+      return pair ? pair[dark ? 0 : 1] : fallback;
+    };
     const size = sizes.includes(saved.size as Size) ? (saved.size as Size) : DEFAULT_SIZE;
     return {
-      theme: themes.some((t) => t.id === saved.theme) ? saved.theme! : DEFAULT_THEME,
+      darkTheme: pick(true, saved.darkTheme, DEFAULT_DARK_THEME),
+      lightTheme: pick(false, saved.lightTheme, DEFAULT_LIGHT_THEME),
+      appearance: appearances.includes(saved.appearance as Appearance) ? saved.appearance! : DEFAULT_APPEARANCE,
       size,
       // Any saved name is kept; if Claude Code no longer knows it, the chat says so.
       model: typeof saved.model === "string" && saved.model ? saved.model : "default",
@@ -248,7 +296,7 @@ export function loadPrefs(): Prefs {
           : DEFAULT_PANEL_WIDTH,
     };
   } catch {
-    return { theme: DEFAULT_THEME, size: DEFAULT_SIZE, model: "default", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH };
+    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH };
   }
 }
 

@@ -25,10 +25,24 @@
   import { loadCachedModels, saveCachedModels } from "./lib/models";
   import { AppState } from "./lib/state/app.svelte";
   import type { Chat } from "./lib/state/chat.svelte";
-  import { applyFontSize, applyPanelWidth, applySize, applyTheme, loadPrefs, sizes, type Size } from "./lib/themes";
+  import {
+    applyFontSize,
+    applyPanelWidth,
+    applySize,
+    applyTheme,
+    loadPrefs,
+    shownTheme,
+    sizes,
+    systemIsDark,
+    themes,
+    watchSystem,
+    type Appearance,
+    type Size,
+  } from "./lib/themes";
 
   const prefs = loadPrefs();
-  applyTheme(prefs.theme);
+  // Applied here as well as in the effect below, so the window never starts in the wrong colours.
+  applyTheme(shownTheme(prefs.appearance, prefs.darkTheme, prefs.lightTheme, systemIsDark()));
   applySize(prefs.size);
   applyFontSize(prefs.fontSize);
   applyPanelWidth(prefs.panelWidth);
@@ -39,7 +53,14 @@
   const chat = $derived(app.current);
   const panelOpen = $derived(chat.panelOpen && chat.tabCount > 0);
 
-  let theme = $state(prefs.theme);
+  // Two picked themes, and which shows: one of them always, or whichever the
+  // system is in, switching the moment it does.
+  let darkTheme = $state(prefs.darkTheme);
+  let lightTheme = $state(prefs.lightTheme);
+  let appearance = $state<Appearance>(prefs.appearance);
+  let systemDark = $state(systemIsDark());
+  watchSystem((dark) => (systemDark = dark));
+  $effect(() => applyTheme(shownTheme(appearance, darkTheme, lightTheme, systemDark)));
   let size = $state<Size>(prefs.size);
   let fontSize = $state(prefs.fontSize);
   let setup = $state<SetupInfo | null>(null);
@@ -101,9 +122,11 @@
     const test = await autotest();
     if (!test) return;
     app.current.projectPath = test.folder;
-    if (test.theme) {
-      theme = test.theme;
-      applyTheme(test.theme);
+    const testTheme = themes.find((t) => t.id === test.theme);
+    if (testTheme) {
+      if (testTheme.dark) darkTheme = testTheme.id;
+      else lightTheme = testTheme.id;
+      appearance = testTheme.dark ? "dark" : "light";
     }
     if (test.size && (sizes as readonly string[]).includes(test.size)) {
       size = test.size as Size;
@@ -272,7 +295,7 @@
   {/if}
   <!-- Drawn over the chat and panel, which stay as they are underneath. -->
   {#if showSettings}
-    <Settings {app} bind:theme bind:size bind:fontSize onclose={() => (showSettings = false)} />
+    <Settings {app} bind:darkTheme bind:lightTheme bind:appearance bind:size bind:fontSize onclose={() => (showSettings = false)} />
   {/if}
   </div>
 </div>
