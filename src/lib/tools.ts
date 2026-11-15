@@ -11,6 +11,8 @@ export type ToolCall = {
   isError?: boolean;
   /** The user denied it, or it was cancelled while waiting for an answer. */
   declined?: boolean;
+  /** Pictures its result handed the agent, kept by the core. */
+  images?: { n: number; media_type: string }[];
 };
 
 export type DiffLine = { sign: "+" | "-"; text: string };

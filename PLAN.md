@@ -1,6 +1,8 @@
 # Harness v1 plan
 
-Status, 2026-11-13: steps 1 to 5 of "Order of work" are built. The app has a
+Status, 2026-11-13: steps 1 to 5 of "Order of work" are built. Images
+(paste, drop, tool images, a full-space image view) were added 2026-11-14;
+see "Images". The app has a
 sidebar of projects and chats, saved history that comes back after a quit,
 resume after a chat's process has exited, idle shutdown, and one chat view in
 the Quiet Terminal look: formatted text, code blocks, folded tool runs,
@@ -124,6 +126,12 @@ piece, not reworking the app.
   that opens it.
 - **Read what Claude wrote.** Each markdown file a chat writes gets a tab in
   the side panel, and the tab follows Claude's later edits to that file.
+- **Share an image.** Paste or drop one into the message box. It shows as
+  `[image 1]` in the text and goes to Claude with the message. Images a tool
+  hands Claude (a Read of a .png, a screenshot) show as `[image 2]` on the
+  folded work line. Clicking any of these words opens the image over the chat
+  and side panel, the way settings are, sized to fit; clicking the picture
+  shows its actual pixels. The chat itself never shows a picture.
 - **Walk away.** Five minutes after a chat's last answer, its process exits
   and frees its memory. The chat stays in the sidebar. Your next message
   restarts it where it left off. A chat with background work still running
@@ -168,7 +176,10 @@ the login itself.
 - Codex, Cursor or other agents. The design leaves room; nothing is built.
 - Chats made earlier in the desktop app or the terminal. Only chats started in
   this app appear in the sidebar.
-- Images and file attachments in messages.
+- Attachments other than images (PDFs and other files), pictures inside
+  markdown (`![](shot.png)`) in the chat or the panel, and opening a link to
+  a local image in the image view (it reveals the file in Finder). Copy or
+  save from the image view.
 - Sharing the app with other people. It is for personal use only.
 - On Windows, stopping a chat (delete, quit, a hung close) kills its process
   outright, so its background commands keep running. Fix in the Windows pass
@@ -226,6 +237,7 @@ src-tauri/
       claude_code.rs   the only file that knows Claude Code's wire format
     sessions.rs        SessionManager: live processes, saving, resume, idle shutdown
     store.rs           SQLite schema, reads, writes
+    images.rs          pasted images and images from tools, as files per chat
     locate.rs          find the claude binary
 src/
   App.svelte           the window: sidebar + the open chat; the self-test
@@ -236,6 +248,8 @@ src/
     state/chat.svelte.ts  one chat: items on screen, live events and replay
     Sidebar.svelte     projects and chats
     chat/              ChatView, WorkRun, ApprovalCard, Composer, Clipped, Markdown
+    chat/images.ts     shrinking and saving a pasted or dropped image
+    ImageViewer.svelte an image drawn over the chat and panel
     panel/SidePanel.svelte   the tabbed side panel: plan and documents
     clicks.ts          copy and link clicks in formatted text (chat and panel)
     tools.ts           how tool calls are worded; which calls write documents
@@ -312,6 +326,16 @@ User message (**Tested**):
 
 ```json
 {"type":"user","uuid":"<id the app made>","message":{"role":"user","content":"text here"}}
+```
+
+With images (**Tested** 2026-11-14), `content` is a list: the images first,
+in the order their words appear, then the text. Claude Code 2.1.322 takes
+PNG, JPEG, GIF and WebP, at most 2000 px a side and 5 MB once encoded:
+
+```json
+{"type":"user","uuid":"…","message":{"role":"user","content":[
+  {"type":"image","source":{"type":"base64","media_type":"image/png","data":"…"}},
+  {"type":"text","text":"[image 1] what is this?"}]}}
 ```
 
 Claude Code echoes it back on stdout, with the same `uuid` and
@@ -618,6 +642,48 @@ can't close a chat that has been used since.
   frozen by the system while nothing happens (seen with the screen locked):
   its timers don't fire, though events from the core still wake it.
 
+### Images (`images.rs`, built 2026-11-14)
+
+- **Where they live:** `<data dir>/images/<chat id>/<n>.<png|jpg|gif|webp>`,
+  numbered from 1 per chat. One count is shared by pasted images and images
+  from tools, so every `[image n]` in a chat is unique. Saved history holds
+  only `{ n, media_type }`: on `UserMessage.images`, and in tool results as
+  `{"type":"image_ref","n":…,"media_type":…}`. A paste that had to be shrunk
+  for Claude also keeps its original as `<n>.full.<ext>`, for looking at
+  only; `read_image` returns it when there is one.
+- **Pasting** (`chat/images.ts`, `Composer.svelte`): a paste with any plain
+  text in it pastes the text (copied spreadsheet cells carry a picture too).
+  Otherwise each image is shrunk to fit Claude Code's limits if needed (PNG
+  kept as PNG when it fits, else JPEG at falling quality), saved with
+  `save_image`, and its word is inserted at the cursor as typing would, so
+  undo works. Dropping works the same; the window's `dragDropEnabled` is off
+  so the page gets real drop events. A pasted image whose word is deleted
+  isn't sent, but keeps its number, so a later one may skip a number.
+- **The word in the box:** a textarea can't colour part of its text, so
+  while the draft holds an image word a copy of the text sits behind it with
+  the words in the accent colour, and the box's own text is see-through.
+  Clicking inside a word opens the image.
+- **Sending:** `Chat.send` attaches each draft image whose word is in the
+  text. The core reads the files, fails the send if one is missing, and
+  writes them to Claude Code as base64 (see "Messages the app sends").
+- **Tool results:** the session sink moves each base64 image in a tool
+  result into the store and leaves an `image_ref` in its place, before the
+  result is capped, saved or sent to the window. Before this, a Read of a
+  .png put its whole base64 into the history.
+- **Showing:** `ImageWord.svelte` draws `[image n]` in the accent colour, in
+  sent messages and after a work run's summary (outside its cut-off, so it
+  always shows). Clicking one sets `Chat.viewing`, and `ImageViewer.svelte`
+  is drawn over the chat and panel like settings: the picture sized to fit
+  (never blown up), a dim line with `image n · W×H`, `‹ k of N ›` and `×`.
+  Clicking the picture switches to actual pixels (one image pixel per screen
+  pixel), scrolled to the clicked spot, and back. ← → step through the
+  chat's images by number; Escape, `×` or a click beside the picture closes
+  it and gives the keys back to the message box. The bytes are read only
+  while an image is shown, and freed after.
+- **Cleanup:** a chat's images go when it is deleted for good (purge), not
+  when it is trashed. At start, folders of chats that don't exist are removed:
+  pastes into a new chat that was never sent leave one.
+
 ### Store (`store.rs`)
 
 One SQLite file, `harness.db`, in the Tauri app data directory
@@ -666,7 +732,10 @@ sign_in()                 run `claude auth login`; resolves when it exits
 sidebar()                 every project with its chats, newest first
 load_session(session_id)  -> { session, events, live }
 delete_session(session_id)
-send_message(session_id, project_path, mode, model, text, message_id)
+send_message(session_id, project_path, mode, model, text, images?, message_id)
+                          images: numbers of the chat's saved images to send
+save_image(session_id, media_type, data, original?)  base64 in; -> { n, media_type }
+read_image(session_id, n) raw bytes for looking at (the original of a shrunk paste)
 rename_session(session_id, title)
 answer_approval(session_id, request_id, decision, message?, answers?)
 interrupt(session_id)
@@ -732,6 +801,13 @@ https://www.magicpatterns.com/os/tWmrW2q43Q7sWofaHnFJVj?file=2oZgfpBgi1cedNPY3NJ
   rather than a terminal: with only a `>` marker, the user's messages were
   hard to find when scrolling back. Claude's text has no bubble. Code blocks
   use style D (see "Appearance settings").
+- **Images (chosen 2026-11-14):** never pictured in the chat. Each is a word
+  like `[image 1]` in the accent colour, in the message box, in sent messages
+  and on work lines; clicking it opens the image over the chat and panel, the
+  way settings are. Thumbnails were weighed and dropped: they cost space and
+  still needed a click. A side panel tab was built first and dropped: too
+  small to make out a screenshot's details. Options are on the "Images in
+  Chat" canvas in the Magic Patterns OS above.
 - **Claude's work:** a run of tool calls folds into one dim line ("Read
   sessions.rs, searched for SessionState::Idle ▸"), with +/- counts when it
   includes edits. Clicking opens it to one line per tool call, with the diff
@@ -1025,7 +1101,8 @@ Mocked up on the same board:
 
 `npm run dev`, then open `http://localhost:1420/preview.html`: the same window
 in a plain browser, with a stand-in for the core (`src/preview.ts`) that has a
-sidebar of sample chats, one saved chat, a 300-turn chat, a chat with a plan
+sidebar of sample chats, one saved chat, a 300-turn chat, a chat with
+images ("Settings list cut off"; pasting works too), a chat with a plan
 waiting and two documents (for the side panel; Keep planning brings a revised
 plan, approving brings an edit to a document), and a scripted answer to
 anything typed. For working on the look without building the app.
@@ -1124,7 +1201,8 @@ before building it. Only `claude_code.rs` would change.
    into the next message), `@background` (don't wait for the next message's
    answer), `@new`, `@open <n>` and `@delete <n>` (the nth chat in the
    sidebar, from 0), `@close` (shut the open chat's process down), `@exited`
-   (wait for it to exit) and `@wait <ms>`. Set `HARNESS_DATA_DIR` so a test
+   (wait for it to exit), `@wait <ms>` and `@image <word>` (attach a picture
+   of that word to the next message, through the same code a paste uses). Set `HARNESS_DATA_DIR` so a test
    never touches the real saved chats, and `HARNESS_IDLE_SECONDS` to test idle
    shutdown quickly. With the window hidden or the screen locked the page is
    frozen while nothing happens, so `@wait` never ends there: wait on an event

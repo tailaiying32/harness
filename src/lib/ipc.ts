@@ -41,7 +41,7 @@ export type AgentEvent =
   | { kind: "approval_answered"; request_id: string; decision: Decision; answers: Record<string, string> | null }
   | { kind: "mode_changed"; mode: string }
   | { kind: "interrupted" }
-  | { kind: "user_message"; text: string; id?: string | null }
+  | { kind: "user_message"; text: string; id?: string | null; images?: ImageRef[] }
   | { kind: "message_seen"; id: string }
   | { kind: "turn_ended"; ok: boolean; duration_ms: number | null }
   | { kind: "usage_update"; window: string | null; utilization: number }
@@ -55,6 +55,9 @@ export type AgentEvent =
   | { kind: "worktree_chosen"; choice: WorktreeChoice }
   | { kind: "worktree_changed"; status: WorktreeStatus; branch: string | null }
   | { kind: "prs_changed"; prs: PrInfo[] };
+
+/** One saved image of a chat: what its `[image n]` word points at. */
+export type ImageRef = { n: number; media_type: string };
 
 /** The answer to Claude's request for a worktree. */
 export type WorktreeChoice = "worktree" | "here";
@@ -141,7 +144,9 @@ export const sendMessage = (
   effort: string,
   text: string,
   messageId: string,
-) => invoke<void>("send_message", { sessionId, projectPath, mode, model, effort, text, messageId });
+  /** Numbers of the chat's saved images to send with the text. */
+  images: number[] = [],
+) => invoke<void>("send_message", { sessionId, projectPath, mode, model, effort, text, images, messageId });
 
 export const answerApproval = (
   sessionId: string,
@@ -201,6 +206,17 @@ export const autotest = () =>
 /** A pause timed by the core; a hidden window's own timers run late. */
 export const autotestWait = (ms: number) => invoke<void>("autotest_wait", { ms });
 export const autotestReport = (text: string) => invoke<void>("autotest_report", { text });
+
+/** Keeps a pasted or dropped image for a chat. `data` is base64. `original`
+ *  is the full-size image when this one was shrunk; it is kept for looking at. */
+export const saveImage = (
+  sessionId: string,
+  mediaType: string,
+  data: string,
+  original?: { media_type: string; data: string },
+) => invoke<ImageRef>("save_image", { sessionId, mediaType, data, original });
+/** A chat's image as raw bytes, for looking at: the original of a shrunk paste. */
+export const readImage = (sessionId: string, n: number) => invoke<ArrayBuffer>("read_image", { sessionId, n });
 
 /** A markdown file's text, for a link opened in the side panel. */
 export const readDoc = (path: string) => invoke<string>("read_doc", { path });

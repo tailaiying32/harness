@@ -110,6 +110,9 @@ pub enum AgentEvent {
         /// history saved before messages had IDs.
         #[serde(default)]
         id: Option<String>,
+        /// Images sent with it, in the order their `[image n]` words appear.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::images::ImageRef>,
     },
     /// The agent took a message in. One sent mid-turn waits until the running
     /// step is done.
@@ -299,12 +302,12 @@ mod tests {
     #[test]
     fn only_lasting_events_are_saved() {
         assert!(AgentEvent::Interrupted.is_saved());
-        assert!(AgentEvent::UserMessage { text: "hi".into(), id: None }.is_saved());
+        assert!(AgentEvent::UserMessage { text: "hi".into(), id: None, images: vec![] }.is_saved());
         assert!(AgentEvent::MessageSeen { id: "u1".into() }.is_saved());
         // History saved before messages had IDs still loads.
         assert_eq!(
             serde_json::from_str::<AgentEvent>(r#"{"kind":"user_message","text":"hi"}"#).unwrap(),
-            AgentEvent::UserMessage { text: "hi".into(), id: None }
+            AgentEvent::UserMessage { text: "hi".into(), id: None, images: vec![] }
         );
         assert!(!AgentEvent::Status { state: SessionState::Idle }.is_saved());
         assert!(!AgentEvent::BackgroundWork { running: 1 }.is_saved());

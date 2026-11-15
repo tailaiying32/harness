@@ -566,6 +566,19 @@ impl Store {
             .collect())
     }
 
+    /// The ID of every chat, the trash included.
+    pub fn session_ids(&self) -> Result<std::collections::HashSet<String>, String> {
+        let conn = self.conn.lock().unwrap();
+        let ids = conn
+            .prepare("SELECT id FROM sessions")
+            .map_err(err)?
+            .query_map([], |row| row.get(0))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err);
+        ids
+    }
+
     /// Removes a chat and its history. A project left with no chats goes too.
     pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
         let mut conn = self.conn.lock().unwrap();
@@ -628,7 +641,7 @@ mod tests {
     use super::*;
 
     fn user(text: &str) -> AgentEvent {
-        AgentEvent::UserMessage { text: text.into(), id: None }
+        AgentEvent::UserMessage { text: text.into(), id: None, images: vec![] }
     }
 
     #[test]
