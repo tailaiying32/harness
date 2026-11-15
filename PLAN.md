@@ -1001,7 +1001,8 @@ Mocked up on the same board:
   planning), then goes in as usual, so Claude reads it next. Left open, the
   request held the turn and the message queued behind it, which looked
   stuck. The open requests come from the adapter (`open_requests`), so the
-  ones it answers itself are never touched. Not tested live.
+  ones it answers itself are never touched. **Tested** live by the user
+  (2026-11-15): a plan and the worktree question, each answered by typing.
 - **Plans always open in the side panel** (2026-11-13, the user's request).
   Every launch appends an instruction to Claude Code's system prompt
   (`PLAN_INSTRUCTION` in `claude_code.rs`): when asked for a plan in any mode,
