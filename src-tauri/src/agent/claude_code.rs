@@ -225,6 +225,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 // After a stop: when to kill if it hasn't exited.
                 let mut kill_at: Option<tokio::time::Instant> = None;
                 let mut killed = false;
+                let mut seen = HashSet::new();
+                // Claude Code exits with an error, silently, when its last turn
+                // failed (seen after a signed-out turn). That failure was shown already.
+                let mut last_turn_failed = false;
                 loop {
                     let line = tokio::select! {
                         line = lines.next_line() => match line {
@@ -248,6 +252,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
                     let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
                         continue;
                     };
+                    if is_repeat(&value, &mut seen) {
+                        continue;
+                    }
+                    if value["type"] == "result" {
+                        last_turn_failed = value["is_error"] == true;
+                    }
                     let translated = translate(&value, &pending);
                     if let Some(reply) = translated.reply {
                         if let Some(tx) = weak_tx.upgrade() {
@@ -261,8 +271,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 let clean_exit = matches!(child.wait().await, Ok(status) if status.success());
                 pending.lock().unwrap().clear();
                 // A stopped process exits with an error on purpose.
-                if !clean_exit && kill_at.is_none() {
-                    let tail: Vec<String> = stderr_tail.lock().unwrap().iter().cloned().collect();
+                let tail: Vec<String> = stderr_tail.lock().unwrap().iter().cloned().collect();
+                if !clean_exit && kill_at.is_none() && !(last_turn_failed && tail.is_empty()) {
                     let detail = if tail.is_empty() {
                         "no error output".to_string()
                     } else {
@@ -435,7 +445,50 @@ impl AgentAdapter for ClaudeCodeAdapter {
         }
         Ok(title)
     }
+
+    fn sign_in(&self, binary: &Path) -> Result<(), String> {
+        use std::io::Read;
+        let mut cmd = std::process::Command::new(binary);
+        cmd.args(["auth", "login"])
+            .current_dir(std::env::temp_dir())
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Could not start Claude Code: {e}"))?;
+        let mut stderr = child.stderr.take().ok_or("Claude Code has no stderr")?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            let _ = tx.send(text);
+        });
+        // Stderr closes when the process ends; the wait covers time in the browser.
+        let Ok(detail) = rx.recv_timeout(SIGN_IN_TIMEOUT) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Sign-in took too long".to_string());
+        };
+        let status = child.wait().map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            let detail = detail.trim();
+            Err(if detail.is_empty() { "Sign-in failed".to_string() } else { detail.to_string() })
+        }
+    }
 }
+
+/// How long `claude auth login` may wait for the user to finish in the browser.
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// The title model's whole instructions, replacing Claude Code's own (which
 /// talk about tools, and made a message like "use your Write tool" come back
@@ -677,6 +730,20 @@ fn text_of(value: &Value) -> String {
     value.as_str().unwrap_or_default().to_string()
 }
 
+/// Whether this is an assistant message already passed on. Compacting makes
+/// Claude Code send the last few messages again; each copy keeps its line
+/// `uuid` (its `message.id` changes), so the uuid tells them apart (tested on
+/// CLI 2.1.322).
+fn is_repeat(v: &Value, seen: &mut HashSet<String>) -> bool {
+    if v["type"] != "assistant" {
+        return false;
+    }
+    match v["uuid"].as_str() {
+        Some(uuid) => !seen.insert(uuid.to_string()),
+        None => false,
+    }
+}
+
 /// Turn one line of Claude Code output into the app's events.
 /// Unknown types and subtypes are ignored: new ones appear between CLI versions.
 fn translate(v: &Value, pending: &Pending) -> Translated {
@@ -698,12 +765,46 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
 
         // Sent when the mode changes: after `set_permission_mode`, after a plan
         // is approved, or when an "always allow" answer switches it.
+        // Also says when compacting starts (`status: "compacting"`) and how it
+        // went (`compact_result`), for /compact and for automatic compaction.
         "system" if v["subtype"] == "status" => {
             if let Some(mode) = v["permissionMode"].as_str() {
                 out.events.push(AgentEvent::ModeChanged {
                     mode: mode.to_string(),
                 });
             }
+            if v["status"] == "compacting" {
+                out.events.push(AgentEvent::Compacting { active: true });
+            }
+            if let Some(result) = v["compact_result"].as_str() {
+                out.events.push(AgentEvent::Compacting { active: false });
+                if result != "success" {
+                    // Only success has been seen; the failure detail's field is a guess.
+                    let message = match v["compact_error"].as_str() {
+                        Some(detail) => format!("Compacting failed: {detail}"),
+                        None => "Compacting failed".to_string(),
+                    };
+                    out.events.push(AgentEvent::Error { message });
+                }
+            }
+        }
+
+        // Where compacting cut the conversation. Claude Code then sends a
+        // summary as a user message (ignored below) and repeats the last few
+        // messages (dropped by `is_repeat`).
+        "system" if v["subtype"] == "compact_boundary" => {
+            out.events.push(AgentEvent::Compacted {
+                auto: v["compact_metadata"]["trigger"] == "auto",
+            });
+        }
+
+        // Claude Code began on a message. For a slash command this comes before
+        // its output, while the echo comes after it, so this is what counts as
+        // taken in; `acknowledge` then drops the late echo (tested on CLI 2.1.322).
+        "command_lifecycle" if v["state"] == "started" => {
+            out.events.push(AgentEvent::MessageSeen {
+                id: text_of(&v["command_uuid"]),
+            });
         }
 
         // The full list of background commands and agents, sent whenever it
@@ -734,6 +835,19 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
         }
 
         // One finished block per event; blocks of one reply share `message.id`.
+        // Signed out, or the login could not be renewed. Comes as a reply of its
+        // own reading "Not logged in · Please run /login".
+        "assistant" if v["error"] == "authentication_failed" => {
+            let message = v["message"]["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            out.events.push(AgentEvent::SignInNeeded { message });
+        }
+
         "assistant" => {
             let message_id = text_of(&v["message"]["id"]);
             for b in v["message"]["content"].as_array().into_iter().flatten() {
@@ -1238,5 +1352,102 @@ mod tests {
             }
         );
         assert!(events(r#"{"type":"brand_new_thing"}"#, &Pending::default()).is_empty());
+    }
+
+    #[test]
+    fn a_started_message_counts_as_taken_in_and_its_late_echo_is_dropped() {
+        let pending = Pending::default();
+        let sent = Sent::default();
+        sent.lock().unwrap().insert("c1".into());
+        let queued = r#"{"type":"command_lifecycle","command_uuid":"c1","state":"queued"}"#;
+        assert!(events(queued, &pending).is_empty());
+        let started = r#"{"type":"command_lifecycle","command_uuid":"c1","state":"started"}"#;
+        assert_eq!(
+            acknowledge(events(started, &pending), &sent),
+            vec![
+                AgentEvent::MessageSeen { id: "c1".into() },
+                AgentEvent::Status {
+                    state: SessionState::Working
+                },
+            ]
+        );
+        // A slash command's echo comes after its output; by then it is old news.
+        let echo = r#"{"type":"user","isReplay":true,"uuid":"c1","message":{"role":"user","content":"<command-name>/context</command-name>"}}"#;
+        assert!(acknowledge(events(echo, &pending), &sent).is_empty());
+        let completed = r#"{"type":"command_lifecycle","command_uuid":"c1","state":"completed"}"#;
+        assert!(events(completed, &pending).is_empty());
+    }
+
+    #[test]
+    fn compacting_is_reported_start_to_finish() {
+        let pending = Pending::default();
+        assert_eq!(
+            events(r#"{"type":"system","subtype":"status","status":"compacting"}"#, &pending),
+            vec![AgentEvent::Compacting { active: true }]
+        );
+        assert_eq!(
+            events(
+                r#"{"type":"system","subtype":"status","status":null,"compact_result":"success"}"#,
+                &pending
+            ),
+            vec![AgentEvent::Compacting { active: false }]
+        );
+        let failed = events(
+            r#"{"type":"system","subtype":"status","status":null,"compact_result":"failed","compact_error":"too short"}"#,
+            &pending,
+        );
+        assert_eq!(
+            failed,
+            vec![
+                AgentEvent::Compacting { active: false },
+                AgentEvent::Error {
+                    message: "Compacting failed: too short".into()
+                },
+            ]
+        );
+        assert_eq!(
+            events(
+                r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual"}}"#,
+                &pending
+            ),
+            vec![AgentEvent::Compacted { auto: false }]
+        );
+        assert_eq!(
+            events(
+                r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto"}}"#,
+                &pending
+            ),
+            vec![AgentEvent::Compacted { auto: true }]
+        );
+    }
+
+    #[test]
+    fn messages_repeated_after_compacting_are_skipped() {
+        let mut seen = HashSet::new();
+        let first: Value = serde_json::from_str(
+            r#"{"type":"assistant","uuid":"a1","message":{"id":"m1","content":[{"type":"text","text":"x"}]}}"#,
+        )
+        .unwrap();
+        // The copy gets a new message id but keeps the line's uuid.
+        let copy: Value = serde_json::from_str(
+            r#"{"type":"assistant","uuid":"a1","message":{"id":"m2","content":[{"type":"text","text":"x"}]}}"#,
+        )
+        .unwrap();
+        assert!(!is_repeat(&first, &mut seen));
+        assert!(is_repeat(&copy, &mut seen));
+        // Only assistant lines are checked.
+        let other: Value = serde_json::from_str(r#"{"type":"user","uuid":"a1"}"#).unwrap();
+        assert!(!is_repeat(&other, &mut seen));
+    }
+
+    #[test]
+    fn a_failed_login_asks_to_sign_in_instead_of_replying() {
+        let line = r#"{"type":"assistant","error":"authentication_failed","uuid":"x","message":{"id":"m","model":"<synthetic>","content":[{"type":"text","text":"Not logged in · Please run /login"}]}}"#;
+        assert_eq!(
+            events(line, &Pending::default()),
+            vec![AgentEvent::SignInNeeded {
+                message: "Not logged in · Please run /login".into()
+            }]
+        );
     }
 }

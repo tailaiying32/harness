@@ -126,7 +126,7 @@ fn subscribe(state: State<'_, AppState>, on_event: Channel<Envelope>) {
 
 #[tauri::command]
 async fn check_setup(state: State<'_, AppState>) -> Result<SetupInfo, String> {
-    // Runs a login shell and `claude auth status`; keep it off the main thread.
+    // Runs a login shell; keep it off the main thread.
     let info = tauri::async_runtime::spawn_blocking(locate::check_setup)
         .await
         .map_err(|e| e.to_string())?;
@@ -266,6 +266,22 @@ async fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfo>, Strin
         .map_err(|e| e.to_string())?
 }
 
+/// Runs Claude Code's own sign-in, which opens the browser. Waits until the
+/// user is done there, up to a few minutes.
+#[tauri::command]
+async fn sign_in(state: State<'_, AppState>) -> Result<(), String> {
+    let binary = state
+        .binary
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Claude Code couldn't be found")?;
+    let adapter = state.sessions.adapter();
+    tauri::async_runtime::spawn_blocking(move || adapter.sign_in(&binary))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn close_session(state: State<'_, AppState>, session_id: String) {
     state.sessions.close(&session_id);
@@ -388,6 +404,7 @@ pub fn run() {
             set_model,
             set_effort,
             list_models,
+            sign_in,
             close_session,
             read_doc,
             save_image,

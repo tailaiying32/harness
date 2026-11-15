@@ -1,5 +1,6 @@
-//! Find the Claude Code program and check that the user is signed in.
-//! The app never reads or stores credentials; it only asks the program.
+//! Find the Claude Code program. Sign-in isn't checked here: a chat finds out
+//! from Claude Code itself (see `SignInNeeded`). Checking at startup with
+//! `claude auth status` reported a working login as signed out.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,8 +12,6 @@ const BINARY: &str = if cfg!(windows) { "claude.exe" } else { "claude" };
 #[derive(Debug, Clone, Serialize)]
 pub struct SetupInfo {
     pub binary: Option<String>,
-    pub logged_in: bool,
-    pub subscription: Option<String>,
     /// What to tell the user when something is missing.
     pub problem: Option<String>,
 }
@@ -106,37 +105,14 @@ pub fn gh() -> Option<&'static Path> {
 }
 
 pub fn check_setup() -> SetupInfo {
-    let Some(binary) = find_claude() else {
-        return SetupInfo {
+    match find_claude() {
+        Some(binary) => SetupInfo {
+            binary: Some(binary.to_string_lossy().into_owned()),
+            problem: None,
+        },
+        None => SetupInfo {
             binary: None,
-            logged_in: false,
-            subscription: None,
             problem: Some("Claude Code isn't installed, or couldn't be found.".into()),
-        };
-    };
-
-    // `claude auth status` prints JSON with `loggedIn` and `subscriptionType`.
-    let mut cmd = Command::new(&binary);
-    cmd.args(["auth", "status"])
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("ANTHROPIC_AUTH_TOKEN");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-    let status: serde_json::Value = cmd
-        .output()
-        .ok()
-        .and_then(|o| serde_json::from_slice(&o.stdout).ok())
-        .unwrap_or_default();
-
-    let logged_in = status["loggedIn"].as_bool().unwrap_or(false);
-    SetupInfo {
-        binary: Some(binary.to_string_lossy().into_owned()),
-        logged_in,
-        subscription: status["subscriptionType"].as_str().map(str::to_owned),
-        problem: (!logged_in)
-            .then(|| "You're not signed in. Run `claude` once in a terminal to sign in.".into()),
+        },
     }
 }

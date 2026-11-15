@@ -238,7 +238,7 @@ src-tauri/
     sessions.rs        SessionManager: live processes, saving, resume, idle shutdown
     store.rs           SQLite schema, reads, writes
     images.rs          pasted images and images from tools, as files per chat
-    locate.rs          find the claude binary, check login
+    locate.rs          find the claude binary
 src/
   App.svelte           the window: sidebar + the open chat; the self-test
   preview.ts           a stand-in for the core, for the browser preview (dev only)
@@ -299,11 +299,24 @@ Finding the binary (`locate.rs`), in order:
 3. `~/.local/bin/claude` (macOS), `%USERPROFILE%\.local\bin\claude.exe`
    (Windows), then `where claude` on Windows.
 
-On startup run `claude auth status` (prints JSON with `loggedIn`,
-`authMethod`, `subscriptionType`; **Tested**). If the binary is missing or
-`loggedIn` is false, show a setup screen telling the user to install Claude
-Code or run `claude` once in a terminal to sign in. The app never handles
-tokens or credentials.
+Startup only finds the binary; if it is missing, the chat says so. Login is
+**not** checked at startup (changed 2026-11-14): `claude auth status` once
+reported a working login as signed out after about 12 hours, locking the
+message box while the desktop app worked fine. Instead a chat finds out from
+Claude Code itself: a signed-out turn replies with an `assistant` line
+carrying `error: "authentication_failed"` (text "Not logged in · Please run
+/login"; **Tested** with `CLAUDE_CONFIG_DIR` pointed at an empty folder). The
+chat shows a sign-in card instead of that text. Its button runs
+`claude auth login` (opens the browser) and then sends the failed message
+again; that turn never reached the model. Before resending, the chat's
+process is closed, because a running Claude Code read the login when it
+started and won't see the new one (seen in testing). **Tested** 2026-11-14 in
+a signed-out copy: `claude auth login` works with no terminal (it opens the
+browser and waits for the redirect), and the resent message got a reply. If
+it fails, the card shows the error and says to run it in a terminal. A
+process whose last turn failed exits with code 1 and no output when closed;
+that exit is not reported as a crash. The app never handles tokens or
+credentials.
 
 ### Messages the app sends (stdin)
 
@@ -403,12 +416,14 @@ between CLI versions and must never crash the reader.
 | `system`, subtype `init` | Start of every turn (not just the first) | `session_id`, `model`, `permissionMode`, `cwd`, `tools`, `mcp_servers`, `slash_commands` |
 | `stream_event` | Live piece of an answer | `event` (raw API event), `api_message_id`, `parent_tool_use_id` |
 | `assistant` | One finished block of an answer | `message.id`, `message.content` (one block: `text`, `thinking` or `tool_use`), `parent_tool_use_id` |
-| `user` with `isReplay: true` | Echo of a message the app sent: it has been taken in | `uuid` |
+| `command_lifecycle` | A sent message's progress: `queued`, `started`, `completed`, `cancelled`. `started` counts as taken in (see below) | `command_uuid` (the ID the app sent), `state` |
+| `user` with `isReplay: true` | Echo of a message the app sent. For a slash command it comes after the command's output, so `started` is used instead and the echo is dropped | `uuid` |
 | `user` | Tool result, or the interrupt notice | `message.content[]` with `tool_result` + `tool_use_id`, `is_error` |
 | `control_request`, subtype `can_use_tool` | Approval needed | `request_id`, `request.tool_name`, `request.input`, `request.description`, `request.permission_suggestions`, `request.tool_use_id` |
 | `control_response` | Reply to a request the app sent | `response.request_id`, `response.response` |
 | `result` | Turn ended | `subtype`, `is_error`, `result`, `session_id`, `usage`, `duration_ms`, `stop_reason` |
-| `system`, subtype `status` | Activity hint, or a mode change | `status` (e.g. `requesting`); `permissionMode` when the mode changed |
+| `system`, subtype `status` | Activity hint, a mode change, or compacting | `status` (e.g. `requesting`, `compacting`); `permissionMode` when the mode changed; `compact_result` (`success`) when compacting ended |
+| `system`, subtype `compact_boundary` | Compacting cut the conversation here. Then come a summary `user` message (`isSynthetic`, ignored) and copies of the last few `assistant` messages, with the same line `uuid` but a new `message.id`; the app skips any assistant `uuid` it has already passed on | `compact_metadata.trigger` (`manual` or `auto`), `pre_tokens`, `post_tokens` |
 | `control_cancel_request` | An approval request was withdrawn | `request_id` |
 | `system`, subtype `post_turn_summary` | One-line summary of the turn | `status_detail` |
 | `rate_limit_event` | Subscription usage | `rate_limit_info.unifiedWindows.*.utilization`, `resetsAt` |
@@ -712,7 +727,8 @@ Times are milliseconds since 1970.
 
 ```
 subscribe(channel)        one app-wide tauri::ipc::Channel carrying { session_id, event }
-check_setup()             find Claude Code, check login
+check_setup()             find Claude Code
+sign_in()                 run `claude auth login`; resolves when it exits
 sidebar()                 every project with its chats, newest first
 load_session(session_id)  -> { session, events, live }
 delete_session(session_id)
@@ -929,9 +945,19 @@ Mocked up on the same board:
   checked). It is an instruction, not a guarantee.
 - **Cmd+N / Ctrl+N** starts a new chat in the open chat's folder and puts the
   cursor in the message box.
-- **Slash commands: deferred.** The user uses `/btw` and `/compact`. v1 has no
-  slash menu; whether typed slash commands work through the headless input is
-  untested. `/btw` (a side question) will want its own floating view later.
+- **Slash commands: typed, no menu** (built 2026-11-14). The user types them
+  into the message box as is; there is no slash menu, by choice. **Tested**
+  on CLI 2.1.322: `/compact`, `/context` and `/usage` run headless, and
+  `/context` and `/usage` come back as ordinary replies. While compacting
+  the working line says "Compacting…", and a faint "compacted" line (or
+  "compacted automatically") marks the cut; earlier messages stay on screen.
+  A command stays above its own output, live and after reopening, because
+  `command_lifecycle` `started` is the "taken in" signal. Commands that
+  duplicate Harness controls (`/model`, `/clear`, `/rename`, `/effort`) are
+  left alone: Claude Code runs them, and Harness's own controls may fall out
+  of step. `/btw` answers "isn't available in this environment" headless;
+  it is deferred and will need Harness to build it (a short-lived second
+  process with a copy of the chat and no tools, shown in a floating view).
 - **Model picker: built** (the user asked for it on 2026-11-13). A selector
   in the line under the message box lists the models Claude Code itself
   reports, by their real names ("Opus 5.5", "Default (Fable 5.2)"), including
