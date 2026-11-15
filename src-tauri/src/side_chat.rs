@@ -315,6 +315,9 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+        fn open_requests(&self) -> Vec<String> {
+            Vec::new()
+        }
         fn interrupt(&self) -> Result<(), String> {
             self.told.lock().unwrap().push("interrupt".into());
             Ok(())

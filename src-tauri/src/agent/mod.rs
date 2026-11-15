@@ -86,6 +86,8 @@ pub trait RunningAgent: Send + Sync {
         answers: Option<BTreeMap<String, String>>,
         plan: Option<String>,
     ) -> Result<(), String>;
+    /// The requests still waiting for the user's answer, by request ID.
+    fn open_requests(&self) -> Vec<String>;
     /// Stop the current turn. The chat stays usable.
     fn interrupt(&self) -> Result<(), String>;
     fn set_mode(&self, mode: &str) -> Result<(), String>;

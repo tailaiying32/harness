@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::{Ask, SessionManager, blocking};
+use crate::agent::RunningAgent;
 use crate::events::{AgentEvent, Decision};
 use crate::store::{ChatGit, SessionRow, now_ms};
 use crate::worktree::{self, Merged, PrInfo, Worktree};
@@ -57,6 +58,9 @@ where to continue.";
 /// When the user says no.
 const STAY_HERE: &str = "The user wants this work done here, in the current folder, not in a \
 worktree. Carry on with the task here.";
+/// When the user writes instead of answering. Nothing is chosen.
+const REPLIED: &str = "The user sent a message instead of answering. Read it and go by it. If the work \
+still needs file changes, call EnterWorktree again before making any.";
 /// What the agent is told if making the worktree failed.
 const STAYING: &str = "The worktree couldn't be made. Carry on with the task in this folder.";
 
@@ -252,6 +256,27 @@ impl SessionManager {
         } else {
             answer();
         }
+    }
+
+    /// The user wrote instead of answering the worktree question. It closes
+    /// with nothing chosen, and Claude is told to read the message and ask
+    /// again if the work still needs a worktree.
+    pub(super) fn reply_closes_ask(&self, session_id: &str, agent: &dyn RunningAgent) {
+        let ask = self.0.sessions.lock().unwrap().get_mut(session_id).and_then(|s| s.ask.take());
+        let Some(ask) = ask else {
+            return;
+        };
+        for (id, _) in &ask.held {
+            let _ = agent.answer_approval(id, Decision::Deny, Some(REPLIED.to_string()), None, None);
+        }
+        self.record(
+            session_id,
+            AgentEvent::ApprovalAnswered {
+                request_id: ask.card,
+                decision: Decision::Deny,
+                answers: None,
+            },
+        );
     }
 
     /// The user's answer to the agent's request for a worktree: "worktree" or "here".

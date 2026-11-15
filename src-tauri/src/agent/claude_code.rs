@@ -803,6 +803,10 @@ impl RunningAgent for ClaudeCodeProcess {
         Ok(())
     }
 
+    fn open_requests(&self) -> Vec<String> {
+        self.pending.lock().unwrap().keys().cloned().collect()
+    }
+
     fn interrupt(&self) -> Result<(), String> {
         self.send(json!({
             "type": "control_request",

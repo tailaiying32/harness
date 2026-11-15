@@ -78,6 +78,9 @@
       <div class="done">cancelled · worktree question</div>
     {:else if item.choice === "here"}
       <div class="done">working here in {repoName}</div>
+    {:else if item.answered === "deny"}
+      <!-- The user wrote instead; Claude asks again if it still needs one. -->
+      <div class="done">skipped · worktree question</div>
     {/if}
   {:else}
     <!-- Claude asked to do this work in a worktree; it waits for the answer. -->
