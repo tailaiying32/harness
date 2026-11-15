@@ -45,6 +45,20 @@
     return undefined;
   });
 
+  /** The page line whose address was just copied, lit for a moment (as in the panel's address). */
+  let copiedPage = $state<number | undefined>();
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  async function copyPage(id: number, url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      return;
+    }
+    copiedPage = id;
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copiedPage = undefined), 600);
+  }
+
   // Only the latest part of a chat is drawn. A long chat would otherwise cost
   // hundreds of megabytes; earlier messages are drawn when the user scrolls up.
   const PAGE = 60;
@@ -207,7 +221,11 @@
         <div class="row block">
           <span class="marker"></span>
           <div class="body faint">
-            Page · {page.url.replace(/^https?:\/\//, "")}
+            Page · <button
+              class="address"
+              class:copied={copiedPage === page.id}
+              title="Click to copy"
+              onclick={() => copyPage(page.id, page.url)}>{page.url.replace(/^https?:\/\//, "")}</button>
             {#if page.id === latestPage}
               · <button class="open" onclick={() => chat.showPage(page.url)}>open browser</button>
             {/if}
@@ -342,6 +360,13 @@
   .open {
     text-decoration: underline;
     text-underline-offset: 0.2em;
+  }
+  /* A page line's address: plain text that copies on click. */
+  .address:hover {
+    color: var(--fg);
+  }
+  .address.copied {
+    color: var(--accent);
   }
   .open.waiting {
     color: var(--bright);

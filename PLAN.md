@@ -904,8 +904,10 @@ https://www.magicpatterns.com/os/tWmrW2q43Q7sWofaHnFJVj?file=2oZgfpBgi1cedNPY3NJ
   are saved across quits (prefs `foldedProjects`, by path); "show more" steps
   are not. Tried and dropped: a search box in place of "more", and "show
   less" as a second label (two labels never looked clean). Added 2026-11-15.
-  The whole sidebar hides with the sidebar icon (in the top strip, after a
-  Mac's window buttons, same spot shown or hidden) or Cmd+B / Ctrl+B; saved
+  The whole sidebar hides with the sidebar icon (in the top strip: at the
+  sidebar's right edge while it shows; at the top bar's start once hidden,
+  with a clear gap after a Mac's window buttons, since right beside them it
+  read as a fourth one, 2026-11-15) or Cmd+B / Ctrl+B; saved
   across quits (prefs `sidebarHidden`). Projects keep a fixed order, set by
   dragging a folder name (a 4px move starts the drag, so a click still
   folds); a new project goes on top; saved as prefs `projectOrder`, by path.
@@ -1336,7 +1338,8 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   the panel; instead a successful `open` adds a line to the chat, like a
   plan's: "Page · localhost:5173 · open browser" (a `page` item, rebuilt from
   history on replay; only the latest line has the button, which loads the
-  address again if the browser was closed since). No marks in the bars: the
+  address again if the browser was closed since). The address copies on one
+  click, like the panel's (accent for a moment, no underline). No marks in the bars: the
   user disliked a ● beside ◂ (2026-11-14). The globe icon in the top bar
   opens the view at any time; with no page yet it shows an empty address line
   in the bar, and typing there makes the browser. A chat loaded after its page was opened asks `browser_current`.
