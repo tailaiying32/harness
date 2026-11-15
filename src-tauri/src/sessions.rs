@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::agent::{AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SpawnOptions};
 use crate::events::{AgentEvent, Block, Decision, Envelope, SessionState};
 use crate::images::{self, ImageRef, Images};
+use crate::notes::Notes;
 use crate::store::Store;
 use crate::worktree;
 
@@ -58,6 +59,13 @@ pub fn configured_idle(store: &Store) -> Option<Duration> {
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_IDLE_SECONDS);
     (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
+/// The chat's notes file, its folder made so the agent can be pointed at it.
+/// None if the folder can't be made: the chat runs without notes.
+pub fn notes_for(notes: &Notes, chat: &str) -> Option<PathBuf> {
+    notes.ensure_folder(chat).ok()?;
+    notes.path(chat).ok()
 }
 
 #[derive(Default)]
@@ -111,6 +119,8 @@ struct Inner {
     data_dir: PathBuf,
     /// Pasted images and images from tool results.
     images: Images,
+    /// Each chat's notes.
+    notes: Notes,
     /// Finds a branch's pull request (GitHub in the app, a stand-in in tests).
     pr_lookup: PrLookup,
     /// One cleanup sweep at a time.
@@ -155,6 +165,7 @@ impl SessionManager {
             start_lock: tokio::sync::Mutex::default(),
             timings,
             images: Images::new(data_dir.join("images")),
+            notes: Notes::new(data_dir.join("notes")),
             data_dir,
             pr_lookup,
             sweep_lock: tokio::sync::Mutex::default(),
@@ -175,11 +186,19 @@ impl SessionManager {
         &self.0.images
     }
 
-    /// Removes images left by chats that don't exist. Run once at start.
-    pub fn sweep_images(&self) {
+    /// Chats' notes.
+    pub fn notes(&self) -> &Notes {
+        &self.0.notes
+    }
+
+    /// Removes images and notes left by chats that don't exist. Run once at start.
+    pub fn sweep_chat_files(&self) {
         match self.0.store.session_ids() {
-            Ok(ids) => self.0.images.sweep(&ids),
-            Err(e) => eprintln!("harness: couldn't list chats to tidy images: {e}"),
+            Ok(ids) => {
+                self.0.images.sweep(&ids);
+                self.0.notes.sweep(&ids);
+            }
+            Err(e) => eprintln!("harness: couldn't list chats to tidy images and notes: {e}"),
         }
     }
 
@@ -344,6 +363,7 @@ impl SessionManager {
                     effort: saved.map(|s| s.effort),
                     side: None,
                     tools: inner.app_tools.get().map(|tools| tools(session_id)),
+                    notes: notes_for(&inner.notes, session_id),
                 },
                 self.sink(session_id, run),
             );
@@ -608,9 +628,20 @@ impl SessionManager {
         decision: Decision,
         message: Option<String>,
         answers: Option<BTreeMap<String, String>>,
+        plan: Option<String>,
     ) -> Result<(), String> {
         self.agent(session_id)?
-            .answer_approval(request_id, decision.clone(), message, answers.clone())?;
+            .answer_approval(request_id, decision.clone(), message, answers.clone(), plan.clone())?;
+        // Saved before the answer, so a reopened chat shows the plan as approved.
+        if let Some(plan) = plan {
+            self.record(
+                session_id,
+                AgentEvent::PlanEdited {
+                    request_id: request_id.to_string(),
+                    plan,
+                },
+            );
+        }
         self.record(
             session_id,
             AgentEvent::ApprovalAnswered {
@@ -798,6 +829,7 @@ mod tests {
             decision: Decision,
             _: Option<String>,
             _: Option<BTreeMap<String, String>>,
+            _: Option<String>,
         ) -> Result<(), String> {
             let decision = format!("{decision:?}").to_lowercase();
             self.told.lock().unwrap().push(format!("answer {request_id} {decision}"));
@@ -1085,12 +1117,23 @@ mod tests {
         let rig = rig(LONG);
         rig.send("hi").await;
         rig.manager
-            .answer_approval("s1", "r1", Decision::Allow, None, None)
+            .answer_approval("s1", "r1", Decision::Allow, None, None, None)
             .unwrap();
         rig.manager.interrupt("s1").unwrap();
         let saved = rig.store.events("s1").unwrap();
         assert!(matches!(&saved[1], AgentEvent::ApprovalAnswered { request_id, .. } if request_id == "r1"));
         assert_eq!(saved[2], AgentEvent::Interrupted);
+        // An edited plan is saved too, before its answer.
+        rig.manager
+            .answer_approval("s1", "r2", Decision::Allow, None, None, Some("my plan".into()))
+            .unwrap();
+        let saved = rig.store.events("s1").unwrap();
+        let n = saved.len();
+        assert_eq!(
+            saved[n - 2],
+            AgentEvent::PlanEdited { request_id: "r2".into(), plan: "my plan".into() }
+        );
+        assert!(matches!(&saved[n - 1], AgentEvent::ApprovalAnswered { request_id, .. } if request_id == "r2"));
         // With no process there is nothing to answer.
         assert!(rig.manager.interrupt("other").is_err());
     }

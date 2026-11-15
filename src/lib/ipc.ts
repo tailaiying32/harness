@@ -55,6 +55,7 @@ export type AgentEvent =
   | { kind: "worktree_chosen"; choice: WorktreeChoice }
   | { kind: "worktree_changed"; status: WorktreeStatus; branch: string | null }
   | { kind: "prs_changed"; prs: PrInfo[] }
+  | { kind: "plan_edited"; request_id: string; plan: string }
   | { kind: "browser_state"; url: string; title: string; loading: boolean }
   | { kind: "browser_closed" };
 
@@ -157,7 +158,13 @@ export const answerApproval = (
   message?: string,
   /** For a question: each question's text mapped to the chosen answer. */
   answers?: Record<string, string>,
-) => invoke<void>("answer_approval", { sessionId, requestId, decision, message, answers });
+  /** For a plan the user edited before approving: the agent works from this text. */
+  plan?: string,
+) => invoke<void>("answer_approval", { sessionId, requestId, decision, message, answers, plan });
+
+/** The chat's notes, written in the side panel; "" if there are none yet. */
+export const readNotes = (chatId: string) => invoke<string>("read_notes", { chatId });
+export const writeNotes = (chatId: string, text: string) => invoke<void>("write_notes", { chatId, text });
 
 export const interrupt = (sessionId: string) => invoke<void>("interrupt", { sessionId });
 

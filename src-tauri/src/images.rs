@@ -47,7 +47,7 @@ fn extension(media_type: &str) -> Option<&'static str> {
 }
 
 /// A chat ID that can't reach outside the images folder.
-fn check_session(session: &str) -> Result<(), String> {
+pub(crate) fn check_session(session: &str) -> Result<(), String> {
     let ok = !session.is_empty()
         && session.len() <= 64
         && session.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');

@@ -9,6 +9,7 @@ import {
   chooseWorktree,
   interrupt,
   readDoc,
+  readNotes,
   sendMessage,
   sideEnd,
   sideInterrupt,
@@ -28,6 +29,7 @@ import {
   type SessionState,
   type WorktreeChoice,
   type WorktreeStatus,
+  writeNotes,
 } from "../ipc";
 import { docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
 
@@ -98,6 +100,8 @@ export type DocTab = { path: string; text: string; /** Its tab was closed; the t
 
 /** The plan's tab in the side panel. Documents use their file path. */
 export const PLAN_TAB = "plan";
+/** The chat's notes tab, always first in docs. Paths are absolute, so no clash. */
+export const NOTES_TAB = "notes";
 
 /** The `[image n]` words in a text, in order. */
 export const IMAGE_WORD = /\[image (\d+)\]/g;
@@ -257,6 +261,15 @@ export class Chat {
   panelView = $state<PanelView>("docs");
   /** The side chat (`/btw`), while one is open. It is never saved. */
   side = $state<Chat | null>(null);
+  /**
+   * Something besides the notes: a plan, a document, the side chat or the
+   * browser. Closing one of those closes the panel when nothing else is left,
+   * rather than leaving it on the notes.
+   */
+  get hasPanelWork(): boolean {
+    return this.planTab || this.openDocs.length > 0 || this.side !== null || this.browserOn;
+  }
+
   /** The panel has something to show. */
   get panelHasContent(): boolean {
     return this.tabCount > 0 || this.side !== null || this.browserOn;
@@ -312,7 +325,7 @@ export class Chat {
     this.browserProblem = "";
     if (this.panelView !== "browser") return;
     this.panelView = this.side ? "side" : "docs";
-    this.panelOpen = this.panelOpen && this.panelHasContent;
+    this.panelOpen = this.panelOpen && this.hasPanelWork;
   }
 
   /** A chat opened again after a reload of the window: pick up its live page. */
@@ -354,16 +367,53 @@ export class Chat {
     return this.docs.filter((doc) => !doc.closed);
   }
 
+  /** The notes tab is always there, so docs is never empty. */
   get tabCount(): number {
-    return (this.planTab ? 1 : 0) + this.openDocs.length;
+    return 1 + (this.planTab ? 1 : 0) + this.openDocs.length;
   }
 
-  /** The tab on show: the chosen one if it still exists, else the first. */
+  /**
+   * The tab on show: the chosen one if it still exists, else the plan, else the
+   * notes. The notes tab sits first in the row, but a waiting plan comes first.
+   */
   get activeTab(): string {
+    if (this.panelTab === NOTES_TAB) return NOTES_TAB;
     if (this.panelTab === PLAN_TAB && this.planTab) return PLAN_TAB;
     if (this.openDocs.some((doc) => doc.path === this.panelTab)) return this.panelTab;
-    return this.planTab ? PLAN_TAB : (this.openDocs[0]?.path ?? "");
+    return this.planTab ? PLAN_TAB : NOTES_TAB;
   }
+
+  // ---- Notes ----
+  /** The chat's notes; null until first read. Saved in the core, outside the repo. */
+  notes = $state<string | null>(null);
+  private notesLoading: Promise<void> | null = null;
+
+  /** Reads the notes once, the first time they are shown. */
+  loadNotes(): Promise<void> {
+    if (this.owner) return this.owner.loadNotes();
+    this.notesLoading ??= readNotes(this.sessionId)
+      .then((text) => {
+        // Typing may have started before the read came back.
+        if (this.notes === null) this.notes = text;
+      })
+      .catch(() => {
+        if (this.notes === null) this.notes = "";
+      });
+    return this.notesLoading;
+  }
+
+  /** Keeps the notes as typed and saves them. */
+  async saveNotes(text: string): Promise<void> {
+    this.notes = text;
+    try {
+      await writeNotes(this.sessionId, text);
+    } catch (e) {
+      this.showError(`Couldn't save the notes: ${e}`);
+    }
+  }
+
+  /** The waiting plan as the user edited it; null while unedited. Sent with Approve. */
+  planDraft = $state<string | null>(null);
 
   /** Opens the panel on docs; on `tab` if given, bringing it back if it was closed. */
   openPanel(tab?: string): void {
@@ -379,8 +429,9 @@ export class Chat {
     this.panelOpen = this.tabCount > 0;
   }
 
-  /** Closes one tab. A plan still waiting for an answer can't be closed. */
+  /** Closes one tab. A plan still waiting for an answer can't be closed, nor can the notes. */
   closeTab(tab: string): void {
+    if (tab === NOTES_TAB) return;
     if (tab === PLAN_TAB) {
       if (!this.planPending) this.planClosed = true;
       return;
@@ -454,6 +505,8 @@ export class Chat {
   onSent: (() => void) | null = null;
   /** Answer every approval this way. Used by the self-test only. */
   autoAnswer: Decision | null = null;
+  /** Self-test only: a line added to the next plan before it is auto-approved. */
+  autoPlanEdit: string | null = null;
   /** Answer the worktree question this way. Used by the self-test only. */
   autoWorktree: WorktreeChoice | null = null;
 
@@ -593,6 +646,7 @@ export class Chat {
         if (event.approval === "plan") {
           this.plan = item;
           this.planClosed = false;
+          this.planDraft = null;
           // Claude Code drafts the plan in a file of its own; that file is this tab.
           this.planPath = planOf(event.input).path;
           this.docs = this.docs.filter((doc) => doc.path !== this.planPath);
@@ -609,7 +663,12 @@ export class Chat {
         if (this.autoAnswer) {
           // A question has no "always"; it is answered with its first options.
           const answers = event.approval === "question" ? firstOptions(event.input) : undefined;
-          void this.answer(item, answers ? "allow" : this.autoAnswer, undefined, answers);
+          let plan: string | undefined;
+          if (event.approval === "plan" && this.autoPlanEdit) {
+            plan = `${planOf(event.input).text}\n\n${this.autoPlanEdit}`;
+            this.autoPlanEdit = null;
+          }
+          void this.answer(item, answers ? "allow" : this.autoAnswer, undefined, answers, plan);
         }
         break;
       }
@@ -657,6 +716,17 @@ export class Chat {
       }
 
       // The core's record of an answer. Live, the card already shows it.
+      // The user edited a plan before approving it; it shows as they wrote it.
+      case "plan_edited": {
+        const item = this.items.find(
+          (i): i is ApprovalItem => i.type === "approval" && i.requestId === event.request_id,
+        );
+        if (item && item.input && typeof item.input === "object") {
+          item.input = { ...(item.input as Record<string, unknown>), plan: event.plan };
+        }
+        break;
+      }
+
       case "approval_answered": {
         const item = this.items.find(
           (i): i is ApprovalItem => i.type === "approval" && i.requestId === event.request_id,
@@ -821,9 +891,14 @@ export class Chat {
     decision: Decision,
     message?: string,
     answers?: Record<string, string>,
+    plan?: string,
   ): Promise<void> {
     try {
-      await answerApproval(this.sessionId, item.requestId, decision, message, answers);
+      await answerApproval(this.sessionId, item.requestId, decision, message, answers, plan);
+      if (plan !== undefined && item.input && typeof item.input === "object") {
+        item.input = { ...(item.input as Record<string, unknown>), plan };
+      }
+      if (item === this.plan) this.planDraft = null;
       item.answered = decision;
       item.answers = answers;
       if (decision === "deny") this.markDeclined(item);
@@ -885,7 +960,7 @@ export class Chat {
   async endSide(): Promise<void> {
     this.side = null;
     this.panelView = "docs";
-    this.panelOpen = this.tabCount > 0;
+    this.panelOpen = this.hasPanelWork;
     try {
       await sideEnd(this.sessionId);
     } catch {

@@ -9,9 +9,11 @@
   // message box at the foot. Showing and hiding the panel is the top bar's.
   import { contentClick } from "../clicks";
   import ChatView from "../chat/ChatView.svelte";
+  import LiveMarkdown from "../chat/LiveMarkdown.svelte";
   import BrowserView from "./BrowserView.svelte";
   import Markdown from "../chat/Markdown.svelte";
-  import { PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
+  import { onDestroy } from "svelte";
+  import { NOTES_TAB, PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
   import { folderOf } from "../paths";
   import { applyPanelWidth, DEFAULT_PANEL_WIDTH, savePrefs } from "../themes";
   import { planOf } from "../tools";
@@ -23,12 +25,46 @@
   // A relative link in a document starts from that document's folder, as in
   // any markdown viewer; in the plan, from the folder Claude works in.
   const onClick = contentClick({
-    base: () => (chat.activeTab === PLAN_TAB ? chat.root : folderOf(chat.activeTab)),
+    base: () => (chat.activeTab === PLAN_TAB || chat.activeTab === NOTES_TAB ? chat.root : folderOf(chat.activeTab)),
     openDoc: (path) => void chat.openFile(path),
   });
 
   const active = $derived(chat.activeTab);
   const plan = $derived(chat.planTab ? chat.plan : null);
+
+  // ---- Notes: saved a moment after typing stops, and when editing ends ----
+  let notesTimer: ReturnType<typeof setTimeout> | undefined;
+  let notesUnsaved: string | null = null;
+
+  $effect(() => {
+    if (active === NOTES_TAB) void chat.loadNotes();
+  });
+
+  function typeNotes(text: string) {
+    chat.notes = text;
+    notesUnsaved = text;
+    clearTimeout(notesTimer);
+    notesTimer = setTimeout(flushNotes, 400);
+  }
+
+  function flushNotes() {
+    clearTimeout(notesTimer);
+    if (notesUnsaved === null) return;
+    const text = notesUnsaved;
+    notesUnsaved = null;
+    void chat.saveNotes(text);
+  }
+
+  onDestroy(flushNotes);
+
+  /** The waiting plan as it stands: the user's edit, or Claude's text. */
+  const planText = $derived(plan ? (chat.planDraft ?? planOf(plan.input).text) : "");
+
+  /** The user's edit to send with Approve, if they changed anything. */
+  function editedPlan(): string | undefined {
+    if (!plan || chat.planDraft === null) return undefined;
+    return chat.planDraft === planOf(plan.input).text ? undefined : chat.planDraft;
+  }
   const text = $derived(
     active === PLAN_TAB
       ? plan
@@ -98,9 +134,13 @@
     queueMicrotask(growAsk);
   }
 
+  // An edited plan goes back with the answer: whole, so Claude sees exactly
+  // what the user changed.
   function keepPlanning() {
     if (!plan) return;
-    void chat.answer(plan, "deny", feedback.trim() || "Keep planning.");
+    const edited = editedPlan();
+    const note = feedback.trim() || "Keep planning.";
+    void chat.answer(plan, "deny", edited ? `I edited the plan; here is my version:\n\n${edited}\n\n${note}` : note);
     feedback = "";
   }
 </script>
@@ -135,7 +175,16 @@
   {#key active}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="body" onclick={onClick}>
-      <Markdown {text} />
+      {#if active === NOTES_TAB}
+        {#if chat.notes !== null}
+          <LiveMarkdown text={chat.notes} onchange={typeNotes} ondone={flushNotes} placeholder="notes" autofocus={chat.notes === ""} />
+        {/if}
+      {:else if active === PLAN_TAB && plan && chat.planPending}
+        <!-- A waiting plan can be edited; Approve sends the edit. -->
+        <LiveMarkdown text={planText} onchange={(t) => (chat.planDraft = t)} />
+      {:else}
+        <Markdown {text} />
+      {/if}
     </div>
   {/key}
 
@@ -153,9 +202,9 @@
           ></textarea>
         </div>
         <div class="actions">
-          <button class="primary" onclick={() => chat.answer(plan, "allow")}>Approve plan</button>
+          <button class="primary" onclick={() => chat.answer(plan, "allow", undefined, undefined, editedPlan())}>Approve plan</button>
           {#if plan.alwaysLabel}
-            <button onclick={() => chat.answer(plan, "always_allow")}>{plan.alwaysLabel}</button>
+            <button onclick={() => chat.answer(plan, "always_allow", undefined, undefined, editedPlan())}>{plan.alwaysLabel}</button>
           {/if}
           <button onclick={keepPlanning}>Keep planning</button>
         </div>
