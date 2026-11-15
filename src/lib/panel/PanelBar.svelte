@@ -2,6 +2,7 @@
   // The open panel's own row, drawn in the top bar right above it, so the panel
   // needs no row of its own: docs' tabs, the side chat's name, or the browser's
   // address. What it doesn't fill stays empty for dragging the window.
+  import BarIcon from "../BarIcon.svelte";
   import { browserNavigate, browserReload } from "../ipc";
   import { NOTES_TAB, PLAN_TAB, type Chat } from "../state/chat.svelte";
   import { baseName } from "../tools";
@@ -53,12 +54,13 @@
     <!-- Before the address, like most browsers. Kept in place (just hidden)
          until a page is open, so the address doesn't jump right. -->
     <button
-      class="reload"
+      class="icon reload"
       class:off={!page}
+      class:busy={page?.loading}
       title="Reload"
       onclick={() => void browserReload(chat.sessionId).catch(() => {})}
     >
-      {page?.loading ? "…" : "↻"}
+      <BarIcon name="reload" />
     </button>
     <input
       class="address"
@@ -74,11 +76,15 @@
       placeholder="Type a url"
     />
     <span class="spacer" data-tauri-drag-region></span>
-    <button title="Close the browser" onclick={() => chat.closeBrowser()}>×</button>
+    <button class="icon" title="Close the browser" onclick={() => chat.closeBrowser()}>
+      <BarIcon name="close" />
+    </button>
   {:else if chat.panelView === "side" && chat.side}
     <span class="name on">{chat.side.title || "side chat"}</span>
     <span class="spacer" data-tauri-drag-region></span>
-    <button title="End the side chat; it is forgotten" onclick={() => chat.endSide()}>×</button>
+    <button class="icon" title="End the side chat; it is forgotten" onclick={() => chat.endSide()}>
+      <BarIcon name="close" />
+    </button>
   {:else}
     <!-- Many tabs scroll sideways. -->
     <div class="tabs">
@@ -154,8 +160,20 @@
   .tab:hover .shut {
     visibility: visible;
   }
+  .icon {
+    display: flex;
+  }
   .reload.off {
     visibility: hidden;
+  }
+  /* Turns while the page loads. */
+  .reload.busy :global(svg) {
+    animation: turn 0.9s linear infinite;
+  }
+  @keyframes turn {
+    to {
+      transform: rotate(360deg);
+    }
   }
   /* As wide as an address usually needs; the rest drags the window. */
   .address {
