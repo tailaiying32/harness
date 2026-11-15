@@ -50,6 +50,16 @@
 
 <div class="row" data-tauri-drag-region>
   {#if chat.panelView === "browser"}
+    <!-- Before the address, like most browsers. Kept in place (just hidden)
+         until a page is open, so the address doesn't jump right. -->
+    <button
+      class="reload"
+      class:off={!page}
+      title="Reload"
+      onclick={() => void browserReload(chat.sessionId).catch(() => {})}
+    >
+      {page?.loading ? "…" : "↻"}
+    </button>
     <input
       class="address"
       bind:value={address}
@@ -61,14 +71,9 @@
       onkeydown={go}
       spellcheck="false"
       autocomplete="off"
-      placeholder="localhost:5173"
+      placeholder="Type a url"
     />
     <span class="spacer" data-tauri-drag-region></span>
-    {#if page}
-      <button title="Reload" onclick={() => void browserReload(chat.sessionId).catch(() => {})}>
-        {page.loading ? "…" : "↻"}
-      </button>
-    {/if}
     <button title="Close the browser" onclick={() => chat.closeBrowser()}>×</button>
   {:else if chat.panelView === "side" && chat.side}
     <span class="name on">{chat.side.title || "side chat"}</span>
@@ -148,6 +153,9 @@
   .tab.on .shut,
   .tab:hover .shut {
     visibility: visible;
+  }
+  .reload.off {
+    visibility: hidden;
   }
   /* As wide as an address usually needs; the rest drags the window. */
   .address {
