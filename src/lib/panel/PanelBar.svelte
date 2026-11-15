@@ -79,10 +79,7 @@
     <div class="tabs">
       {#if chat.planTab}
         <span class="tab" class:on={active === PLAN_TAB}>
-          <button onclick={() => chat.openPanel(PLAN_TAB)}>
-            {#if chat.planPending}<span class="accent">●</span>{/if}
-            plan
-          </button>
+          <button onclick={() => chat.openPanel(PLAN_TAB)}>plan</button>
           <!-- A plan that is waiting for an answer stays put. -->
           {#if !chat.planPending}
             <button class="shut" title="Close this tab" onclick={() => chat.closeTab(PLAN_TAB)}>×</button>
@@ -147,9 +144,6 @@
   .tab.on .shut,
   .tab:hover .shut {
     visibility: visible;
-  }
-  .accent {
-    color: var(--accent);
   }
   /* As wide as an address usually needs; the rest drags the window. */
   .address {

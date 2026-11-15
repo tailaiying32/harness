@@ -1029,7 +1029,10 @@ Mocked up on the same board:
   faded and does nothing until there is a plan or document. The icon on show
   is in the accent colour, like the chosen model in the model menu (the user
   found bright white too intense); so a plan waiting under another view no
-  longer marks the docs icon, and the chat's plan line is the cue. The bar
+  longer marks the docs icon, and the chat's plan line is the cue. Since the
+  same day plans carry no dot or colour anywhere (not on the plan tab, not in
+  the chat line): "Plan · ready for your review · open plan", the link alone
+  (the user's call). Pointing at a view icon shows it in the accent colour too. The bar
   over the open panel now holds that view's own row (`PanelBar.svelte`): docs'
   tabs, the side chat's name and ×, or the browser's address, ↻ and ×. The
   panel itself has no row, so every view starts right under the bar. The user

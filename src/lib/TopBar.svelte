@@ -94,12 +94,11 @@
   .views button {
     display: flex;
   }
-  .views button:hover {
-    color: var(--fg);
-  }
   /* The view on show is in the accent colour, like the chosen model in the
-     model menu; a plain bright icon stood out more than anything else in the bar. */
-  .views button.on {
+     model menu; a plain bright icon stood out more than anything else in the
+     bar. Pointing at one shows the same colour. */
+  .views button.on,
+  .views button:hover {
     color: var(--accent);
   }
   .views button.empty {
