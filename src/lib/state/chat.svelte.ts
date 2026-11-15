@@ -2,10 +2,12 @@
 
 import {
   answerApproval,
+  closeSession,
   chooseWorktree,
   interrupt,
   readDoc,
   sendMessage,
+  signIn,
   setMode,
   setEffort,
   setModel,
@@ -59,6 +61,13 @@ export type ApprovalItem = {
 export type ErrorItem = { id: number; type: "error"; text: string };
 /** A faint one-line remark from the app, e.g. "stopped". */
 export type NoteItem = { id: number; type: "note"; text: string };
+/** Claude Code isn't signed in. "done" once signed in, or once a later turn went through. */
+export type SignInItem = {
+  id: number;
+  type: "signin";
+  state: "ready" | "working" | "done" | "failed";
+  error?: string;
+};
 
 /** A markdown file the chat wrote, as a tab in the side panel. */
 export type DocTab = { path: string; text: string; /** Its tab was closed; the text still follows edits. */ closed?: boolean };
@@ -66,7 +75,7 @@ export type DocTab = { path: string; text: string; /** Its tab was closed; the t
 /** The plan's tab in the side panel. Documents use their file path. */
 export const PLAN_TAB = "plan";
 
-export type Item = UserItem | TextItem | ThinkingItem | ToolItem | ApprovalItem | ErrorItem | NoteItem;
+export type Item = UserItem | TextItem | ThinkingItem | ToolItem | ApprovalItem | ErrorItem | NoteItem | SignInItem;
 
 type NewItem =
   | Omit<UserItem, "id">
@@ -75,7 +84,8 @@ type NewItem =
   | Omit<ToolItem, "id">
   | Omit<ApprovalItem, "id">
   | Omit<ErrorItem, "id">
-  | Omit<NoteItem, "id">;
+  | Omit<NoteItem, "id">
+  | Omit<SignInItem, "id">;
 
 /** What the chat says when its worktree changes. */
 function worktreeNote(status: WorktreeStatus, branch: string | null): string {
@@ -181,6 +191,8 @@ export class Chat {
   }
   /** When the current turn began, for the elapsed-time counter. */
   turnStartedAt = $state<number | null>(null);
+  /** Claude Code is compacting the conversation. */
+  compacting = $state(false);
 
   // ---- The side panel ----
   /** The latest plan Claude presented. A revised plan replaces it. */
@@ -349,6 +361,7 @@ export class Chat {
 
       case "status":
         this.status = event.state;
+        if (event.state === "exited") this.compacting = false;
         break;
 
       case "usage_update":
@@ -488,6 +501,13 @@ export class Chat {
 
       case "turn_ended":
         this.flushText();
+        this.compacting = false;
+        // A turn that went through means the login works now.
+        if (event.ok) {
+          for (const item of this.items) {
+            if (item.type === "signin" && item.state !== "done") item.state = "done";
+          }
+        }
         // A stopped turn can leave a tool without a result, and nothing can be
         // waiting for an answer once the turn is over.
         this.settle();
@@ -498,6 +518,19 @@ export class Chat {
 
       case "error":
         this.push({ type: "error", text: event.message });
+        break;
+
+      case "compacting":
+        this.compacting = event.active;
+        break;
+
+      // Earlier items stay on screen; Claude now sees a summary of them.
+      case "compacted":
+        this.push({ type: "note", text: event.auto ? "compacted automatically" : "compacted" });
+        break;
+
+      case "sign_in_needed":
+        this.push({ type: "signin", state: "ready" });
         break;
 
       // Live, the message is already on screen from when it was sent.
@@ -533,6 +566,28 @@ export class Chat {
       this.turnStartedAt = null;
       this.push({ type: "error", text: String(e) });
     }
+  }
+
+  /**
+   * Runs Claude Code's sign-in, then sends the last message again. The turn
+   * that failed never reached the model, so nothing is repeated.
+   */
+  async signIn(item: SignInItem): Promise<void> {
+    item.state = "working";
+    item.error = undefined;
+    try {
+      await signIn();
+    } catch (e) {
+      item.state = "failed";
+      item.error = String(e);
+      return;
+    }
+    item.state = "done";
+    // The running process read the login when it started and won't see the
+    // new one. Asked to close, it is replaced by a fresh one on the next send.
+    await closeSession(this.sessionId);
+    const last = [...this.items].reverse().find((i): i is UserItem => i.type === "user");
+    if (last) await this.send(last.text);
   }
 
   async answer(

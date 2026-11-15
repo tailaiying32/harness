@@ -78,7 +78,7 @@
     // A first chat starts where the last one was, or at home.
     app.current.projectPath = app.projects[0]?.path ?? app.home;
     setup = await checkSetup();
-    if (setup.logged_in) void refreshModels();
+    if (setup.binary) void refreshModels();
     void runSelfTest();
   });
 
@@ -262,7 +262,7 @@
         </button>
       {/if}
       <ChatView {chat} problem={setup?.problem ?? null} />
-      <Composer {chat} ready={!!setup?.logged_in} home={app.home} {models} focus={app.focusBox} />
+      <Composer {chat} ready={!!setup?.binary} home={app.home} {models} focus={app.focusBox} />
     {/key}
   </main>
   {#if panelOpen}

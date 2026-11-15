@@ -337,7 +337,7 @@ const commands: Record<string, (args: Args) => unknown> = {
       emit("unseen", ended);
     }, 50);
   },
-  check_setup: () => ({ binary: "claude", logged_in: true, subscription: "max", problem: null }),
+  check_setup: () => ({ binary: "claude", problem: null }),
   sidebar: () => projects,
   list_trash: () => trash,
   restore_chat: (args) => {

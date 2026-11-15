@@ -134,6 +134,20 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    /// The agent started or finished compacting the conversation.
+    Compacting {
+        active: bool,
+    },
+    /// The conversation was compacted: the agent now sees a summary of what
+    /// came before. `auto` = the agent did it on its own as context filled up.
+    Compacted {
+        auto: bool,
+    },
+    /// The agent isn't signed in, or its login couldn't be renewed. `message`
+    /// is the agent's own wording.
+    SignInNeeded {
+        message: String,
+    },
     /// The chat got a written title. Not saved: the store holds the title.
     TitleChanged {
         title: String,
@@ -174,6 +188,7 @@ impl AgentEvent {
             AgentEvent::TextDelta { .. }
                 | AgentEvent::UsageUpdate { .. }
                 | AgentEvent::Status { .. }
+                | AgentEvent::Compacting { .. }
                 | AgentEvent::BackgroundWork { .. }
                 | AgentEvent::TitleChanged { .. }
                 | AgentEvent::PrChanged { .. }
@@ -277,6 +292,9 @@ mod tests {
         );
         assert!(!AgentEvent::Status { state: SessionState::Idle }.is_saved());
         assert!(!AgentEvent::BackgroundWork { running: 1 }.is_saved());
+        assert!(!AgentEvent::Compacting { active: true }.is_saved());
+        assert!(AgentEvent::Compacted { auto: false }.is_saved());
+        assert!(AgentEvent::SignInNeeded { message: "x".into() }.is_saved());
         assert!(
             !AgentEvent::TextDelta {
                 message_id: "m".into(),
