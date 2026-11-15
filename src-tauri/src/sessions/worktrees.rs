@@ -595,6 +595,7 @@ impl SessionManager {
                     if done.is_ok() {
                         let _ = self.0.store.clear_worktree(&id);
                         changed("merged");
+                        self.terminal_gone(&wt.path, "branch merged");
                     }
                     continue;
                 }
@@ -603,6 +604,7 @@ impl SessionManager {
                     let _ = blocking(drop_all).await;
                     let _ = self.0.store.clear_worktree(&id);
                     changed("gone");
+                    self.terminal_gone(&wt.path, "cleaned up");
                     continue;
                 }
                 Err(e) => {
@@ -612,6 +614,10 @@ impl SessionManager {
                 Ok(Merged::No) => {}
             }
             if status == "live" && now - row.last_used_at > idle_limit {
+                // Not while the user has a shell in it.
+                if self.terminal_in(&wt.path) {
+                    continue;
+                }
                 // On no branch, there would be none to bring it back on.
                 let away = wt.clone();
                 if blocking(move || worktree::is_detached(&away)).await {
@@ -630,6 +636,7 @@ impl SessionManager {
                 let _ = blocking(drop_all).await;
                 let _ = self.0.store.clear_worktree(&id);
                 changed("gone");
+                self.terminal_gone(&wt.path, "cleaned up");
             }
         }
     }
@@ -642,7 +649,10 @@ impl SessionManager {
             let away = wt.clone();
             let chat = session_id.to_string();
             match blocking(move || worktree::put_away(&away, &chat)).await {
-                Ok(()) => store.set_worktree(session_id, &wt, "put_away")?,
+                Ok(()) => {
+                    store.set_worktree(session_id, &wt, "put_away")?;
+                    self.terminal_gone(&wt.path, "chat deleted");
+                }
                 Err(e) => eprintln!("harness: couldn't put a worktree away: {e}"),
             }
         }
@@ -671,6 +681,7 @@ impl SessionManager {
     /// Deletes a chat for good: its branch and saved edits, and its history.
     async fn purge(&self, row: &ChatGit) {
         if let Some(wt) = row.worktree.clone().filter(|_| row.status.is_some()) {
+            self.terminal_gone(&wt.path, "cleaned up");
             let chat = row.id.clone();
             blocking(move || {
                 let _ = worktree::remove_folder(&wt);

@@ -1,7 +1,8 @@
 <script lang="ts">
-  // The side panel: a space beside the chat, in one of three views picked in
+  // The side panel: a space beside the chat, in one of four views picked in
   // the top bar, which also holds the view's own row: docs' tabs, the side
-  // chat's name, the browser's address (see PanelBar). Browser: a localhost
+  // chat's name, the browser's address, the terminal's tabs (see PanelBar). Terminal:
+  // the project's shells (see TerminalView). Browser: a localhost
   // page Claude can drive too (see BrowserView). Docs: one tab for the plan and one for each markdown file
   // the chat wrote or a link opened; the plan's answer buttons live at the foot
   // of its tab while Claude waits (mouse only, like every approval: no key
@@ -11,6 +12,7 @@
   import ChatView from "../chat/ChatView.svelte";
   import LiveMarkdown from "../chat/LiveMarkdown.svelte";
   import BrowserView from "./BrowserView.svelte";
+  import TerminalView from "./TerminalView.svelte";
   import Markdown from "../chat/Markdown.svelte";
   import { onDestroy } from "svelte";
   import { NOTES_TAB, PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
@@ -148,7 +150,9 @@
 <aside class="panel" bind:this={panel}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="grip" title="Drag to resize; double-click to reset" onpointerdown={startDrag} ondblclick={resetWidth}></div>
-  {#if chat.panelView === "browser"}
+  {#if chat.panelView === "terminal"}
+    <TerminalView {chat} {covered} />
+  {:else if chat.panelView === "browser"}
     <BrowserView {chat} {covered} />
   {:else if side}
     <div class="side">

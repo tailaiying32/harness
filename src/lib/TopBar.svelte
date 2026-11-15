@@ -1,7 +1,7 @@
 <script lang="ts">
   // The bar along the top of the chat and panel. On a Mac it sits in the window's
   // title bar, beside the window buttons, so it costs no room. Over the chat:
-  // its title, and the panel's three views as icons, pushed against the panel's
+  // its title, and the panel's four views as icons, pushed against the panel's
   // line. Clicking a view opens the panel on it; clicking the one on show hides
   // the panel. Over the open panel: that view's own row (see PanelBar), so the
   // panel has none of its own. Empty space drags the window.
@@ -9,6 +9,7 @@
   import PanelBar from "./panel/PanelBar.svelte";
   import type { AppState } from "./state/app.svelte";
   import type { PanelView } from "./state/chat.svelte";
+  import { terminals } from "./state/terminals.svelte";
 
   let { app }: { app: AppState } = $props();
 
@@ -22,11 +23,15 @@
     { view: "docs", name: "docs" },
     { view: "side", name: "side chat" },
     { view: "browser", name: "browser" },
+    { view: "terminal", name: "terminal" },
   ];
 
   function pick(view: PanelView) {
     if (open && chat.panelView === view) chat.panelOpen = false;
-    else chat.showView(view);
+    else {
+      chat.showView(view);
+      if (view === "terminal") terminals.focusNext++;
+    }
   }
 </script>
 

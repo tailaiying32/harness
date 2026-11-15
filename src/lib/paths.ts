@@ -101,3 +101,9 @@ function tidy(path: string): string {
 export function folderOf(path: string): string {
   return path.replace(/[\\/][^\\/]*$/, "");
 }
+
+/** A worktree branch's short name: "harness/idle-timeout-1a2b3c" → "idle-timeout". Other branches stay as they are. */
+export function shortBranch(branch: string): string {
+  if (!branch.startsWith("harness/")) return branch;
+  return branch.slice("harness/".length).replace(/-[0-9a-f]{6}$/, "");
+}

@@ -68,6 +68,25 @@ pub struct ChatGit {
     pub trashed_at: Option<i64>,
 }
 
+/// A terminal tab as saved at quit, to come back closed with its output.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedTerminal {
+    pub id: String,
+    /// The project's main folder, as the window names it.
+    pub project: String,
+    /// Where its shell started.
+    pub folder: String,
+    /// The chat worktree folder it was opened in, if any.
+    pub worktree: Option<String>,
+    /// Its name when nothing runs in it.
+    pub label: String,
+    /// Its place among the project's tabs.
+    pub position: i64,
+    /// The last of its output, raw.
+    pub output: Vec<u8>,
+    pub saved_at: i64,
+}
+
 /// A project folder and its chats, newest first.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProjectRow {
@@ -215,7 +234,7 @@ impl Store {
     }
 
     #[cfg(test)]
-    fn in_memory() -> Self {
+    pub(crate) fn in_memory() -> Self {
         Self::with(Connection::open_in_memory().unwrap()).unwrap()
     }
 
@@ -250,13 +269,65 @@ impl Store {
                  created_at INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS events_by_session ON events (session_id, id);
-             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS terminals (
+                 id TEXT PRIMARY KEY,
+                 project TEXT NOT NULL,
+                 folder TEXT NOT NULL,
+                 worktree TEXT,
+                 label TEXT NOT NULL,
+                 position INTEGER NOT NULL,
+                 output BLOB NOT NULL,
+                 saved_at INTEGER NOT NULL
+             );",
         )
         .map_err(err)?;
         migrate(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
+    }
+
+    /// Replaces the saved terminal tabs with these.
+    pub fn save_terminals(&self, tabs: &[SavedTerminal]) -> Result<(), String> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(err)?;
+        tx.execute("DELETE FROM terminals", []).map_err(err)?;
+        for t in tabs {
+            tx.execute(
+                "INSERT INTO terminals (id, project, folder, worktree, label, position, output, saved_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![t.id, t.project, t.folder, t.worktree, t.label, t.position, t.output, t.saved_at],
+            )
+            .map_err(err)?;
+        }
+        tx.commit().map_err(err)
+    }
+
+    /// The saved terminal tabs of projects that still exist, in order.
+    pub fn load_terminals(&self) -> Result<Vec<SavedTerminal>, String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, project, folder, worktree, label, position, output, saved_at FROM terminals
+                 WHERE project IN (SELECT path FROM projects) ORDER BY project, position",
+            )
+            .map_err(err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SavedTerminal {
+                    id: row.get(0)?,
+                    project: row.get(1)?,
+                    folder: row.get(2)?,
+                    worktree: row.get(3)?,
+                    label: row.get(4)?,
+                    position: row.get(5)?,
+                    output: row.get(6)?,
+                    saved_at: row.get(7)?,
+                })
+            })
+            .map_err(err)?;
+        rows.collect::<Result<_, _>>().map_err(err)
     }
 
     /// Every project that has chats, most recently used first, each with its

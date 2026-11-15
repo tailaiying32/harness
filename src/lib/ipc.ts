@@ -58,7 +58,9 @@ export type AgentEvent =
   | { kind: "prs_changed"; prs: PrInfo[] }
   | { kind: "plan_edited"; request_id: string; plan: string }
   | { kind: "browser_state"; url: string; title: string; loading: boolean }
-  | { kind: "browser_closed" };
+  | { kind: "browser_closed" }
+  | { kind: "terminal_tabs"; project: string; tabs: TerminalTab[] }
+  | { kind: "close_key" };
 
 /** One saved image of a chat: what its `[image n]` word points at. */
 export type ImageRef = { n: number; media_type: string };
@@ -298,3 +300,44 @@ export const browserPlace = (chatId: string, rect: BrowserRect, visible: boolean
   invoke<void>("browser_place", { chatId, rect, visible });
 export const browserClose = (chatId: string) => invoke<void>("browser_close", { chatId });
 export const browserCurrent = (chatId: string) => invoke<BrowserInfo | null>("browser_current", { chatId });
+
+// ---- The side panel's terminal (tabs belong to a project) ----
+
+/** A terminal tab: named for what runs in it, or its folder when nothing does. */
+export type TerminalTab = {
+  id: string;
+  title: string;
+  /** The command line running besides the shell, if any. */
+  running: string | null;
+  /** Its shell has ended; typing starts a new one. */
+  closed: boolean;
+  /** The chat worktree folder it was opened in, if any. */
+  worktree: string | null;
+};
+
+export const terminalTabs = (project: string) => invoke<TerminalTab[]>("terminal_tabs", { project });
+/** Opens a tab in the project's main folder, or in a chat's worktree folder (named `label`). */
+export const terminalNew = (project: string, worktree: string | null, label: string | null, cols: number, rows: number) =>
+  invoke<TerminalTab>("terminal_new", { project, worktree, label, cols, rows });
+/** Sends the tab's output to `onData`: everything kept so far, then what comes. */
+export async function terminalAttach(tab: string, onData: (data: Uint8Array) => void): Promise<void> {
+  const channel = new Channel<ArrayBuffer | number[] | string>();
+  channel.onmessage = (message) => {
+    if (message instanceof ArrayBuffer) onData(new Uint8Array(message));
+    else if (Array.isArray(message)) onData(Uint8Array.from(message));
+    else onData(new TextEncoder().encode(String(message)));
+  };
+  await invoke("terminal_attach", { tab, onData: channel });
+}
+export const terminalWrite = (tab: string, data: string) => invoke<void>("terminal_write", { tab, data });
+export const terminalResize = (tab: string, cols: number, rows: number) =>
+  invoke<void>("terminal_resize", { tab, cols, rows });
+/** Which tab is on screen, if any. */
+export const terminalPlace = (tab: string | null, visible: boolean) => invoke<void>("terminal_place", { tab, visible });
+/** What runs in a tab besides its shell, checked now. */
+export const terminalRunning = (tab: string) => invoke<string | null>("terminal_running", { tab });
+export const terminalClose = (tab: string) => invoke<void>("terminal_close", { tab });
+/** A tab's output as plain text, as Claude reads it (for the self-test). */
+export const terminalText = (tab: string, lines: number) => invoke<string>("terminal_text", { tab, lines });
+/** Closes the window, as Cmd+W does outside a terminal. */
+export const closeWindow = () => invoke<void>("close_window");
