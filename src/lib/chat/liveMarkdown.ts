@@ -1,7 +1,7 @@
 // A markdown editor that shows its text formatted while you write in it, like
 // Obsidian's live preview: headings, bold, code and links look as they do when
-// read, and their marks (`##`, `**`, `[`…`](…)`) show only on the line the
-// cursor is on. The text itself is never rewritten, so the file holds exactly
+// read, and their marks (`**`, `[`…`](…)`) show only on the bit the cursor
+// is in or touching (a heading's `##`: anywhere on its line). The text itself is never rewritten, so the file holds exactly
 // what was typed. Loaded on demand (see LiveMarkdown.svelte): CodeMirror is
 // the biggest library in the window, and only notes and plans use it.
 
@@ -38,7 +38,7 @@ const hide = Decoration.replace({});
 const mark = (cls: string) => Decoration.mark({ class: cls });
 const line = (cls: string) => Decoration.line({ class: cls });
 
-/** Lines with the cursor or a selection on them, where marks show. None while unfocused. */
+/** Lines with the cursor or a selection on them, where a heading's marks show. None while unfocused. */
 function activeLines(view: EditorView): Set<number> {
   const lines = new Set<number>();
   if (!view.hasFocus) return lines;
@@ -51,11 +51,16 @@ function activeLines(view: EditorView): Set<number> {
   return lines;
 }
 
+/** The cursor or a selection touches [from, to], ends included. Never while unfocused. */
+function touched(view: EditorView, from: number, to: number): boolean {
+  if (!view.hasFocus) return false;
+  return view.state.selection.ranges.some((r) => r.from <= to && r.to >= from);
+}
+
 function decorate(view: EditorView): DecorationSet {
   const out: Range<Decoration>[] = [];
   const doc = view.state.doc;
   const active = activeLines(view);
-  const onActive = (pos: number) => active.has(doc.lineAt(pos).number);
 
   for (const { from, to } of view.visibleRanges) {
     syntaxTree(view.state).iterate({
@@ -70,7 +75,7 @@ function decorate(view: EditorView): DecorationSet {
         }
         switch (name) {
           case "HeaderMark": {
-            if (onActive(node.from)) {
+            if (active.has(doc.lineAt(node.from).number)) {
               out.push(mark("cm-md-mark").range(node.from, node.to));
             } else {
               // The mark and the space after it.
@@ -94,10 +99,13 @@ function decorate(view: EditorView): DecorationSet {
           case "EmphasisMark":
           case "StrikethroughMark":
           case "CodeMark": {
-            // A fenced block's ``` stay; they are the block's edges.
-            if (node.node.parent?.name === "FencedCode") {
+            // A fenced block's ``` stay; they are the block's edges. Other
+            // marks show when the cursor touches their bit (bold, code…), so
+            // both ends show together and nested bits show all their marks.
+            const bit = node.node.parent;
+            if (bit?.name === "FencedCode") {
               out.push(mark("cm-md-mark").range(node.from, node.to));
-            } else if (onActive(node.from)) {
+            } else if (bit && touched(view, bit.from, bit.to)) {
               out.push(mark("cm-md-mark").range(node.from, node.to));
             } else {
               out.push(hide.range(node.from, node.to));
@@ -110,7 +118,7 @@ function decorate(view: EditorView): DecorationSet {
             if (marks.length < 2) return;
             const labelFrom = marks[0].to;
             const labelTo = marks[1].from;
-            if (onActive(node.from)) {
+            if (touched(view, node.from, node.to)) {
               out.push(mark("cm-md-mark").range(node.from, labelFrom));
               if (labelTo > labelFrom) out.push(mark("cm-md-linktext").range(labelFrom, labelTo));
               out.push(mark("cm-md-mark").range(labelTo, node.to));

@@ -59,6 +59,12 @@ function browserWording(tool: string, input: unknown): [string, string, string] 
       return [`ran a script in the page`, `Running a script in the page`, `run a script in the page`];
     case "screenshot":
       return [`looked at the page`, `Looking at the page`, `look at the page`];
+    case "resize": {
+      const raw = input && typeof input === "object" ? (input as Record<string, unknown>).width : 0;
+      const width = typeof raw === "number" ? raw : 0;
+      const what = width > 0 ? `${Math.round(width)} px wide` : `the panel's width`;
+      return [`set the page to ${what}`, `Setting the page to ${what}`, `set the page to ${what}`];
+    }
     default:
       return [`used the browser`, `Using the browser`, `use the browser`];
   }
