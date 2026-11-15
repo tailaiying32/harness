@@ -76,17 +76,18 @@
   );
 
   // The panel's left edge drags to set its width, kept as a share of the
-  // window. The chat keeps at least MIN_CHAT px and the panel MIN_PANEL px.
+  // area beside the sidebar (the panel's parent), since that is what the
+  // width's percentage is measured against. The chat keeps at least
+  // MIN_CHAT px and the panel MIN_PANEL px.
   const MIN_CHAT = 360;
   const MIN_PANEL = 280;
   let panel: HTMLElement;
   let share = 0;
 
   function drag(e: PointerEvent) {
-    const chatLeft = panel.previousElementSibling?.getBoundingClientRect().left ?? 0;
-    const width = window.innerWidth;
-    const edge = Math.max(chatLeft + MIN_CHAT, Math.min(e.clientX, width - MIN_PANEL));
-    share = (width - edge) / width;
+    const area = panel.parentElement!.getBoundingClientRect();
+    const edge = Math.max(area.left + MIN_CHAT, Math.min(e.clientX, area.right - MIN_PANEL));
+    share = (area.right - edge) / area.width;
     applyPanelWidth(share);
   }
 
@@ -223,6 +224,7 @@
 <style>
   .panel {
     width: var(--panel-w, 46%);
+    box-sizing: border-box;
     flex-shrink: 0;
     min-width: 0;
     display: flex;

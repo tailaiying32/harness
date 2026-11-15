@@ -271,7 +271,7 @@ type Prefs = {
 };
 export const DEFAULT_PANEL_WIDTH = 0.46;
 
-/** The side panel's width, as a share of the window. Set by dragging its left edge. */
+/** The side panel's width, as a share of the area beside the sidebar. Set by dragging its left edge. */
 export function applyPanelWidth(share: number): void {
   document.documentElement.style.setProperty("--panel-w", `${(share * 100).toFixed(2)}%`);
 }

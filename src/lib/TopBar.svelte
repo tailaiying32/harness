@@ -106,6 +106,7 @@
      padding (PanelBar pads inside), so the line runs straight up. */
   .over-panel {
     width: var(--panel-w, 46%);
+    box-sizing: border-box;
     flex-shrink: 0;
     min-width: 0;
     display: flex;
