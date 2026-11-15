@@ -37,9 +37,37 @@ function host(url: string): string {
   }
 }
 
+/** The side panel's browser, driven by Claude (see browser.rs). */
+const BROWSER = "mcp__harness_browser__";
+
+function browserWording(tool: string, input: unknown): [string, string, string] {
+  const target = clip(field(input, "text") || field(input, "selector"), 30);
+  switch (tool) {
+    case "open": {
+      const url = field(input, "url").replace(/^https?:\/\//, "");
+      return [`opened ${url}`, `Opening ${url}`, `open ${url}`];
+    }
+    case "read":
+      return [`read the page`, `Reading the page`, `read the page`];
+    case "click":
+      return [`clicked ${target}`, `Clicking ${target}`, `click ${target}`];
+    case "type":
+      return [`typed into the page`, `Typing into the page`, `type into the page`];
+    case "console":
+      return [`checked the page's console`, `Checking the page's console`, `check the page's console`];
+    case "run":
+      return [`ran a script in the page`, `Running a script in the page`, `run a script in the page`];
+    case "screenshot":
+      return [`looked at the page`, `Looking at the page`, `look at the page`];
+    default:
+      return [`used the browser`, `Using the browser`, `use the browser`];
+  }
+}
+
 /** [past tense, present tense, "to ..." form], each followed by what it acted on. */
 function wording(tool: ToolCall): [string, string, string] {
   const { name, input } = tool;
+  if (name.startsWith(BROWSER)) return browserWording(name.slice(BROWSER.length), input);
   const file = fileName(field(input, "file_path") || field(input, "notebook_path"));
   const pattern = clip(field(input, "pattern"), 30);
   const query = clip(field(input, "query"), 30);

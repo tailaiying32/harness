@@ -70,6 +70,18 @@ file, a hand merge cleaned up at startup, the trash and its purge. Checked in th
 list, the bottom bar. Not tested live: a real pull request going through its
 states (the lookup command was run read-only against pookie). See "Worktrees".
 
+Added 2026-11-14 (browser, branch `harness/harness-browser-pane-0ac457`, not
+merged): the side panel's third view, a localhost page that Claude can drive
+(open, read, click, type, console, run, screenshot). See "Browser (`browser.rs`)".
+**Tested** live with the self-test (Haiku): all seven tools on a test page,
+with no approval cards; a page Claude opened while the panel showed docs
+(parked, screenshot still right); a non-localhost address
+refused; Harness's own preview page loading cleanly in it. Not checked by eye
+in the real window (the screen couldn't be captured): the page lining up over
+the panel, following the panel's drag, hiding under Settings and the image
+view. Not tried: clicking a link to another site (it should open the default
+browser), Windows.
+
 Added 2026-11-13 (background work): a chat running a background command or
 agent is never closed for being idle, a message to a closing chat no longer
 fails, and delete and quit stop background commands. **Tested** live: stays
@@ -170,8 +182,7 @@ the login itself.
 
 ## What it doesn't cover
 
-- A skills editor, a screen for managing app connections, and
-  browser use. Skills, instructions and connections you already have still
+- A skills editor and a screen for managing app connections. Skills, instructions and connections you already have still
   work; there is just no UI for editing them yet.
 - Codex, Cursor or other agents. The design leaves room; nothing is built.
 - Chats made earlier in the desktop app or the terminal. Only chats started in
@@ -1185,6 +1196,72 @@ Mocked up on the same board:
   dropped as unneeded on top of that; add it back if raw HTML is ever turned
   on. Links open in the default browser, never inside the app window.
 
+### Browser (`browser.rs`, built 2026-11-14)
+
+A page beside the chat, for localhost frontend work: the user looks at it,
+Claude drives it. One per chat, made the first time either of them opens an
+address; closed by its tab's × or when the chat is deleted; put away when
+left unused (below). Not tied to the chat's Claude Code process: an idle close
+leaves the page as it is. Only http(s) on
+`localhost`, `127.0.0.1` or `[::1]` loads; a link anywhere else opens in the
+default browser (`on_navigation`). The side chat gets no browser tools.
+
+- **The page** is a child web view of the main window (tauri `unstable`
+  feature, `Window::add_child`), so it has its own WebKit page process (19 MB
+  for a small test page; the GPU and network processes are shared). It starts
+  on `about:blank`; on Mac its start-up scripts are then replaced with the
+  bridge alone (`mac::only_bridge`), because Tauri's own (`__TAURI_INTERNALS__`,
+  `isTauri`, locked in place) made a Tauri app's dev page, Harness's included,
+  believe it ran inside Harness. On Windows they stay for now; calls through
+  them are refused, as no capability covers `browser-*` views.
+- **Placing it:** `BrowserView.svelte` sends the panel body's rect
+  (`.slot`, CSS px = logical px) with `browser_place` on every layout change,
+  at most once a frame, and whether it should show: the browser view is on
+  screen and nothing covers the panel (Settings, the image view: App passes
+  `covered`). Not shown = parked at x = -20000 at the same size, so Claude's
+  reads and screenshots match what the user would see. Leaving the view
+  (another view, chat or the panel hidden) unmounts the component, which parks it.
+- **Claude's tools** are an in-process MCP server over the existing pipe:
+  `--mcp-config {"mcpServers":{"harness_browser":{"type":"sdk",...}}}`, and
+  Claude Code sends `control_request` `mcp_message` lines that
+  `claude_code.rs` answers (`answer_tool_message`) with `mcp_response`. No
+  port, no token; each process's calls belong to its chat. `--settings` allows
+  `mcp__harness_browser`, so they never ask. Tested on CLI 2.1.322: no
+  `initialize` from the host is needed first; the tools come as deferred tools
+  (Claude loads them with ToolSearch). Agent-agnostic side: `AppTools` in
+  `agent/mod.rs`, made per chat by `SessionManager::set_app_tools`.
+- **Actions** run as scripts in the page (`BRIDGE_JS`): started with `eval`,
+  answered through `eval_with_callback` as a JSON string, async ones (`run`)
+  collected by polling `__hb.take(id)`. The page has no way to call the app.
+  `read` lists visible buttons, links and fields as `[n]`, marking each with
+  `data-harness-ref="n"` for `click`/`type`. `type` goes through
+  `execCommand("insertText")` so frameworks see real input, with the value
+  setter as fallback. Errors and warnings (console, uncaught, failed loads of
+  scripts and images) are kept in `sessionStorage`, so they outlast a reload;
+  `open` clears them, `console` reads and clears them.
+- **Putting away:** a browser off screen and unused (no tool call, not on
+  screen) for 10 minutes has its page closed, which frees its page process
+  (gone 15 to 30 s later); the chat keeps the address and the window keeps
+  its tab. The agent's next tool call, showing the view, or ↻ loads it again,
+  so page state (form input, scroll) is lost, as a reload would. Checked every
+  30 s; `HARNESS_BROWSER_IDLE_SECONDS` overrides the 10 minutes. The user
+  asked for this (2026-11-14): they leave chats sitting with a page open and
+  don't want to remember to close it. **Tested** with 5 s.
+- **Screenshots:** Mac only, `WKWebView takeSnapshotWithConfiguration`, shrunk
+  so the long edge is at most 1568 px, sent as PNG. They work while parked.
+  Other systems say they aren't supported yet.
+- **Window side:** `Chat.browser` (page), `browserOn` (view open, maybe with
+  no page yet: an empty address line). Claude opening a page never switches
+  the panel; instead a successful `open` adds a line to the chat, like a
+  plan's: "Page · localhost:5173 · open browser" (a `page` item, rebuilt from
+  history on replay; only the latest line has the button, which loads the
+  address again if the browser was closed since). No marks in the bars: the
+  user disliked a ● beside ◂ (2026-11-14). With the panel
+  closed, ◂ always shows; with nothing else in the panel it opens the browser's
+  address line. A chat loaded after its page was opened asks `browser_current`.
+- **Self-test:** `@browser <url>` types an address (waits for the load),
+  `@settings` toggles settings; the report has `browser {on, page, pageLines, slot}`.
+
 ### Preview page
 
 `npm run dev`, then open `http://localhost:1420/preview.html`: the same window
@@ -1193,7 +1270,9 @@ sidebar of sample chats, one saved chat, a 300-turn chat, a chat with
 images ("Settings list cut off"; pasting works too), a chat with a plan
 waiting and two documents (for the side panel; Keep planning brings a revised
 plan, approving brings an edit to a document), and a scripted answer to
-anything typed. For working on the look without building the app.
+anything typed. For working on the look without building the app. Add
+`#open=planning&browser` for the browser view (no page is drawn in the
+preview; the tab and address line work).
 It is not part of the built app. `.claude/launch.json` starts it as
 `ui-preview`.
 

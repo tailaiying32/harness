@@ -15,6 +15,7 @@
     autotest,
     autotestReport,
     autotestWait,
+    browserNavigate,
     checkSetup,
     closeSession,
     listModels,
@@ -194,11 +195,14 @@
       //   A message starting with /btw goes to the side chat; the test waits for its answer.
       //   @image <word>  attach a picture of <word>, as a paste would, to the next message
       //   @file <path>   add the file at <path>, as a drop would, to the next message
+      //   @browser <url> open the browser view and type <url> in its address line;
+      //                  waits for the page to load. `@browser` alone only shows the view.
+      //   @settings      open or close settings (drawn over the panel, hiding the page)
       //   @wait <ms>     do nothing for a while. With the window hidden or the screen
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
-        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|image|file)(?:\s+(\S+))?$/) ??
+        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|image|file|browser|settings)(?:\s+(\S+))?$/) ??
         [];
       const current = app.current;
       if (directive === "model") await current.changeModel(value);
@@ -226,6 +230,15 @@
       if (directive === "endside") await current.endSide();
       if (directive === "image") imageWords.push(await attach(current, await pictureOf(value)));
       if (directive === "file") imageWords.push(await current.addDraftFile(value));
+      if (directive === "browser") {
+        current.openBrowser();
+        if (value) {
+          await browserNavigate(current.sessionId, value);
+          await pause(300);
+          for (let i = 0; i < 100 && (!current.browser || current.browser.loading); i++) await pause(100);
+        }
+      }
+      if (directive === "settings") showSettings = !showSettings;
       if (directive === "close") await closeSession(current.sessionId);
       if (directive === "close" || directive === "exited") await exited(current);
       if (directive) {
@@ -285,6 +298,15 @@
           },
           items: current.items.map((item) => ({ ...item })),
           panelView: current.panelView,
+          browser: {
+            on: current.browserOn,
+            page: current.browser,
+            pageLines: current.items.filter((item) => item.type === "page").length,
+            slot: (() => {
+              const r = document.querySelector<HTMLElement>(".slot")?.getBoundingClientRect();
+              return r ? { x: r.left, y: r.top, width: r.width, height: r.height } : null;
+            })(),
+          },
           // Where the panel's left line is, in the panel and in the top bar above it.
           edges: {
             window: window.innerWidth,
@@ -329,7 +351,7 @@
   </main>
   {#if panelOpen}
     {#key chat.sessionId}
-      <SidePanel {chat} />
+      <SidePanel {chat} covered={showSettings || !!chat.viewing} />
     {/key}
   {/if}
   <!-- Drawn over the chat and panel, which stay as they are underneath. -->

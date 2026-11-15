@@ -55,7 +55,9 @@ export type AgentEvent =
   | { kind: "worktree_ask"; request_id: string; repo_root: string; tool_id: string | null; name?: string | null }
   | { kind: "worktree_chosen"; choice: WorktreeChoice }
   | { kind: "worktree_changed"; status: WorktreeStatus; branch: string | null }
-  | { kind: "prs_changed"; prs: PrInfo[] };
+  | { kind: "prs_changed"; prs: PrInfo[] }
+  | { kind: "browser_state"; url: string; title: string; loading: boolean }
+  | { kind: "browser_closed" };
 
 /** One saved image of a chat: what its `[image n]` word points at. */
 export type ImageRef = { n: number; media_type: string };
@@ -273,3 +275,19 @@ export const clipboardFiles = () => invoke<string[]>("clipboard_files");
 
 /** A markdown file's text, for a link opened in the side panel. */
 export const readDoc = (path: string) => invoke<string>("read_doc", { path });
+
+// ---- The side panel's browser (one per chat, localhost pages only) ----
+
+/** What a chat's browser shows. */
+export type BrowserInfo = { url: string; title: string; loading: boolean };
+/** Where the panel's body is, in CSS pixels from the window's top left. */
+export type BrowserRect = { x: number; y: number; width: number; height: number };
+
+/** Opens an address the user typed; makes the chat's browser if needed. */
+export const browserNavigate = (chatId: string, url: string) => invoke<void>("browser_navigate", { chatId, url });
+export const browserReload = (chatId: string) => invoke<void>("browser_reload", { chatId });
+/** Puts the browser over the panel's body, or parks it out of sight. */
+export const browserPlace = (chatId: string, rect: BrowserRect, visible: boolean) =>
+  invoke<void>("browser_place", { chatId, rect, visible });
+export const browserClose = (chatId: string) => invoke<void>("browser_close", { chatId });
+export const browserCurrent = (chatId: string) => invoke<BrowserInfo | null>("browser_current", { chatId });

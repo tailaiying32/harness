@@ -134,6 +134,8 @@ export class AppState {
       try {
         const saved = await loadSession(sessionId);
         chat = Chat.fromSaved(saved.session, saved.events, saved.live);
+        // Claude may have opened a page while the chat wasn't loaded here.
+        void chat.loadBrowser();
       } catch (e) {
         this.problem = String(e);
         void this.refresh();

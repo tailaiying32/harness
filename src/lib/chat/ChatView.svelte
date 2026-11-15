@@ -39,6 +39,12 @@
 
   const lastGroup = $derived(groups[groups.length - 1]);
 
+  /** Only the latest page line offers to open the browser: it shows one page at a time. */
+  const latestPage = $derived.by(() => {
+    for (let i = chat.items.length - 1; i >= 0; i--) if (chat.items[i].type === "page") return chat.items[i].id;
+    return undefined;
+  });
+
   // Only the latest part of a chat is drawn. A long chat would otherwise cost
   // hundreds of megabytes; earlier messages are drawn when the user scrolls up.
   const PAGE = 60;
@@ -191,6 +197,18 @@
             {#if latest}
               <span class:dim={waiting}>·</span>
               <button class="open" class:waiting onclick={() => chat.openPanel(PLAN_TAB)}>open plan</button>
+            {/if}
+          </div>
+        </div>
+      {:else if group.item.type === "page"}
+        <!-- The page itself is in the side panel's browser; the chat keeps one line. -->
+        {@const page = group.item}
+        <div class="row block">
+          <span class="marker"></span>
+          <div class="body faint">
+            Page · {page.url.replace(/^https?:\/\//, "")}
+            {#if page.id === latestPage}
+              · <button class="open" onclick={() => chat.showPage(page.url)}>open browser</button>
             {/if}
           </div>
         </div>

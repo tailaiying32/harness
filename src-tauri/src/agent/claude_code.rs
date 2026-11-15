@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{AgentAdapter, EventSink, ImagePayload, RunningAgent, SideOptions, SpawnOptions};
+use super::{AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SideOptions, SpawnOptions};
 use crate::events::{AgentEvent, ApprovalKind, Block, Decision, ModelInfo, SessionState};
 
 /// How many stderr lines to keep for an error message when the process dies.
@@ -60,10 +60,25 @@ and do this before your first change, however you'd make it (edit tools or shell
 user approves or declines. Don't call it for a tiny one-off change, for questions, reviews or \
 planning, or once this chat already works in a worktree.";
 
-/// Makes Claude Code's own worktree tool always ask, in every mode, so the
-/// request reaches the app instead of Claude Code making a worktree inside the
-/// repo by itself (tested on CLI 2.1.322: without this it doesn't ask).
-const WORKTREE_SETTINGS: &str = r#"{"permissions":{"ask":["EnterWorktree"]}}"#;
+/// Settings for every main chat launch. Makes Claude Code's own worktree tool
+/// always ask, in every mode, so the request reaches the app instead of Claude
+/// Code making a worktree inside the repo by itself (tested on CLI 2.1.322:
+/// without this it doesn't ask). The app's own tools, if any, never ask.
+fn launch_settings(tools: Option<&AppTools>) -> String {
+    let mut permissions = json!({ "ask": ["EnterWorktree"] });
+    if let Some(tools) = tools {
+        permissions["allow"] = json!([format!("mcp__{}", tools.server)]);
+    }
+    json!({ "permissions": permissions }).to_string()
+}
+
+/// Declares the app's own tools as an in-process ("sdk") MCP server: Claude
+/// Code sends their calls down stdout as `mcp_message` control requests and
+/// reads the answers from stdin, as the Agent SDK does (tested on CLI 2.1.322:
+/// no `initialize` request needed first; tools appear as `mcp__<server>__<tool>`).
+fn mcp_config(tools: &AppTools) -> String {
+    json!({ "mcpServers": { tools.server: { "type": "sdk", "name": tools.server } } }).to_string()
+}
 
 /// Added to a side chat's instructions on every launch.
 const SIDE_INSTRUCTION: &str = "This is a side conversation about the chat above. The user asks \
@@ -87,16 +102,18 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
         "--replay-user-messages",
         "--permission-prompt-tool",
         "stdio",
-        "--settings",
-        WORKTREE_SETTINGS,
     ]
     .map(String::from)
     .to_vec();
+    args.extend(["--settings".to_string(), launch_settings(opts.tools.as_ref())]);
+    let mut instructions = format!("{PLAN_INSTRUCTION}\n\n{WORKTREE_INSTRUCTION}");
+    if let Some(tools) = &opts.tools {
+        args.extend(["--mcp-config".to_string(), mcp_config(tools)]);
+        instructions.push_str("\n\n");
+        instructions.push_str(tools.instruction);
+    }
     // Per launch: a resumed session does not remember it.
-    args.extend([
-        "--append-system-prompt".to_string(),
-        format!("{PLAN_INSTRUCTION}\n\n{WORKTREE_INSTRUCTION}"),
-    ]);
+    args.extend(["--append-system-prompt".to_string(), instructions]);
     if let Some(id) = &opts.resume_id {
         args.extend(["--resume".to_string(), id.clone()]);
     }
@@ -274,6 +291,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             let allowed = allowed.clone();
             let sent = sent.clone();
             let sink = sink.clone();
+            let tools = opts.tools.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
                 // After a stop: when to kill if it hasn't exited.
@@ -317,6 +335,19 @@ impl AgentAdapter for ClaudeCodeAdapter {
                         if let Some(tx) = weak_tx.upgrade() {
                             let _ = tx.send(Out::Line(reply.to_string()));
                         }
+                        continue;
+                    }
+                    // A call to the app's own tools: answered in the background,
+                    // since a tool may take a while.
+                    if let Some(tools) = tools.as_ref().filter(|t| is_tool_message(&value, t)) {
+                        let tools = tools.clone();
+                        let weak_tx = weak_tx.clone();
+                        tokio::spawn(async move {
+                            let reply = answer_tool_message(&tools, &value).await;
+                            if let Some(tx) = weak_tx.upgrade() {
+                                let _ = tx.send(Out::Line(reply));
+                            }
+                        });
                         continue;
                     }
                     let translated = translate(&value, &pending);
@@ -886,6 +917,51 @@ fn quiet_read(v: &Value, allowed: &HashSet<String>) -> Option<Value> {
     }))
 }
 
+/// Whether a line is a call to the app's own tools.
+fn is_tool_message(v: &Value, tools: &AppTools) -> bool {
+    v["type"] == "control_request"
+        && v["request"]["subtype"] == "mcp_message"
+        && v["request"]["server_name"] == tools.server
+}
+
+/// Answers one MCP message for the app's tools; returns the line to send back.
+async fn answer_tool_message(tools: &AppTools, v: &Value) -> String {
+    let message = &v["request"]["message"];
+    let id = message["id"].clone();
+    let result = match message["method"].as_str().unwrap_or_default() {
+        "initialize" => Ok(json!({
+            "protocolVersion": message["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": tools.server, "version": env!("CARGO_PKG_VERSION") },
+        })),
+        "tools/list" => Ok(json!({ "tools": tools.list })),
+        "tools/call" => {
+            let name = message["params"]["name"].as_str().unwrap_or_default().to_string();
+            let args = message["params"]["arguments"].clone();
+            Ok(match (tools.call)(name, args).await {
+                Ok(content) => json!({ "content": content }),
+                Err(error) => json!({ "content": [{ "type": "text", "text": error }], "isError": true }),
+            })
+        }
+        method if method.starts_with("notifications/") => Ok(json!({})),
+        method => Err(json!({ "code": -32601, "message": format!("Method not found: {method}") })),
+    };
+    let mut response = json!({ "jsonrpc": "2.0", "id": id });
+    match result {
+        Ok(result) => response["result"] = result,
+        Err(error) => response["error"] = error,
+    }
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": v["request_id"],
+            "response": { "mcp_response": response },
+        },
+    })
+    .to_string()
+}
+
 /// Turn one line of Claude Code output into the app's events.
 /// Unknown types and subtypes are ignored: new ones appear between CLI versions.
 fn translate(v: &Value, pending: &Pending) -> Translated {
@@ -1195,6 +1271,7 @@ mod tests {
                 model: None,
                 effort: effort.map(str::to_owned),
                 side: None,
+                tools: None,
             })
         };
         let args = with(Some("max"));
@@ -1214,6 +1291,7 @@ mod tests {
             model: None,
             effort: None,
             side: None,
+            tools: None,
         });
         assert!(args.contains(&"--replay-user-messages".to_string()));
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
@@ -1222,8 +1300,89 @@ mod tests {
         let at = args.iter().position(|a| a == "--settings").unwrap();
         let settings: Value = serde_json::from_str(&args[at + 1]).unwrap();
         assert_eq!(settings["permissions"]["ask"][0], "EnterWorktree");
+        // No app tools, no tool server.
+        assert!(!args.contains(&"--mcp-config".to_string()));
         assert!(args.windows(2).any(|w| w == ["--resume", "abc"]));
         assert!(args.windows(2).any(|w| w == ["--permission-mode", "plan"]));
+    }
+
+    fn echo_tools() -> AppTools {
+        AppTools {
+            server: "app_tools",
+            instruction: "Use the app tools.",
+            list: json!([{ "name": "echo", "inputSchema": { "type": "object" } }]),
+            call: Arc::new(|name, args| {
+                Box::pin(async move {
+                    match name.as_str() {
+                        "echo" => Ok(vec![json!({ "type": "text", "text": args["text"] })]),
+                        _ => Err("no such tool".to_string()),
+                    }
+                })
+            }),
+        }
+    }
+
+    #[test]
+    fn app_tools_are_declared_allowed_and_explained() {
+        let args = launch_args(&SpawnOptions {
+            binary: "claude".into(),
+            project_path: "/work".into(),
+            resume_id: None,
+            mode: None,
+            model: None,
+            effort: None,
+            side: None,
+            tools: Some(echo_tools()),
+        });
+        let at = args.iter().position(|a| a == "--mcp-config").unwrap();
+        let config: Value = serde_json::from_str(&args[at + 1]).unwrap();
+        assert_eq!(config["mcpServers"]["app_tools"]["type"], "sdk");
+        let at = args.iter().position(|a| a == "--settings").unwrap();
+        let settings: Value = serde_json::from_str(&args[at + 1]).unwrap();
+        assert_eq!(settings["permissions"]["allow"][0], "mcp__app_tools");
+        assert_eq!(settings["permissions"]["ask"][0], "EnterWorktree");
+        let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
+        assert!(args[at + 1].ends_with("Use the app tools."));
+    }
+
+    #[tokio::test]
+    async fn app_tool_messages_get_mcp_answers() {
+        let tools = echo_tools();
+        let ask = |message: Value| json!({
+            "type": "control_request",
+            "request_id": "r1",
+            "request": { "subtype": "mcp_message", "server_name": "app_tools", "message": message },
+        });
+        let answer = |line: String| -> Value {
+            let v: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(v["response"]["request_id"], "r1");
+            v["response"]["response"]["mcp_response"].clone()
+        };
+
+        let init = ask(json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2025-11-25" } }));
+        assert!(is_tool_message(&init, &tools));
+        let reply = answer(answer_tool_message(&tools, &init).await);
+        assert_eq!(reply["result"]["protocolVersion"], "2025-11-25");
+        assert_eq!(reply["id"], 0);
+
+        let list = answer(answer_tool_message(&tools, &ask(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))).await);
+        assert_eq!(list["result"]["tools"][0]["name"], "echo");
+
+        let call = ask(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "echo", "arguments": { "text": "hi" } } }));
+        let reply = answer(answer_tool_message(&tools, &call).await);
+        assert_eq!(reply["result"]["content"][0]["text"], "hi");
+
+        let bad = ask(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "nope", "arguments": {} } }));
+        let reply = answer(answer_tool_message(&tools, &bad).await);
+        assert_eq!(reply["result"]["isError"], true);
+
+        let other = ask(json!({ "jsonrpc": "2.0", "id": 4, "method": "resources/list" }));
+        assert_eq!(answer(answer_tool_message(&tools, &other).await)["error"]["code"], -32601);
+
+        // Another server's message is not ours.
+        let mut theirs = init.clone();
+        theirs["request"]["server_name"] = json!("other");
+        assert!(!is_tool_message(&theirs, &tools));
     }
 
     #[test]
@@ -1637,6 +1796,7 @@ mod tests {
                 side: Some(SideOptions {
                     fork_from: Some("main-1".into()),
                 }),
+                tools: None,
             })
         };
         let first = side(Some("main-1"));
