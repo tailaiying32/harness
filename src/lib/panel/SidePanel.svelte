@@ -9,7 +9,7 @@
   // message box at the foot. Showing and hiding the panel is the top bar's.
   import { contentClick } from "../clicks";
   import ChatView from "../chat/ChatView.svelte";
-  import EditableMarkdown from "../chat/EditableMarkdown.svelte";
+  import LiveMarkdown from "../chat/LiveMarkdown.svelte";
   import BrowserView from "./BrowserView.svelte";
   import Markdown from "../chat/Markdown.svelte";
   import { onDestroy } from "svelte";
@@ -177,11 +177,11 @@
     <div class="body" onclick={onClick}>
       {#if active === NOTES_TAB}
         {#if chat.notes !== null}
-          <EditableMarkdown text={chat.notes} onchange={typeNotes} ondone={flushNotes} placeholder="notes" />
+          <LiveMarkdown text={chat.notes} onchange={typeNotes} ondone={flushNotes} placeholder="notes" autofocus={chat.notes === ""} />
         {/if}
       {:else if active === PLAN_TAB && plan && chat.planPending}
         <!-- A waiting plan can be edited; Approve sends the edit. -->
-        <EditableMarkdown text={planText} onchange={(t) => (chat.planDraft = t)} />
+        <LiveMarkdown text={planText} onchange={(t) => (chat.planDraft = t)} />
       {:else}
         <Markdown {text} />
       {/if}

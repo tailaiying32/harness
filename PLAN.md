@@ -1244,10 +1244,17 @@ default browser (`on_navigation`). The side chat gets no browser tools.
 ### Notes and plan edits (built 2026-11-14, branch `harness/chat-notes`)
 
 **Notes.** Every chat has a `notes` tab, always first in the docs row and
-never closed, for longer thinking than a message. Markdown, shown formatted;
-a click (not on a link) turns it into a plain textarea, and Escape, Cmd+Enter
-or clicking away shows it formatted again (`EditableMarkdown.svelte`). Empty
-notes start as the textarea. Saved 400 ms after typing stops and when editing
+never closed, for longer thinking than a message. Markdown edited in place
+while shown formatted, like Obsidian's live preview (the user's choice over a
+separate edit mode and over Notion-style editing): headings, bold, code and
+links look as when read, and their marks show only on the line the cursor is
+on, so the file is exactly what was typed (`liveMarkdown.ts`, CodeMirror 6
+with the `@lezer/markdown` parser plus GFM; `@codemirror/lang-markdown` was
+dropped because it pulls in HTML, CSS and JavaScript support: 500 KB to
+307 KB, about 100 KB gzipped). It loads on demand, the first time notes or a
+waiting plan are shown (`LiveMarkdown.svelte` shows the formatted text until
+then). A shown link is followed on click, not edited. Escape leaves the
+editor. Empty notes get the cursor. Saved 400 ms after typing stops and when editing
 ends (`write_notes`), read lazily the first time the tab shows (`read_notes`).
 - Stored in the app's data folder, `notes/<chat id>/notes.md` (`notes.rs`),
   never in the repo; written to a side file then moved into place; 1 MB cap.
@@ -1262,7 +1269,7 @@ ends (`write_notes`), read lazily the first time the tab shows (`read_notes`).
   browser still closes the panel when only the notes are left
   (`Chat.hasPanelWork`).
 
-**Plan edits.** A waiting plan is editable the same way. Approve (and the
+**Plan edits.** A waiting plan is editable the same way, in the same editor. Approve (and the
 "always" variant) sends the edit: `answer_approval` takes `plan`, which
 replaces `plan` in the approved input; Claude Code works from that text (tested
 on CLI 2.1.322: no write to its plan file needed). A saved `PlanEdited` event,
