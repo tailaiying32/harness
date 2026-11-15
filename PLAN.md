@@ -26,6 +26,32 @@ Added 2026-11-13 (quick wins): rename a chat (double-click its title), close a s
 "queued" mark on a message sent while Claude works, plans always opening in
 the side panel, and a chat that stays at its end when opened.
 
+Added 2026-11-15 (branch `harness/sidebar-chat-cap-86b1f0`): the sidebar cap,
+"show more" and folding, and hiding the sidebar (see "Sidebar" under Look).
+The side panel gets a full screen button on every view (before its ×): the
+panel covers the chat but never the sidebar, using the same layout as a narrow
+window; the button again, or Escape outside a text box, brings the chat back,
+and hiding the panel ends it. Dragging the panel's edge 48px past the chat's
+360px limit makes it full screen; 48px past the panel's own 280px limit hides
+the panel. Both are live while the button is held (drag back over the line to
+undo; letting go settles it), and the panel keeps its width from before the
+drag for when it is back. The drag listens on the window, since the edge
+itself disappears in full screen. Full screen drops the panel's left
+line (and the top bar's) so it never doubles the sidebar's. The browser gets
+an "open in your browser" button at the right, beside full screen and ×. The
+address is text: one click copies it (it flashes the accent colour),
+double-click turns it into the box for typing an address; with no page open
+it is the box. In a narrow chat the model label under the message box shortens with an ellipsis
+(like the folder), so the row never runs past the panel's line.
+
+The model picker lists only Claude Code's short names (opus, fable, sonnet,
+haiku), each of which always points at the newest model of its family; pinned
+older versions (full ids with a dash) and "Default" are left out. The model
+"default" stood for (same resolved model) is listed first and is what new
+chats start on when the saved pick was "default". Older chats still on
+"default" keep running on it and show as that first model. Trimmed in the
+core (`parse_models`) and again for a list cached before the change.
+
 Added 2026-11-14 (effort, branch `harness/effort-picker-15a45f`): the model
 label is now an in-app menu (not a native one) listing the models, with one
 row of effort levels under them. A level picked is for that chat only and is
@@ -849,7 +875,22 @@ https://www.magicpatterns.com/os/tWmrW2q43Q7sWofaHnFJVj?file=2oZgfpBgi1cedNPY3NJ
     bad `#b0463a`.
 - **Sidebar:** bare chat titles under each project's path, one status dot per
   chat (accent = waiting on the user, ok = working, hollow = idle). No preview
-  line, no time.
+  line, no time. Each project shows its 8 most recently used chats; past that,
+  only the open chat, chats working, waiting or finished unseen, and chats
+  with an open or draft pull request. Under them, a faint "show more" adds the
+  next 8 hidden chats each click, until none are left. It is the only label:
+  clicking the folder name folds one step, back to the first 8, then down to
+  the name alone. A caret in the dots' column (folder name lined up with the
+  titles) points down while open, right once folded to the name (still showing the open chat and any working, waiting or
+  finished-unseen chat; open pull requests don't count there). Folded folders
+  are saved across quits (prefs `foldedProjects`, by path); "show more" steps
+  are not. Tried and dropped: a search box in place of "more", and "show
+  less" as a second label (two labels never looked clean). Added 2026-11-15.
+  The whole sidebar hides with the sidebar icon (in the top strip, after a
+  Mac's window buttons, same spot shown or hidden) or Cmd+B / Ctrl+B; saved
+  across quits (prefs `sidebarHidden`). Projects keep a fixed order, set by
+  dragging a folder name (a 4px move starts the drag, so a click still
+  folds); a new project goes on top; saved as prefs `projectOrder`, by path.
 - **Scrolling:** a chat opens at its end and follows new output. It lets go
   only when the view moves up, and takes hold again within 40px of the end.
   Growth of the page under a still view never counts as scrolling away.

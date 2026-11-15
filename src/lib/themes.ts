@@ -255,6 +255,12 @@ type Prefs = {
   mode: string;
   /** The side panel's share of the window's width, 0 to 1. */
   panelWidth: number;
+  /** Project folders folded in the sidebar, by path. */
+  foldedProjects: string[];
+  /** The sidebar is put away. */
+  sidebarHidden: boolean;
+  /** Project folders in the order set by dragging, by path. */
+  projectOrder: string[];
 };
 export const DEFAULT_PANEL_WIDTH = 0.46;
 
@@ -294,9 +300,12 @@ export function loadPrefs(): Prefs {
         typeof saved.panelWidth === "number" && saved.panelWidth > 0.1 && saved.panelWidth < 0.9
           ? saved.panelWidth
           : DEFAULT_PANEL_WIDTH,
+      foldedProjects: Array.isArray(saved.foldedProjects) ? saved.foldedProjects.filter((p) => typeof p === "string") : [],
+      sidebarHidden: saved.sidebarHidden === true,
+      projectOrder: Array.isArray(saved.projectOrder) ? saved.projectOrder.filter((p) => typeof p === "string") : [],
     };
   } catch {
-    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH };
+    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH, foldedProjects: [], sidebarHidden: false, projectOrder: [] };
   }
 }
 

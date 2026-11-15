@@ -76,10 +76,13 @@
 
   // The list comes from Claude Code, so it shows real names ("Opus 5.5"). A
   // saved choice that is no longer listed still gets an entry, so it shows.
+  // An older chat on Claude Code's "default" shows as the model that stands
+  // for, which the list puts first.
+  const shownChoice = $derived(chat.modelChoice === "default" && models.length ? models[0].value : chat.modelChoice);
   const modelOptions = $derived(
-    models.some((m) => m.value === chat.modelChoice)
+    models.some((m) => m.value === shownChoice)
       ? models
-      : [{ value: chat.modelChoice, name: chat.modelChoice, detail: null }, ...models],
+      : [{ value: shownChoice, name: shownChoice, detail: null }, ...models],
   );
 
   function pickModel(choice: string) {
@@ -89,7 +92,7 @@
 
   // Effort lives in the model menu. A level picked here is for this chat only;
   // new chats start on Claude Code's own default for their model.
-  const picked = $derived(modelOptions.find((m) => m.value === chat.modelChoice));
+  const picked = $derived(modelOptions.find((m) => m.value === shownChoice));
   const efforts = $derived(picked?.efforts ?? []);
   const effort = $derived(
     efforts.includes(chat.effortChoice) ? chat.effortChoice : (picked?.default_effort ?? null),
@@ -431,7 +434,7 @@
         </span>
       {/if}
       <span class="spacer"></span>
-      <span class="picker" bind:this={menus.model}>
+      <span class="picker model" bind:this={menus.model}>
         <button onclick={() => toggle("model")} title="Model and effort" aria-haspopup="menu" aria-expanded={open === "model"}>
           {picked?.name ?? chat.modelChoice}{#if effort}&ensp;{effort}{/if}
         </button>
@@ -440,8 +443,8 @@
             {#each modelOptions as m (m.value)}
               <button
                 role="menuitemradio"
-                aria-checked={m.value === chat.modelChoice}
-                class:on={m.value === chat.modelChoice}
+                aria-checked={m.value === shownChoice}
+                class:on={m.value === shownChoice}
                 title={m.detail ?? ""}
                 onclick={() => pickModel(m.value)}>{m.name}</button
               >
@@ -565,6 +568,19 @@
   }
   .pr.closed {
     color: var(--bad);
+  }
+  /* In a narrow chat the model's label gives way with an ellipsis, so the
+     row never runs past the chat's edge. The menu hangs off the span, so the
+     clipping is on the button only. */
+  .meta .model {
+    flex-shrink: 1;
+    min-width: 6ch;
+  }
+  .meta .model > button {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .meta .spacer {
     flex: 1 1 0;

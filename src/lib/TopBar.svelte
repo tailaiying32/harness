@@ -107,6 +107,24 @@
     align-items: center;
     border-left: 1px solid var(--line);
   }
+  /* The sidebar put away: room for its show/hide button (and a Mac's window
+     buttons) before the title. */
+  :global(.bare) .chat {
+    padding-left: calc(var(--toggle-x) + 1em + var(--pad-x) * 0.8);
+  }
+  /* Full screen panel: as in a narrow window, below. */
+  :global(.wide) .bar:has(.over-panel) .chat {
+    flex: 0 0 auto;
+  }
+  :global(.wide) .bar:has(.over-panel) .title {
+    display: none;
+  }
+  /* No line below to continue, so none here either. */
+  :global(.wide) .over-panel {
+    width: auto;
+    flex: 1;
+    border-left: 0;
+  }
   /* Too narrow for both: the panel takes the chat's place (see App.svelte);
      the chat's part keeps only the icons. */
   @media (max-width: 1100px) {
@@ -119,6 +137,7 @@
     .over-panel {
       width: auto;
       flex: 1;
+      border-left: 0;
     }
   }
 </style>

@@ -15,6 +15,9 @@
   --side: 228px;
   /* The top bar, the height of a Mac title bar with its window buttons. */
   --bar: 38px;
+  /* Where the sidebar's show/hide button sits: the far left, or after a
+     Mac's window buttons (placed at x 14 in tauri.conf.json, 52px wide). */
+  --toggle-x: calc(var(--pad-x) * 0.6);
 
   /* The bottom rows of the sidebar, the message box and the side panel sit
      on one line: the same distance from the window's bottom edge, and the
@@ -42,6 +45,10 @@
   --syn-type: #c9a8c4;
   --syn-num: #d48a6a;
   --syn-comment: #6b685f;
+}
+
+:root.mac {
+  --toggle-x: 78px;
 }
 
 :root[data-size="compact"] {
@@ -122,6 +129,15 @@ button {
 
 button:disabled {
   cursor: default;
+}
+
+/* While the side panel's edge is dragged: the resize cursor everywhere, and
+   no text gets selected on the way. */
+:root.resizing,
+:root.resizing * {
+  cursor: col-resize !important;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* ---- Formatted text (markdown), set like the Claude Code CLI: one size,

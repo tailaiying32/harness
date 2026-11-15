@@ -683,34 +683,52 @@ fn clean_title(reply: &str) -> String {
 /// Pull the model list out of an `initialize` reply. Each entry has `value`
 /// (what to pass back), `displayName` and `description`; for the "default"
 /// entry the description is the model it currently stands for.
+/// The picker lists only Claude Code's short names (opus, fable, sonnet,
+/// haiku): each always points at the newest model of its family, so the list
+/// stays current without pinned older versions ("claude-opus-4-7"), which
+/// carry a dash. "default" is left out too; the model it stands for (same
+/// resolved model) goes first, so new chats start on it.
 fn parse_models(reply: &Value) -> Vec<ModelInfo> {
-    reply["response"]["response"]["models"]
+    let listed: Vec<&Value> = reply["response"]["response"]["models"]
         .as_array()
         .into_iter()
         .flatten()
+        .filter(|m| m["value"].is_string())
+        .collect();
+    let recommended = listed
+        .iter()
+        .find(|m| m["value"] == "default")
+        .and_then(|m| m["resolvedModel"].as_str());
+    let mut models: Vec<(bool, ModelInfo)> = listed
+        .iter()
         .filter_map(|m| {
             let value = m["value"].as_str()?.to_string();
-            let display = m["displayName"].as_str().unwrap_or(&value);
-            let description = m["description"].as_str();
-            let (name, detail) = match (value.as_str(), description) {
-                ("default", Some(stands_for)) => (format!("Default ({stands_for})"), None),
-                _ => (display.to_string(), description.map(str::to_owned)),
-            };
+            if value == "default" || value.contains('-') {
+                return None;
+            }
+            let name = m["displayName"].as_str().unwrap_or(&value).to_string();
             let efforts = m["supportedEffortLevels"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(|e| e.as_str().map(str::to_owned))
                 .collect();
-            Some(ModelInfo {
-                value,
-                name,
-                detail,
-                efforts,
-                default_effort: None,
-            })
+            let first = recommended.is_some() && m["resolvedModel"].as_str() == recommended;
+            Some((
+                first,
+                ModelInfo {
+                    value,
+                    name,
+                    detail: m["description"].as_str().map(str::to_owned),
+                    efforts,
+                    default_effort: None,
+                },
+            ))
         })
-        .collect()
+        .collect();
+    // Stable: the rest keep Claude Code's order.
+    models.sort_by_key(|(first, _)| !first);
+    models.into_iter().map(|(_, m)| m).collect()
 }
 
 impl ClaudeCodeProcess {
@@ -1605,25 +1623,28 @@ mod tests {
     #[test]
     fn models_are_read_from_the_initialize_reply() {
         let reply = json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "models", "response": { "models": [
-            { "value": "default", "resolvedModel": "claude-fable-5-2", "displayName": "Default (recommended)", "description": "Fable 5.2" },
+            { "value": "default", "resolvedModel": "claude-opus-5-5", "displayName": "Default (recommended)", "description": "Opus 5.5" },
+            { "value": "fable", "resolvedModel": "claude-fable-5-2", "displayName": "Fable 5.2", "description": "For your toughest challenges" },
             { "value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5", "description": "Best for everyday, complex tasks", "supportedEffortLevels": ["low", "high"] },
+            { "value": "claude-opus-4-7", "resolvedModel": "claude-opus-4-7", "displayName": "Opus 4.7", "description": "Older, pinned" },
             { "displayName": "No value, so skipped" },
         ]}}});
+        // Default and the pinned version are left out; what default stands for comes first.
         assert_eq!(
             parse_models(&reply),
             vec![
-                ModelInfo {
-                    value: "default".into(),
-                    name: "Default (Fable 5.2)".into(),
-                    detail: None,
-                    efforts: vec![],
-                    default_effort: None,
-                },
                 ModelInfo {
                     value: "opus".into(),
                     name: "Opus 5.5".into(),
                     detail: Some("Best for everyday, complex tasks".into()),
                     efforts: vec!["low".into(), "high".into()],
+                    default_effort: None,
+                },
+                ModelInfo {
+                    value: "fable".into(),
+                    name: "Fable 5.2".into(),
+                    detail: Some("For your toughest challenges".into()),
+                    efforts: vec![],
                     default_effort: None,
                 },
             ]

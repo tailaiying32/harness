@@ -75,28 +75,60 @@
 
   // The panel's left edge drags to set its width, kept as a share of the
   // window. The chat keeps at least MIN_CHAT px and the panel MIN_PANEL px.
+  // Dragging SNAP px past the chat's limit makes the panel full screen; SNAP
+  // px past the panel's own limit hides it. Both live: back over the line
+  // (button still held) undoes it, and only letting go settles it. Either way
+  // the panel keeps its width from before the drag, for when it is back.
   const MIN_CHAT = 360;
   const MIN_PANEL = 280;
+  const SNAP = 48;
   let panel: HTMLElement;
   let share = 0;
+  let before = 0;
+  /** The chat-and-panel area, kept for the whole drag: the panel itself goes
+      away (and a new one comes) if the drag hides it and brings it back. */
+  let area: HTMLElement | null = null;
 
+  // Measured from the chat-and-panel area's left edge, which stays put even
+  // while full screen hides the chat (and with it the edge being dragged, so
+  // the drag listens on the window).
   function drag(e: PointerEvent) {
-    const chatLeft = panel.previousElementSibling?.getBoundingClientRect().left ?? 0;
+    const left = area?.getBoundingClientRect().left ?? 0;
     const width = window.innerWidth;
-    const edge = Math.max(chatLeft + MIN_CHAT, Math.min(e.clientX, width - MIN_PANEL));
+    const wide = e.clientX < left + MIN_CHAT - SNAP;
+    const hidden = e.clientX > width - MIN_PANEL + SNAP;
+    chat.panelWide = wide;
+    chat.panelOpen = !hidden;
+    if (wide || hidden) {
+      share = 0;
+      applyPanelWidth(before);
+      return;
+    }
+    const edge = Math.max(left + MIN_CHAT, Math.min(e.clientX, width - MIN_PANEL));
     share = (width - edge) / width;
     applyPanelWidth(share);
   }
 
+  function endDrag() {
+    window.removeEventListener("pointermove", drag);
+    window.removeEventListener("pointerup", endDrag);
+    window.removeEventListener("pointercancel", endDrag);
+    document.documentElement.classList.remove("resizing");
+    if (share) savePrefs({ panelWidth: share });
+  }
+
   function startDrag(e: PointerEvent) {
     e.preventDefault();
-    const grip = e.currentTarget as HTMLElement;
-    grip.setPointerCapture(e.pointerId);
-    grip.onpointermove = drag;
-    grip.onpointerup = grip.onpointercancel = () => {
-      grip.onpointermove = grip.onpointerup = grip.onpointercancel = null;
-      if (share) savePrefs({ panelWidth: share });
-    };
+    area = panel.parentElement;
+    // The set width, not the measured one: a narrow window shows the panel
+    // across the whole window whatever its setting.
+    before = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--panel-w")) / 100 || DEFAULT_PANEL_WIDTH;
+    share = 0;
+    // Keeps the resize cursor while the pointer is off the edge.
+    document.documentElement.classList.add("resizing");
+    window.addEventListener("pointermove", drag);
+    window.addEventListener("pointerup", endDrag);
+    window.addEventListener("pointercancel", endDrag);
   }
 
   /** Double-click the edge: back to the usual width. */
@@ -240,11 +272,23 @@
   .grip:active {
     background: linear-gradient(to right, transparent 3px, var(--faint) 3px, var(--faint) 5px, transparent 5px);
   }
+  /* Full screen: the panel takes the chat's place, as in a narrow window.
+     Its left line would sit right against the sidebar's (or the window's
+     edge), so it goes. */
+  :global(.wide) .panel {
+    width: auto;
+    flex: 1;
+    border-left: 0;
+  }
+  :global(.wide) .grip {
+    display: none;
+  }
   /* Too narrow for both: the panel takes the chat's place (see App.svelte). */
   @media (max-width: 1100px) {
     .panel {
       width: auto;
       flex: 1;
+      border-left: 0;
     }
     .grip {
       display: none;
