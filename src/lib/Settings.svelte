@@ -108,6 +108,10 @@
     return left <= 1 ? "last day" : `${left}d left`;
   }
 
+  /** Like a sidebar project: the most recent CAP chats, then "show more" adds CAP at a time. */
+  const CAP = 8;
+  let trashShown = $state(CAP);
+
   /** "empty trash" was clicked once and is asking to be sure. */
   let emptying = $state(false);
 
@@ -280,7 +284,7 @@
         <div class="sub">empty</div>
       {:else}
         <div class="trash">
-          {#each app.trash as session (session.id)}
+          {#each app.trash.slice(0, trashShown) as session (session.id)}
             <div class="row">
               <button class="open" onclick={() => app.open(session.id)} title={session.title}>
                 {session.title || "untitled"}
@@ -289,6 +293,9 @@
               <button class="act" onclick={() => app.restore(session.id)}>restore</button>
             </div>
           {/each}
+          {#if trashShown < app.trash.length}
+            <button class="more" onclick={() => (trashShown += CAP)}>show more</button>
+          {/if}
         </div>
         <div class="empty">
           {#if emptying}
@@ -401,6 +408,12 @@
     color: var(--faint);
   }
   .act:hover {
+    color: var(--fg);
+  }
+  .more {
+    color: var(--faint);
+  }
+  .more:hover {
     color: var(--fg);
   }
   .empty {
