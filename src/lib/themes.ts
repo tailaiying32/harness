@@ -276,6 +276,8 @@ type Prefs = {
   sidebarHidden: boolean;
   /** Project folders in the order set by dragging, by path. */
   projectOrder: string[];
+  /** The model last picked in each project, by path: new chats there start on it. */
+  projectModels: Record<string, { agent: string; model: string }>;
 };
 export const DEFAULT_PANEL_WIDTH = 0.46;
 
@@ -319,9 +321,14 @@ export function loadPrefs(): Prefs {
       foldedProjects: Array.isArray(saved.foldedProjects) ? saved.foldedProjects.filter((p) => typeof p === "string") : [],
       sidebarHidden: saved.sidebarHidden === true,
       projectOrder: Array.isArray(saved.projectOrder) ? saved.projectOrder.filter((p) => typeof p === "string") : [],
+      projectModels: Object.fromEntries(
+        Object.entries(saved.projectModels ?? {}).filter(
+          ([, pick]) => pick && typeof pick.model === "string" && pick.model && (pick.agent === "cursor" || pick.agent === "claude-code"),
+        ),
+      ),
     };
   } catch {
-    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", agent: "claude-code", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH, foldedProjects: [], sidebarHidden: false, projectOrder: [] };
+    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", agent: "claude-code", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH, foldedProjects: [], sidebarHidden: false, projectOrder: [], projectModels: {} };
   }
 }
 

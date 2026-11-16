@@ -16,8 +16,8 @@ import {
   type SessionRow,
   type SessionState,
 } from "../ipc";
-import { modeFor } from "../models";
-import { loadPrefs } from "../themes";
+import { loadCachedModels, modeFor, startingModel } from "../models";
+import { loadPrefs, savePrefs } from "../themes";
 import { Chat } from "./chat.svelte";
 import type { AgentId } from "../ipc";
 
@@ -52,15 +52,47 @@ export class AppState {
 
   /** The user's home folder; where a first chat starts. */
   home = $state("");
-  /** The model new chats start on, and its agent. */
+  /** The model new chats start on in a project with no pick of its own, and its agent. */
   defaultModel = "default";
   defaultAgent: AgentId = "claude-code";
+  /** The agents installed here; empty until checked. */
+  agents: AgentId[] = [];
 
-  /** A new chat's agent, model and mode: the last ones picked. */
+  /** A new chat's agent, model and mode: the last ones picked (the model in its project). */
   startChat(chat: Chat): void {
-    chat.agent = this.defaultAgent;
-    chat.modelChoice = this.defaultModel;
+    const pick = this.pickFor(chat.projectPath);
+    chat.agent = pick.agent;
+    chat.modelChoice = pick.model;
     chat.mode = modeFor(chat.agent, loadPrefs().mode, loadPrefs().mode);
+  }
+
+  /** The model last picked in `folder`, if its agent is installed; else the last one picked anywhere. */
+  private pickFor(folder: string): { agent: AgentId; model: string } {
+    const saved = loadPrefs().projectModels[folder.trim()];
+    const agent = saved?.agent as AgentId | undefined;
+    if (saved && agent && (!this.agents.length || this.agents.includes(agent))) {
+      return { agent, model: startingModel(saved.model, agent, loadCachedModels()) };
+    }
+    return { agent: this.defaultAgent, model: this.defaultModel };
+  }
+
+  /** A new chat moved to another folder takes that project's model, unless one was picked in it. */
+  followProject(chat: Chat): void {
+    if (chat.started || chat.modelPicked) return;
+    const pick = this.pickFor(chat.projectPath);
+    chat.setAgent(pick.agent, loadPrefs().mode);
+    chat.modelChoice = pick.model;
+  }
+
+  /** A model picked in a chat: kept for its project, and for projects with no pick yet. */
+  rememberModel(chat: Chat, agent: AgentId, model: string): void {
+    chat.modelPicked = true;
+    this.defaultAgent = agent;
+    this.defaultModel = model;
+    const folder = chat.projectPath.trim();
+    const projectModels = { ...loadPrefs().projectModels };
+    if (folder) projectModels[folder] = { agent, model };
+    savePrefs({ model, agent, projectModels });
   }
 
   // Chats opened since the app started stay in memory, so switching back is

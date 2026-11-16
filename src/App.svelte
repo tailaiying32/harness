@@ -1,7 +1,7 @@
 <script lang="ts">
   // The window: the sidebar of projects and chats, the open chat, and the side
   // panel for its plan and documents, in the Quiet Terminal look.
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { homeDir } from "@tauri-apps/api/path";
   import "./app.css";
   import ChatView from "./lib/chat/ChatView.svelte";
@@ -73,6 +73,11 @@
   app.defaultModel = startingModel(prefs.model, app.defaultAgent, loadCachedModels());
   app.startChat(app.current);
   const chat = $derived(app.current);
+  // A new chat takes the model last picked in its folder, as the folder is set or changed.
+  $effect(() => {
+    void chat.projectPath;
+    untrack(() => app.followProject(chat));
+  });
   const panelOpen = $derived(chat.panelOpen && chat.panelHasContent);
   // Full screen panel: it covers the chat, never the sidebar. Hiding the
   // panel ends it, so the panel always comes back at its own width.
@@ -184,12 +189,13 @@
     // A first chat starts where the last one was, or at home.
     app.current.projectPath = app.projects[0]?.path ?? app.home;
     setup = await checkSetup();
+    app.agents = setup.agents;
     // A saved pick of an agent that isn't installed falls back to Claude Code.
     if (!setup.agents.includes(app.defaultAgent) && setup.agents.length) {
       app.defaultAgent = setup.agents[0];
       app.defaultModel = startingModel("", app.defaultAgent, models);
-      if (!app.current.started) app.startChat(app.current);
     }
+    app.followProject(app.current);
     for (const agent of setup.agents) void refreshModels(agent);
     void runSelfTest();
   });
@@ -534,7 +540,7 @@
     <!-- Each chat gets its own view, so scroll position and open folds don't leak between chats. -->
     {#key chat.sessionId}
       <ChatView {chat} problem={setup?.problem ?? null} />
-      <Composer {chat} ready={!!setup?.agents.length} agents={setup?.agents ?? []} home={app.home} models={menuModels} allModels={models} focus={app.focusBox} drops={!showSettings && !chat.viewing} />
+      <Composer {chat} ready={!!setup?.agents.length} agents={setup?.agents ?? []} home={app.home} models={menuModels} allModels={models} focus={app.focusBox} drops={!showSettings && !chat.viewing} onModel={(agent, model) => app.rememberModel(chat, agent, model)} />
     {/key}
   </main>
   {#if panelOpen}

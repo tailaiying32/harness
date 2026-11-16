@@ -22,6 +22,7 @@
     agents,
     focus = 0,
     drops = true,
+    onModel,
   }: {
     chat: Chat;
     ready: boolean;
@@ -35,6 +36,8 @@
     focus?: number;
     /** Whether dropped files land here now; not while something is drawn over the chat. */
     drops?: boolean;
+    /** A model was picked, to be remembered for new chats. */
+    onModel: (agent: AgentId, model: string) => void;
   } = $props();
 
   let box: HTMLTextAreaElement;
@@ -106,7 +109,7 @@
   function pickModel(agent: AgentId, choice: string) {
     chat.setAgent(agent, loadPrefs().mode);
     void chat.changeModel(choice);
-    savePrefs({ model: choice, agent });
+    onModel(agent, choice);
   }
 
   // Effort lives in the model menu. A level picked here is for this chat only;

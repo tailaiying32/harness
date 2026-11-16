@@ -263,6 +263,8 @@ export class Chat {
   model = $state<string | null>(null);
   /** The model the user picked: an alias, a full name, or "default" for Claude Code's own default. */
   modelChoice = $state("default");
+  /** A model was picked in this chat, so moving it to another folder keeps it. */
+  modelPicked = false;
   /** The effort level picked for this chat, or "default" for Claude Code's default for the model. */
   effortChoice = $state("default");
   mode = $state<Mode>("default");
