@@ -31,6 +31,8 @@
   // goes on top (it was just used); one with no chats left drops out.
   let order = $state<string[]>(loadPrefs().projectOrder);
   $effect(() => {
+    // Before the first load the list is empty; pruning then would wipe the saved order.
+    if (!app.loaded) return;
     const paths = app.projects.map((p) => p.path);
     const next = [...paths.filter((p) => !order.includes(p)), ...order.filter((p) => paths.includes(p))];
     if (next.join("\n") !== order.join("\n")) {
