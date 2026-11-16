@@ -29,7 +29,7 @@ pub const SERVER: &str = "harness_browser";
 pub const INSTRUCTION: &str = "This app has a browser in its side panel for localhost pages. To \
 check a web UI you are building, use the harness_browser tools (open, read, click, type, console, \
 screenshot, resize); the user sees the same page. The panel is narrow, so pages show their \
-small-screen layout; use resize (e.g. 1440) to check the desktop layout.";
+small-screen layout; use resize (e.g. 1440 x 900) to check the desktop layout.";
 
 /// How long an action may take before it is given up.
 const ACTION_WAIT: Duration = Duration::from_secs(15);
@@ -50,9 +50,9 @@ const PARK_X: f64 = -20_000.0;
 const PUT_AWAY_AFTER: Duration = Duration::from_secs(10 * 60);
 /// How often put-away is checked.
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
-/// Narrowest and widest layout width `resize` takes, in CSS pixels.
-const MIN_WIDTH: f64 = 320.0;
-const MAX_WIDTH: f64 = 3840.0;
+/// Smallest and largest window side `resize` takes, in CSS pixels.
+const MIN_SIDE: f64 = 240.0;
+const MAX_SIDE: f64 = 3840.0;
 /// Longest image edge sent to the agent, in pixels (larger ones are shrunk by it anyway).
 const SHOT_MAX_EDGE: f64 = 1568.0;
 
@@ -114,15 +114,18 @@ pub fn tools() -> Value {
         },
         {
             "name": "screenshot",
-            "description": "A picture of the page as shown in the side panel, to check how the UI looks.",
+            "description": "A picture of the page at its full layout size (after resize: the size asked for, not the shrunk view in the panel), to check how the UI looks.",
             "inputSchema": none,
         },
         {
             "name": "resize",
-            "description": "Set how wide the page lays out, in CSS pixels, without changing the panel: the page is zoomed to fit, so e.g. 1440 shows the full desktop layout, smaller. Stays until changed, across loads. Omit width (or 0) to go back to the panel's own width.",
+            "description": "Set the page's window size in CSS pixels, like resizing a browser window: the page lays out at exactly this size (window.innerWidth/innerHeight), and the side panel shows it shrunk to fit. Screenshots come out at this size. E.g. 1440 x 900 for desktop, 390 x 844 for a phone. Stays until changed, across loads. Omit height to fill the panel's height; omit width (or 0) to go back to the panel's own size.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "width": { "type": "number", "description": "Layout width in CSS pixels, e.g. 1440 for desktop or 390 for a phone" } },
+                "properties": {
+                    "width": { "type": "number", "description": "Window width in CSS pixels, e.g. 1440" },
+                    "height": { "type": "number", "description": "Window height in CSS pixels, e.g. 900" },
+                },
             },
         },
     ])
@@ -192,17 +195,81 @@ struct Place {
     /// The panel body; None until the window has placed it.
     rect: Option<Rect>,
     visible: bool,
-    /// Width the agent wants the page laid out at (`resize`); None fits the panel.
-    width: Option<f64>,
+    /// Window size the agent asked for (`resize`); None fits the panel.
+    size: Option<Size>,
 }
 
+/// A page window size the agent asked for, in CSS pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Size {
+    width: f64,
+    /// None: as tall as the panel holds at the zoom the width needs.
+    height: Option<f64>,
+}
+
+/// Where a page's web view goes and how it is zoomed, in the window's logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Frame {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    zoom: f64,
+}
+
+impl Frame {
+    /// The page's layout size (`innerWidth` x `innerHeight`) in CSS pixels,
+    /// rounded down as WebKit does.
+    fn layout(&self) -> (f64, f64) {
+        ((self.width / self.zoom).floor(), (self.height / self.zoom).floor())
+    }
+}
+
+/// How many whole-point view widths below the largest that fits `frame` tries,
+/// looking for one whose height also maps back to the asked height.
+const FIT_TRIES: usize = 64;
+
 impl Place {
-    /// Page zoom that lays the page out at `width` inside the panel.
-    fn zoom(&self) -> f64 {
-        match (self.width, self.rect) {
-            (Some(width), Some(rect)) if rect.width > 0.0 => rect.width / width,
-            _ => 1.0,
+    /// Where the page goes in the panel. With no size asked for it fills the
+    /// panel. With one, the web view is that size times a zoom, and the page is
+    /// zoomed by the same amount, so it lays out at the size asked for. The
+    /// zoom shrinks it to fit the panel (never enlarges it); it sits at the
+    /// top, centred across.
+    ///
+    /// The view's size is cut to whole points (wry and WebKit both drop the
+    /// fraction), and WebKit rounds the layout size down. So the zoom is
+    /// width / asked width for a whole-point width, which makes the layout
+    /// width exact; of the widths that fit, the first whose whole-point height
+    /// maps back to within half a pixel of the asked height wins. The zoom is
+    /// then lowered a hair so float error can't round the layout down a pixel.
+    fn frame(&self) -> Option<Frame> {
+        let rect = self.rect?;
+        let Some(size) = self.size else {
+            return Some(Frame { x: rect.x, y: rect.y, width: rect.width, height: rect.height, zoom: 1.0 });
+        };
+        let mut fit = (rect.width / size.width).min(1.0);
+        if let Some(height) = size.height {
+            fit = fit.min(rect.height / height);
         }
+        let largest = (size.width * fit).floor().max(1.0);
+        let pick = |width: f64| {
+            let zoom = width / size.width;
+            let height = size.height.map_or(rect.height.floor(), |h| (h * zoom - 1e-9).ceil());
+            let over = size.height.map_or(0.0, |h| height / zoom - h);
+            (width, height, zoom, over)
+        };
+        let (width, height, zoom, _) = (0..FIT_TRIES)
+            .map(|i| largest - i as f64)
+            .take_while(|w| *w >= 1.0)
+            .map(pick)
+            .find(|c| c.3 < 0.5)
+            .unwrap_or_else(|| pick(largest));
+        let zoom = if zoom < 1.0 { zoom / (1.0 + 1e-5) } else { zoom };
+        Some(Frame { x: rect.x + (rect.width - width) / 2.0, y: rect.y, width, height, zoom })
+    }
+
+    fn zoom(&self) -> f64 {
+        self.frame().map_or(1.0, |f| f.zoom)
     }
 }
 
@@ -327,28 +394,47 @@ impl Browsers {
         self.send(chat, event);
     }
 
-    /// Lays the chat's page out `width` CSS pixels wide (None: the panel's
-    /// width), by zooming it to fit the panel. Says what it did.
-    fn resize(&self, chat: &str, width: Option<f64>) -> Result<String, String> {
-        let width = width.filter(|w| *w > 0.0).map(|w| w.round().clamp(MIN_WIDTH, MAX_WIDTH));
+    /// Gives the chat's page a window size in CSS pixels (no width: the
+    /// panel's own size), shown shrunk to fit the panel. With a page open,
+    /// waits for it to take the new size and redraw, so a screenshot right
+    /// after shows it, and says the size the page measures.
+    async fn resize(&self, chat: &str, width: Option<f64>, height: Option<f64>) -> Result<String, String> {
+        let side = |v: Option<f64>| v.filter(|v| *v > 0.0).map(|v| v.round().clamp(MIN_SIDE, MAX_SIDE));
+        let size = side(width).map(|width| Size { width, height: side(height) });
         let place = {
             let mut places = self.0.places.lock().unwrap();
             let place = places.entry(chat.to_string()).or_default();
-            place.width = width;
+            place.size = size;
             *place
         };
         if let Some(webview) = self.webview(chat) {
             apply_place(&webview, place);
         }
-        let panel = place.rect.map(|r| r.width.round());
-        Ok(match (width, panel) {
-            (None, Some(panel)) => format!("The page lays out at the panel's width again ({panel} px)."),
-            (None, None) => "The page lays out at the panel's width again.".into(),
-            (Some(w), Some(_)) => format!(
-                "The page now lays out {w} px wide, shown at {:.0}% to fit the panel.",
-                place.zoom() * 100.0
+        let Some(frame) = place.frame() else {
+            return Ok(match size {
+                None => "The page fits the panel again.".into(),
+                Some(Size { width, height: Some(height) }) => {
+                    format!("The page will lay out at {width} x {height} once the panel shows.")
+                }
+                Some(Size { width, height: None }) => format!("The page will lay out {width} px wide once the panel shows."),
+            });
+        };
+        let (mut w, mut h) = frame.layout();
+        if self.webview(chat).is_some() {
+            let want = json!({ "width": w, "height": if size.is_some_and(|s| s.height.is_some()) { h } else { 0.0 } });
+            if let Ok(Value::Array(got)) = self.page_action(chat, "settle", &want).await {
+                if let [Some(gw), Some(gh)] = [got.first().and_then(Value::as_f64), got.get(1).and_then(Value::as_f64)] {
+                    (w, h) = (gw, gh);
+                }
+            }
+        }
+        Ok(match size {
+            None => format!("The page fits the panel again ({w} x {h})."),
+            Some(_) if frame.zoom >= 1.0 => format!("The page now lays out at {w} x {h}, shown at full size."),
+            Some(_) => format!(
+                "The page now lays out at {w} x {h}, shown at {:.0}% to fit the panel.",
+                frame.zoom * 100.0
             ),
-            (Some(w), None) => format!("The page will lay out {w} px wide once the panel shows."),
         })
     }
 
@@ -649,10 +735,11 @@ impl Browsers {
                     other => other.to_string(),
                 })
             }
-            "resize" => text(self.resize(chat, args["width"].as_f64())?),
+            "resize" => text(self.resize(chat, args["width"].as_f64(), args["height"].as_f64()).await?),
             "screenshot" => {
                 let webview = self.webview(chat).ok_or("No page is open; call open first.")?;
-                let png = screenshot(&webview).await?;
+                let zoom = self.0.places.lock().unwrap().get(chat).map_or(1.0, Place::zoom);
+                let png = screenshot(&webview, zoom).await?;
                 use base64::Engine;
                 let data = base64::engine::general_purpose::STANDARD.encode(png);
                 Ok(vec![json!({ "type": "image", "data": data, "mimeType": "image/png" })])
@@ -792,13 +879,13 @@ fn put_away_after() -> Duration {
 }
 
 /// Places a page: over the panel body when visible, parked out of sight
-/// otherwise, zoomed to lay out at the width the agent asked for.
+/// otherwise, sized and zoomed to lay out at the size the agent asked for.
 fn apply_place(webview: &Webview, place: Place) {
-    let Some(rect) = place.rect else { return };
-    let x = if place.visible { rect.x } else { PARK_X };
-    let _ = webview.set_size(LogicalSize::new(rect.width, rect.height));
-    let _ = webview.set_position(LogicalPosition::new(x, rect.y));
-    let _ = webview.set_zoom(place.zoom());
+    let Some(frame) = place.frame() else { return };
+    let x = if place.visible { frame.x } else { PARK_X };
+    let _ = webview.set_size(LogicalSize::new(frame.width, frame.height));
+    let _ = webview.set_position(LogicalPosition::new(x, frame.y));
+    let _ = webview.set_zoom(frame.zoom);
 }
 
 /// What `eval_with_callback` hands back: the script's value as JSON. The
@@ -829,12 +916,17 @@ async fn eval(webview: &Webview, script: String) -> Result<Value, String> {
     Ok(decode(&raw))
 }
 
-/// A PNG of what the web view shows.
+/// A PNG of what the web view shows, drawn at the page's layout size (the
+/// view's size undone by `zoom`), not the shrunk size it shows at.
 #[cfg(target_os = "macos")]
-async fn screenshot(webview: &Webview) -> Result<Vec<u8>, String> {
+async fn screenshot(webview: &Webview, zoom: f64) -> Result<Vec<u8>, String> {
     let (tx, rx) = oneshot::channel::<Result<Vec<u8>, String>>();
     let scale = webview.window().scale_factor().unwrap_or(2.0);
-    let size = webview.size().map(|s| s.to_logical::<f64>(scale)).ok();
+    let size = webview
+        .size()
+        .map(|s| s.to_logical::<f64>(scale))
+        .map(|s| LogicalSize::new(s.width / zoom, s.height / zoom))
+        .ok();
     webview
         .with_webview(move |platform| mac::snapshot(platform.inner(), scale, size, tx))
         .map_err(|e| e.to_string())?;
@@ -845,7 +937,7 @@ async fn screenshot(webview: &Webview) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn screenshot(_webview: &Webview) -> Result<Vec<u8>, String> {
+async fn screenshot(_webview: &Webview, _zoom: f64) -> Result<Vec<u8>, String> {
     Err("Screenshots aren't supported on this system yet; use read and console instead.".into())
 }
 
@@ -880,13 +972,13 @@ mod mac {
         // SAFETY: `with_webview` runs this on the main thread.
         let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
         let config = unsafe { WKSnapshotConfiguration::new(mtm) };
-        // Shrink so the long edge stays within what the agent takes.
+        // Drawn at `size` (which can be larger than the view: WebKit paints the
+        // page again at that size, so it stays sharp), shrunk so the long edge
+        // stays within what the agent takes.
         if let Some(size) = size {
             let long = size.width.max(size.height) * scale;
-            if long > SHOT_MAX_EDGE {
-                let width = size.width * SHOT_MAX_EDGE / long;
-                unsafe { config.setSnapshotWidth(Some(&NSNumber::new_f64(width))) };
-            }
+            let width = size.width * (SHOT_MAX_EDGE / long).min(1.0);
+            unsafe { config.setSnapshotWidth(Some(&NSNumber::new_f64(width))) };
         }
         let block = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
             if image.is_null() {
@@ -1110,6 +1202,18 @@ const BRIDGE_JS: &str = r#"
       if (out === undefined) out = String(value);
       return out.length > MAX_TEXT ? out.slice(0, MAX_TEXT) + "\n… (cut)" : out;
     },
+    // After a resize: waits (up to a second) for the new size to reach the
+    // page, then two frames so its resize handlers have run and painted.
+    // A page off screen may get no frames, so each is capped.
+    async settle({ width, height }) {
+      const frame = () => new Promise((r) => { requestAnimationFrame(() => r()); setTimeout(r, 100); });
+      for (let i = 0; i < 20 && (innerWidth !== width || (height && innerHeight !== height)); i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await frame();
+      await frame();
+      return [innerWidth, innerHeight];
+    },
   };
 
   const results = {};
@@ -1163,12 +1267,45 @@ mod tests {
     }
 
     #[test]
-    fn zoom_fits_the_asked_width_into_the_panel() {
-        let rect = Some(Rect { x: 0.0, y: 0.0, width: 720.0, height: 900.0 });
-        assert_eq!(Place { rect, visible: true, width: None }.zoom(), 1.0);
-        assert_eq!(Place { rect, visible: true, width: Some(1440.0) }.zoom(), 0.5);
-        assert_eq!(Place { rect, visible: true, width: Some(360.0) }.zoom(), 2.0);
-        assert_eq!(Place { rect: None, visible: false, width: Some(1440.0) }.zoom(), 1.0);
+    fn the_asked_size_is_shrunk_to_fit_at_the_top() {
+        let rect = Some(Rect { x: 100.0, y: 50.0, width: 720.0, height: 900.0 });
+        let at = |width, height| Place { rect, visible: true, size: Some(Size { width, height }) }.frame().unwrap();
+        // Nothing asked: fills the panel.
+        let fill = Place { rect, visible: true, size: None }.frame().unwrap();
+        assert_eq!(fill, Frame { x: 100.0, y: 50.0, width: 720.0, height: 900.0, zoom: 1.0 });
+        // Desktop: width-bound, half size, top of the panel.
+        let desk = at(1440.0, Some(900.0));
+        assert_eq!((desk.x, desk.y, desk.width, desk.height), (100.0, 50.0, 720.0, 450.0));
+        assert_eq!(desk.layout(), (1440.0, 900.0));
+        // Tall: height-bound, centred across.
+        let tall = at(720.0, Some(1800.0));
+        assert_eq!((tall.x, tall.y, tall.width, tall.height), (280.0, 50.0, 360.0, 900.0));
+        assert_eq!(tall.layout(), (720.0, 1800.0));
+        // Small: shown at full size, never enlarged.
+        let phone = at(390.0, Some(844.0));
+        assert_eq!(phone.zoom, 1.0);
+        assert_eq!(phone.layout(), (390.0, 844.0));
+        // Width only: as tall as the panel holds.
+        assert_eq!(at(1440.0, None).layout(), (1440.0, 1800.0));
+        // No panel yet: nowhere to put it.
+        assert!(Place { rect: None, visible: false, size: Some(Size { width: 1440.0, height: None }) }.frame().is_none());
+    }
+
+    #[test]
+    fn an_odd_panel_still_gives_the_exact_size() {
+        // A real panel: fractional width (seen live as 1439 x 900 before).
+        let rect = Some(Rect { x: 878.90625, y: 39.0, width: 521.09375, height: 861.0 });
+        for (width, height) in [(1440.0, 900.0), (1366.0, 768.0), (1920.0, 1080.0), (1280.0, 800.0), (2560.0, 1440.0)] {
+            let frame = Place { rect, visible: true, size: Some(Size { width, height: Some(height) }) }.frame().unwrap();
+            // Whole points (the view drops fractions), inside the panel.
+            assert_eq!(frame.width, frame.width.floor());
+            assert_eq!(frame.height, frame.height.floor());
+            assert!(frame.width <= 521.09375 && frame.height <= 861.0);
+            // What the page measures, as WebKit works it out in single precision.
+            let zoom = frame.zoom as f32;
+            let inner = ((frame.width as f32 / zoom).floor(), (frame.height as f32 / zoom).floor());
+            assert_eq!(inner, (width as f32, height as f32), "{width} x {height}");
+        }
     }
 
     #[test]
