@@ -1359,9 +1359,29 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   30 s; `HARNESS_BROWSER_IDLE_SECONDS` overrides the 10 minutes. The user
   asked for this (2026-11-14): they leave chats sitting with a page open and
   don't want to remember to close it. **Tested** with 5 s.
-- **Screenshots:** Mac only, `WKWebView takeSnapshotWithConfiguration`, shrunk
-  so the long edge is at most 1568 px, sent as PNG. They work while parked.
-  Other systems say they aren't supported yet.
+- **Screenshots:** Mac only, `WKWebView takeSnapshotWithConfiguration`, drawn
+  at the page's layout size (view size / zoom, so a shrunk page comes out
+  full size and sharp), shrunk so the long edge is at most 1568 px, sent as
+  PNG. They work while parked. Other systems say they aren't supported yet.
+- **Resize (changed 2026-11-16):** `resize {width, height}` gives the page a
+  window size in CSS px, like resizing a real browser window: the page lays
+  out at exactly that size (`innerWidth`/`innerHeight`) and the panel shows it
+  shrunk to fit, at the top, centred across (never enlarged). The user wanted
+  Claude to see a page as a desktop user would, not the narrow panel's shape;
+  the old width-only zoom gave a tall page (1440 × 2160) and a blurry
+  screenshot. How: the web view is the size times a zoom, and the page is
+  zoomed the same (`Place::frame`). wry and WebKit drop fractions of a point
+  and WebKit rounds the layout down, so the view gets whole-point sizes picked
+  to map back exactly (live, a 521.09 px panel first gave 1439 × 900). No
+  height: as tall as the panel holds. No width: fits the panel again. Stays
+  across loads. With a page open, resize waits for the new size to reach it
+  and two frames (`settle` in the bridge), then says the size the page
+  measures. **Tested** live (Haiku): 1440 × 900, 1366 × 768 and 390 × 844
+  measured exactly, desktop and phone layouts, footer pinned to the bottom,
+  1568 × 980 sharp screenshot with 11 px text readable. A page that isn't on
+  screen (window hidden, display off; parked likely too) gets no frames, so
+  its resize handlers wait until it shows; CSS layout is right at once. Not
+  checked by eye: the shrunk page in the panel (the display was off).
 - **Window side:** `Chat.browser` (page), `browserOn` (view open, maybe with
   no page yet: an empty address line). Claude opening a page never switches
   the panel; instead a successful `open` adds a line to the chat, like a
