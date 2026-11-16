@@ -1,4 +1,4 @@
-//! Find the Claude Code program. Sign-in isn't checked here: a chat finds out
+//! Find the agents' programs: Claude Code, and Cursor's agent. Sign-in isn't checked here: a chat finds out
 //! from Claude Code itself (see `SignInNeeded`). Checking at startup with
 //! `claude auth status` reported a working login as signed out.
 
@@ -11,8 +11,13 @@ const BINARY: &str = if cfg!(windows) { "claude.exe" } else { "claude" };
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SetupInfo {
+    /// Claude Code's program.
     pub binary: Option<String>,
-    /// What to tell the user when something is missing.
+    /// Cursor's agent program.
+    pub cursor: Option<String>,
+    /// The agents found, Claude Code first ("claude-code", "cursor").
+    pub agents: Vec<String>,
+    /// What to tell the user when no agent was found.
     pub problem: Option<String>,
 }
 
@@ -72,6 +77,19 @@ pub fn find_claude() -> Option<PathBuf> {
         .or_else(from_path)
 }
 
+/// Cursor's agent. It installs as `agent` and `cursor-agent` in
+/// `~/.local/bin`; `cursor-agent` is looked for first, since `agent` is a
+/// common name another program could have.
+pub fn find_cursor() -> Option<PathBuf> {
+    let exe = |name: &str| if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    let local = |name: &str| home().and_then(|h| existing(h.join(".local").join("bin").join(exe(name))));
+    std::env::var_os("HARNESS_CURSOR_PATH")
+        .and_then(existing)
+        .or_else(|| local("cursor-agent"))
+        .or_else(|| from_login_shell("cursor-agent"))
+        .or_else(|| local("agent"))
+}
+
 /// A helper program (git, gh): its usual install spots first, then the login
 /// shell. Looked up once per run.
 fn find_tool(name: &str, usual: &[&str]) -> Option<PathBuf> {
@@ -105,14 +123,22 @@ pub fn gh() -> Option<&'static Path> {
 }
 
 pub fn check_setup() -> SetupInfo {
-    match find_claude() {
-        Some(binary) => SetupInfo {
-            binary: Some(binary.to_string_lossy().into_owned()),
-            problem: None,
-        },
-        None => SetupInfo {
-            binary: None,
-            problem: Some("Claude Code isn't installed, or couldn't be found.".into()),
-        },
+    let claude = find_claude();
+    let cursor = find_cursor();
+    let mut agents = Vec::new();
+    if claude.is_some() {
+        agents.push(crate::agent::CLAUDE.to_string());
+    }
+    if cursor.is_some() {
+        agents.push(crate::agent::CURSOR.to_string());
+    }
+    let shown = |p: Option<PathBuf>| p.map(|p| p.to_string_lossy().into_owned());
+    SetupInfo {
+        problem: agents
+            .is_empty()
+            .then(|| "Claude Code isn't installed, or couldn't be found.".into()),
+        binary: shown(claude),
+        cursor: shown(cursor),
+        agents,
     }
 }

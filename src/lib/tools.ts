@@ -98,6 +98,10 @@ function wording(tool: ToolCall): [string, string, string] {
       return [`edited ${file}`, `Editing ${file}`, `edit ${file}`];
     case "Write":
       return [`wrote ${file}`, `Writing ${file}`, `write ${file}`];
+    case "Delete":
+      return [`deleted ${file}`, `Deleting ${file}`, `delete ${file}`];
+    case "Move":
+      return [`moved ${file}`, `Moving ${file}`, `move ${file}`];
     case "Bash": {
       const command = clip(firstLine(field(input, "command")), 40);
       return [`ran ${command}`, `Running ${command}`, `run ${command}`];

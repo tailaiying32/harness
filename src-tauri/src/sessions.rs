@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::agent::{AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SpawnOptions};
+use crate::agent::{AgentAdapter, Agents, AppTools, EventSink, ImagePayload, RunningAgent, SpawnOptions};
 use crate::events::{AgentEvent, Block, Decision, Envelope, SessionState};
 use crate::images::{self, ImageRef, Images};
 use crate::notes::Notes;
@@ -121,7 +121,8 @@ struct Ask {
 }
 
 struct Inner {
-    adapter: Arc<dyn AgentAdapter>,
+    /// Every agent a chat can run on, and where its program is.
+    agents: Agents,
     store: Arc<Store>,
     out: Out,
     sessions: Mutex<HashMap<String, Session>>,
@@ -154,18 +155,18 @@ struct Inner {
 pub struct SessionManager(Arc<Inner>);
 
 impl SessionManager {
-    pub fn new(adapter: Arc<dyn AgentAdapter>, store: Arc<Store>, out: Out, data_dir: PathBuf) -> Self {
+    pub fn new(agents: Agents, store: Arc<Store>, out: Out, data_dir: PathBuf) -> Self {
         let timings = Timings {
             idle: None,
             close_grace: CLOSE_GRACE,
             worktree_idle: None,
             keep: None,
         };
-        Self::build(adapter, store, out, timings, data_dir, PrLookup::github())
+        Self::build(agents, store, out, timings, data_dir, PrLookup::github())
     }
 
     fn build(
-        adapter: Arc<dyn AgentAdapter>,
+        agents: Agents,
         store: Arc<Store>,
         out: Out,
         timings: Timings,
@@ -173,7 +174,7 @@ impl SessionManager {
         pr_lookup: PrLookup,
     ) -> Self {
         Self(Arc::new(Inner {
-            adapter,
+            agents,
             store,
             out,
             sessions: Mutex::default(),
@@ -235,11 +236,6 @@ impl SessionManager {
         }
     }
 
-    /// The agent adapter, for calls that don't belong to one chat.
-    pub fn adapter(&self) -> Arc<dyn AgentAdapter> {
-        self.0.adapter.clone()
-    }
-
     /// Idle time before a chat's process is closed. None = never.
     /// Order: test override, `HARNESS_IDLE_SECONDS`, the `idle_seconds` setting,
     /// then the default. Zero means never.
@@ -266,12 +262,13 @@ impl SessionManager {
     /// Send a message, starting or resuming the agent if it isn't running.
     /// `mode`, `model` and `effort` are saved with the chat; they are passed to
     /// the agent only when a process has to be started (a running one is
-    /// switched with `set_mode`, `set_model` and `set_effort`).
+    /// switched with `set_mode`, `set_model` and `set_effort`). `agent` is the
+    /// agent a new chat runs on; a saved chat keeps its own.
     #[allow(clippy::too_many_arguments)]
     pub async fn send_message(
         &self,
         session_id: &str,
-        binary: PathBuf,
+        agent: &str,
         project_path: PathBuf,
         mode: Option<String>,
         model: Option<String>,
@@ -280,7 +277,7 @@ impl SessionManager {
         images: &[u32],
         message_id: &str,
     ) -> Result<(), String> {
-        self.send_inner(session_id, binary, project_path, mode, model, effort, text, images, message_id, true)
+        self.send_inner(session_id, agent, project_path, mode, model, effort, text, images, message_id, true)
             .await
     }
 
@@ -290,7 +287,7 @@ impl SessionManager {
     async fn send_inner(
         &self,
         session_id: &str,
-        binary: PathBuf,
+        agent: &str,
         project_path: PathBuf,
         mode: Option<String>,
         model: Option<String>,
@@ -303,6 +300,14 @@ impl SessionManager {
         show: bool,
     ) -> Result<(), String> {
         let inner = &self.0;
+
+        // A saved chat stays on its agent. Its program must be there before
+        // anything is saved.
+        let agent_id = match inner.store.session(session_id)? {
+            Some(saved) => saved.agent,
+            None => agent.to_string(),
+        };
+        let (adapter, binary) = inner.agents.get(&agent_id)?;
 
         // Read before anything is saved: a missing image fails the send.
         let mut refs = Vec::new();
@@ -344,6 +349,9 @@ impl SessionManager {
             mode.as_deref().unwrap_or("default"),
             model.as_deref().unwrap_or("default"),
         )?;
+        if created {
+            inner.store.set_agent(session_id, &agent_id)?;
+        }
         if let Some(effort) = &effort {
             inner.store.set_effort(session_id, effort)?;
         }
@@ -364,7 +372,7 @@ impl SessionManager {
             if let Some((branch, commit)) = blocking(move || worktree::head_of(&folder)).await {
                 let _ = inner.store.set_start(session_id, branch.as_deref(), &commit);
             }
-            self.write_title(session_id, binary.clone(), text);
+            self.write_title(session_id, adapter.clone(), binary.clone(), text);
         }
 
         let (running, run) = {
@@ -386,7 +394,7 @@ impl SessionManager {
             self.note_repo(session_id, &folder).await;
             // Not under the sessions lock: starting reports "starting" through
             // the sink, which takes that lock.
-            let agent = inner.adapter.spawn(
+            let agent = adapter.spawn(
                 SpawnOptions {
                     binary,
                     project_path: folder,
@@ -465,13 +473,13 @@ impl SessionManager {
     }
 
     /// Asks the agent for a short title in the background. Until it arrives, or
-    /// if it fails, the chat keeps the title cut from its first message.
-    fn write_title(&self, session_id: &str, binary: PathBuf, first_message: &str) {
+    /// if it fails, the chat keeps the title cut from its first message. (An
+    /// agent that names the chat itself sends `TitleChanged` instead.)
+    fn write_title(&self, session_id: &str, adapter: Arc<dyn AgentAdapter>, binary: PathBuf, first_message: &str) {
         let manager = self.clone();
         let id = session_id.to_string();
         let message = first_message.to_string();
         tokio::spawn(async move {
-            let adapter = manager.0.adapter.clone();
             let title = tokio::task::spawn_blocking(move || adapter.make_title(&binary, &message)).await;
             let Ok(Ok(title)) = title else {
                 return;
@@ -511,6 +519,12 @@ impl SessionManager {
                 }
                 AgentEvent::ModeChanged { mode } => {
                     let _ = store.set_mode(&id, mode);
+                }
+                // The agent named the chat. A chat the user renamed keeps its name.
+                AgentEvent::TitleChanged { title } => {
+                    if !store.set_generated_title(&id, title).unwrap_or(false) {
+                        return;
+                    }
                 }
                 AgentEvent::Status { state } => manager.on_state(&id, run, state),
                 AgentEvent::BackgroundWork { running } => manager.on_background(&id, run, *running > 0),
@@ -856,6 +870,13 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    /// The stand-in, as the only agent: Claude Code's.
+    fn fake_agents(fake: &Arc<Fake>) -> Agents {
+        let agents = Agents::default();
+        agents.add(crate::agent::CLAUDE, fake.clone(), Some("claude".into()));
+        agents
+    }
+
     /// A stand-in agent: remembers how it was started and what it was told, and
     /// lets the test play the agent's side through `sink`.
     #[derive(Default)]
@@ -968,7 +989,7 @@ mod tests {
                 open: self.open.clone(),
             }))
         }
-        fn list_models(&self, _: &Path) -> Result<Vec<ModelInfo>, String> {
+        fn list_models(&self, _: &Path, _: Option<&[String]>) -> Result<Vec<ModelInfo>, String> {
             Ok(Vec::new())
         }
         fn make_title(&self, _: &Path, first_message: &str) -> Result<String, String> {
@@ -1006,7 +1027,7 @@ mod tests {
             worktree_idle: Some(worktree_idle),
             keep: Some(keep),
         };
-        let manager = SessionManager::build(fake.clone(), store.clone(), out, timings, dir, lookup);
+        let manager = SessionManager::build(fake_agents(&fake), store.clone(), out, timings, dir, lookup);
         Rig {
             fake,
             store,
@@ -1018,7 +1039,7 @@ mod tests {
     impl Rig {
         async fn send(&self, text: &str) {
             self.manager
-                .send_message("s1", "claude".into(), "/work".into(), Some("plan".into()), None, None, text, &[], "m1")
+                .send_message("s1", crate::agent::CLAUDE, "/work".into(), Some("plan".into()), None, None, text, &[], "m1")
                 .await
                 .unwrap();
         }
@@ -1079,7 +1100,7 @@ mod tests {
         images.save("s1", "image/png", b"one").unwrap();
         images.save("s1", "image/jpeg", b"two").unwrap();
         rig.manager
-            .send_message("s1", "claude".into(), "/work".into(), None, None, None, "[image 2] [image 1]", &[2, 1], "m1")
+            .send_message("s1", crate::agent::CLAUDE, "/work".into(), None, None, None, "[image 2] [image 1]", &[2, 1], "m1")
             .await
             .unwrap();
         assert_eq!(rig.told(), vec!["say [image 2] [image 1] +image/jpeg:dHdv +image/png:b25l"]);
@@ -1100,7 +1121,7 @@ mod tests {
         let rig = rig(LONG);
         let sent = rig
             .manager
-            .send_message("s1", "claude".into(), "/work".into(), None, None, None, "[image 4]", &[4], "m1")
+            .send_message("s1", crate::agent::CLAUDE, "/work".into(), None, None, None, "[image 4]", &[4], "m1")
             .await;
         assert!(sent.is_err());
         assert!(rig.told().is_empty());
@@ -1384,7 +1405,7 @@ mod tests {
     impl Rig {
         async fn send_at(&self, folder: &Path, mode: &str, text: &str) {
             self.manager
-                .send_message("s1", "claude".into(), folder.into(), Some(mode.into()), None, None, text, &[], "m")
+                .send_message("s1", crate::agent::CLAUDE, folder.into(), Some(mode.into()), None, None, text, &[], "m")
                 .await
                 .unwrap();
         }
@@ -1410,7 +1431,7 @@ mod tests {
             });
             self.agent_says(worktree_call("r1", "fix it"));
             self.manager
-                .choose_worktree("s1", "r1", "worktree", "claude".into())
+                .choose_worktree("s1", "r1", "worktree")
                 .await
                 .unwrap();
             self.worktree().expect("a worktree")
@@ -1436,8 +1457,8 @@ mod tests {
         assert!(rig.saw(|e| matches!(e, AgentEvent::WorktreeAsk { name, .. } if name.as_deref() == Some("fix it"))) == 1);
 
         // A wrong ID is refused.
-        assert!(rig.manager.choose_worktree("s1", "r2", "here", "claude".into()).await.is_err());
-        rig.manager.choose_worktree("s1", "r1", "here", "claude".into()).await.unwrap();
+        assert!(rig.manager.choose_worktree("s1", "r2", "here").await.is_err());
+        rig.manager.choose_worktree("s1", "r1", "here").await.unwrap();
         assert!(rig.told().contains(&"answer r1 deny".to_string()));
         assert!(rig.told().contains(&"answer r2 deny".to_string()));
         assert!(rig.worktree().is_none());
@@ -1467,7 +1488,7 @@ mod tests {
             rig.saw(|e| matches!(e, AgentEvent::ApprovalAnswered { request_id, .. } if request_id == "r1")),
             1
         );
-        assert!(rig.manager.choose_worktree("s1", "r1", "here", "claude".into()).await.is_err());
+        assert!(rig.manager.choose_worktree("s1", "r1", "here").await.is_err());
         assert!(rig.worktree().is_none());
         assert_eq!(rig.store.chat_git("s1").unwrap().unwrap().choice, None);
 
@@ -1667,13 +1688,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_chat_keeps_the_agent_it_started_on() {
+        let rig = rig(LONG);
+        // Cursor isn't installed here: a new chat on it can't start, and nothing is saved.
+        let err = rig
+            .manager
+            .send_message("c1", crate::agent::CURSOR, "/work".into(), None, None, None, "hi", &[], "m0")
+            .await
+            .unwrap_err();
+        assert!(err.contains("Unknown agent"), "{err}");
+        assert!(rig.store.session("c1").unwrap().is_none());
+
+        rig.send("hi").await;
+        assert_eq!(rig.store.session("s1").unwrap().unwrap().agent, crate::agent::CLAUDE);
+        rig.turn_ends();
+        // A later send naming another agent still goes to the chat's own.
+        rig.manager
+            .send_message("s1", crate::agent::CURSOR, "/work".into(), None, None, None, "again", &[], "m2")
+            .await
+            .unwrap();
+        assert_eq!(rig.store.session("s1").unwrap().unwrap().agent, crate::agent::CLAUDE);
+    }
+
+    #[tokio::test]
     async fn quitting_stops_chats_with_background_work_and_closes_the_rest() {
         let rig = rig(LONG);
         rig.send("caffeinate").await;
         rig.background(1);
         rig.turn_ends();
         rig.manager
-            .send_message("s2", "claude".into(), "/work".into(), None, None, None, "hi", &[], "m2")
+            .send_message("s2", crate::agent::CLAUDE, "/work".into(), None, None, None, "hi", &[], "m2")
             .await
             .unwrap();
         rig.agent_says(AgentEvent::TurnEnded {
