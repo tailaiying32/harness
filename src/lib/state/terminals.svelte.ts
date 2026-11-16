@@ -31,8 +31,13 @@ class Terminals {
   active = $state<Record<string, string>>({});
   /** A tab whose close is waiting on "close it?", with what runs in it. */
   confirming = $state<{ id: string; running: string } | null>(null);
-  /** Set by an action that should put the keys in the terminal (a click, Cmd+T). */
-  focusNext = $state(0);
+  /**
+   * Set by an action that should put the keys in the terminal (a click, Cmd+T);
+   * the terminal view takes them and clears it. A flag, not a count, so the
+   * view doesn't take the keys again when its tab changes (a command starting
+   * or ending updates the tab) or when it is shown for another chat.
+   */
+  wantsKeys = $state(false);
   /** The last size a tab was fitted to, for starting new shells close to it. */
   size = { ...START };
 
@@ -100,12 +105,12 @@ class Terminals {
     if (!this.tabs(project).some((t) => t.id === tab.id)) this.byProject[project] = [...this.tabs(project), tab];
     this.loaded.add(project);
     this.active[project] = tab.id;
-    this.focusNext++;
+    this.wantsKeys = true;
   }
 
   pick(project: string, id: string): void {
     this.active[project] = id;
-    this.focusNext++;
+    this.wantsKeys = true;
   }
 
   /** The tab next to the one on show, wrapping round. */

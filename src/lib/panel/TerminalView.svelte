@@ -65,9 +65,9 @@
 
   // An action that should put the keys in the terminal (the icon, a tab, +, Cmd+T).
   $effect(() => {
-    const ask = terminals.focusNext;
     const current = tab;
-    if (!ask || !current) return;
+    if (!terminals.wantsKeys || !current) return;
+    terminals.wantsKeys = false;
     void terminals.xterm(current.id).then((made) => {
       if (!gone && tab?.id === current.id) made.term.focus();
     });

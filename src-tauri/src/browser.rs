@@ -35,12 +35,9 @@ small-screen layout; use resize (e.g. 1440 x 900) to check the desktop layout.";
 const ACTION_WAIT: Duration = Duration::from_secs(15);
 /// How long `open` waits for a page to load.
 const LOAD_WAIT: Duration = Duration::from_secs(20);
-/// How often, during an action, to check that the page hasn't taken the
-/// window's keys (see `keep_keys`).
-const KEYS_POLL: Duration = Duration::from_millis(30);
-/// How long to keep checking once the action is done: WebKit can hand the
-/// keys over a moment later.
-const KEYS_TAIL: Duration = Duration::from_millis(500);
+/// How often to check that no page has taken the window's keys without the
+/// user clicking into it (see `guard_keys`).
+const KEYS_POLL: Duration = Duration::from_millis(50);
 /// After a click: how long to watch for a page load it started.
 const CLICK_SETTLE: Duration = Duration::from_millis(400);
 /// Where a hidden browser is parked: far left of the window, out of sight.
@@ -184,7 +181,7 @@ struct Page {
     /// Waiting for the current load to finish.
     load_waiters: Vec<oneshot::Sender<()>>,
     /// The page's native view, by address, to tell whether it holds the
-    /// window's keys (see `keep_keys`). 0 where that isn't checked.
+    /// window's keys (see `guard_keys`). 0 where that isn't checked.
     view: usize,
 }
 
@@ -291,6 +288,11 @@ struct Inner {
     next_action: Mutex<u64>,
     /// One web view made at a time, so two calls can't both make one.
     make_lock: tokio::sync::Mutex<()>,
+    /// The page the user last clicked into (its view's address), or 0 when
+    /// the last click was anywhere else. Only that page may hold the keys.
+    clicked: Mutex<usize>,
+    /// What last held the window's keys rightfully: where they go back to.
+    keys_home: Mutex<usize>,
 }
 
 #[derive(Clone)]
@@ -307,7 +309,19 @@ impl Browsers {
             next: Mutex::new(0),
             next_action: Mutex::new(0),
             make_lock: tokio::sync::Mutex::new(()),
+            clicked: Mutex::new(0),
+            keys_home: Mutex::new(0),
         }));
+        browsers.watch_clicks();
+        // Keys taken by a page the user didn't click into go back; ends with the app.
+        let weak = Arc::downgrade(&browsers.0);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(KEYS_POLL).await;
+                let Some(inner) = weak.upgrade() else { return };
+                Browsers(inner).guard_keys().await;
+            }
+        });
         // Put away pages left unused; ends with the app.
         let weak = Arc::downgrade(&browsers.0);
         tauri::async_runtime::spawn(async move {
@@ -568,7 +582,9 @@ impl Browsers {
         let app = self.0.app.clone();
         // Starts blank: the page's scripts are set up before the first real load.
         let blank = tauri::Url::parse("about:blank").expect("valid");
+        // Not focused: a focused new web view brings the app to the front.
         let builder = WebviewBuilder::new(&label, WebviewUrl::External(blank))
+            .focused(false)
             .initialization_script(BRIDGE_JS)
             .on_navigation(move |url| {
                 if is_local(url) {
@@ -689,19 +705,6 @@ impl Browsers {
 
     /// Runs one of the agent's tool calls. Returns MCP content items.
     pub async fn call(&self, chat: &str, tool: &str, args: &Value) -> Result<Vec<Value>, String> {
-        let keys = self.keys_holder().await;
-        // Dropped when the call ends, which tells `keep_keys` the action is done.
-        let (_running, done) = oneshot::channel::<()>();
-        {
-            let browsers = self.clone();
-            let chat = chat.to_string();
-            tauri::async_runtime::spawn(async move { browsers.keep_keys(&chat, keys, done).await });
-        }
-        self.run_tool(chat, tool, args).await
-    }
-
-    /// One tool call, as `call` runs it.
-    async fn run_tool(&self, chat: &str, tool: &str, args: &Value) -> Result<Vec<Value>, String> {
         let text = |s: String| Ok(vec![json!({ "type": "text", "text": s })]);
         // A page put away while unused comes back for the agent's next look.
         if tool != "open" {
@@ -748,47 +751,54 @@ impl Browsers {
         }
     }
 
-    /// The agent's actions mustn't move the user's keys. Focusing a box in a
-    /// page (to type in it or click it) makes WebKit give that page the
-    /// window's keys, even when it is parked off screen for a chat not on
-    /// show, so the user's typing in another chat would land in it. If the
-    /// page took the keys, they go back to `before` (what held them before
-    /// the action), or to the main window when that's gone.
-    ///
-    /// A page on show that held the keys before the action keeps them: the
-    /// user clicked into it. A parked page never keeps them, even if it held
-    /// them before: that can only be an earlier action's doing, not yet undone
-    /// (two quick actions in a row).
-    ///
-    /// Checks while the action runs and for `KEYS_TAIL` after (`done` closes
-    /// when it ends).
-    async fn keep_keys(&self, chat: &str, before: usize, mut done: oneshot::Receiver<()>) {
-        let mut ended: Option<Instant> = None;
-        loop {
-            match ended {
-                Some(at) if at.elapsed() > KEYS_TAIL => return,
-                Some(_) => {}
-                None if matches!(done.try_recv(), Err(oneshot::error::TryRecvError::Empty)) => {}
-                None => ended = Some(Instant::now()),
-            }
-            tokio::time::sleep(KEYS_POLL).await;
-            let page = self.0.pages.lock().unwrap().get(chat).map(|p| p.view).unwrap_or(0);
-            let shown = self.0.places.lock().unwrap().get(chat).is_some_and(|p| p.visible);
-            if page == 0 || (page == before && shown) || self.keys_holder().await != page {
-                continue;
-            }
-            let back = self
-                .0
-                .pages
-                .lock()
-                .unwrap()
-                .values()
-                .find(|p| p.view == before && p.view != page)
-                .map(|p| p.webview.clone())
-                .or_else(|| self.0.app.get_webview("main"));
-            if let Some(webview) = back {
-                let _ = webview.set_focus();
-            }
+    /// Pages mustn't take the user's keys. A page that focuses a box (the
+    /// agent typing or clicking in it, or the page's own script, like a box
+    /// that takes the cursor when a dev server reloads the page) makes WebKit
+    /// give it the window's keys, even when it is parked off screen for a chat
+    /// not on show, and the user's typing lands there. So a page may hold the
+    /// keys only if the user's last click was in it; otherwise they go back to
+    /// what last held them rightfully, or to the main window.
+    async fn guard_keys(&self) {
+        let pages: Vec<(usize, Webview)> = {
+            let pages = self.0.pages.lock().unwrap();
+            pages.values().filter(|p| p.view != 0).map(|p| (p.view, p.webview.clone())).collect()
+        };
+        if pages.is_empty() {
+            return;
+        }
+        let holder = self.keys_holder().await;
+        if holder == 0 {
+            return;
+        }
+        let clicked = *self.0.clicked.lock().unwrap();
+        if holder == clicked || !pages.iter().any(|(view, _)| *view == holder) {
+            *self.0.keys_home.lock().unwrap() = holder;
+            return;
+        }
+        let home = *self.0.keys_home.lock().unwrap();
+        let back = pages
+            .iter()
+            .find(|(view, _)| *view == home && home == clicked)
+            .map(|(_, webview)| webview.clone())
+            .or_else(|| self.0.app.get_webview("main"));
+        if let Some(webview) = back {
+            let _ = webview.set_focus();
+        }
+    }
+
+    /// Notes which page, if any, each mouse press in the window lands in.
+    fn watch_clicks(&self) {
+        #[cfg(target_os = "macos")]
+        {
+            let weak = Arc::downgrade(&self.0);
+            let _ = self.0.app.run_on_main_thread(move || {
+                mac::watch_clicks(move |hit| {
+                    let Some(inner) = weak.upgrade() else { return };
+                    let views: Vec<usize> = inner.pages.lock().unwrap().values().map(|p| p.view).collect();
+                    let page = views.into_iter().find(|&view| view != 0 && mac::is_inside(hit, view)).unwrap_or(0);
+                    *inner.clicked.lock().unwrap() = page;
+                });
+            });
         }
     }
 
@@ -944,12 +954,15 @@ async fn screenshot(_webview: &Webview, _zoom: f64) -> Result<Vec<u8>, String> {
 #[cfg(target_os = "macos")]
 mod mac {
     use std::ffi::c_void;
+    use std::ptr::NonNull;
     use std::sync::Mutex;
 
     use block2::RcBlock;
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage};
     use objc2::MainThreadOnly;
-    use objc2_foundation::{NSDictionary, NSError, NSNumber, NSString};
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSDictionary, NSError, NSNumber, NSPoint, NSString};
     use objc2_web_kit::{WKSnapshotConfiguration, WKUserScript, WKUserScriptInjectionTime, WKWebView};
     use tauri::LogicalSize;
     use tokio::sync::oneshot;
@@ -1004,9 +1017,52 @@ mod mac {
             return 0;
         }
         // SAFETY: Tauri's live NSWindow; called on the main thread.
-        let window: &objc2::runtime::AnyObject = unsafe { &*(window as *const objc2::runtime::AnyObject) };
-        let holder: *mut objc2::runtime::AnyObject = unsafe { objc2::msg_send![window, firstResponder] };
+        let window: &AnyObject = unsafe { &*(window as *const AnyObject) };
+        let holder: *mut AnyObject = unsafe { msg_send![window, firstResponder] };
         holder as usize
+    }
+
+    /// Calls `on_click` with the view under every mouse press in the app, on
+    /// the main thread, for the app's whole life. Run on the main thread.
+    pub fn watch_clicks(on_click: impl Fn(*mut AnyObject) + 'static) {
+        let block = RcBlock::new(move |event: NonNull<AnyObject>| -> *mut AnyObject {
+            let event = event.as_ptr();
+            // SAFETY: AppKit hands a live NSEvent, on the main thread.
+            unsafe {
+                let window: *mut AnyObject = msg_send![&*event, window];
+                if !window.is_null() {
+                    // Hit-tested from the content view's parent, as the window
+                    // does: the browser's web views sit beside the main one.
+                    let content: *mut AnyObject = msg_send![&*window, contentView];
+                    let frame: *mut AnyObject = if content.is_null() { content } else { msg_send![&*content, superview] };
+                    if !frame.is_null() {
+                        let at: NSPoint = msg_send![&*event, locationInWindow];
+                        let hit: *mut AnyObject = msg_send![&*frame, hitTest: at];
+                        on_click(hit);
+                    }
+                }
+            }
+            event
+        });
+        // Left, right and other mouse buttons going down.
+        let mask: u64 = (1 << 1) | (1 << 3) | (1 << 25);
+        // SAFETY: a class method taking a mask and a block; on the main thread.
+        let monitor: *mut AnyObject =
+            unsafe { msg_send![objc2::class!(NSEvent), addLocalMonitorForEventsMatchingMask: mask, handler: &*block] };
+        if !monitor.is_null() {
+            // Kept for the app's life.
+            let _: *mut AnyObject = unsafe { msg_send![monitor, retain] };
+        }
+    }
+
+    /// Whether `hit` is the view at address `view` or inside it. On the main
+    /// thread, with `view` a live page's web view.
+    pub fn is_inside(hit: *mut AnyObject, view: usize) -> bool {
+        if hit.is_null() || view == 0 {
+            return false;
+        }
+        // SAFETY: both are live NSViews, on the main thread.
+        unsafe { msg_send![&*hit, isDescendantOf: view as *mut AnyObject] }
     }
 
     /// Leaves `script` as the page's only start-up script, for every load from now on.
