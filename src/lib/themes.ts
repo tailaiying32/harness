@@ -44,8 +44,8 @@ export const themes: Theme[] = [
   },
   {
     id: "harness-light", name: "Harness Light", dark: false,
-    bg: "#f7f5ee", panel: "#edeadf", fg: "#3a3832", bright: "#191813", dim: "#8a877b", faint: "#b9b6aa",
-    line: "#e0ddd0", accent: "#a8691c", ok: "#52733f", bad: "#b0463a", blue: "#2f6aa8", yellow: "#94740c", purple: "#7a4f9a",
+    bg: "#f8f7f4", panel: "#eeede8", fg: "#3a3832", bright: "#191813", dim: "#87857d", faint: "#b8b6af",
+    line: "#e2e1db", accent: "#a8691c", ok: "#52733f", bad: "#b0463a", blue: "#2f6aa8", yellow: "#94740c", purple: "#7a4f9a",
     syn: { kw: "#a8691c", fn: "#2f6480", str: "#52733f", type: "#8a4f86", num: "#b0502a", comment: "#9a978b" },
   },
   {
