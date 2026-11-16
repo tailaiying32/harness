@@ -463,6 +463,26 @@ export class Chat {
     return this.notesLoading;
   }
 
+  /**
+   * Reads the notes again after Claude may have written them, if they are
+   * already showing (otherwise they are read when first shown).
+   */
+  async refreshNotes(): Promise<void> {
+    if (this.owner) return this.owner.refreshNotes();
+    if (this.notes === null) return;
+    try {
+      const text = await readNotes(this.sessionId);
+      if (text !== this.notes) this.notes = text;
+    } catch {
+      // Left as shown; the next write or turn end tries again.
+    }
+  }
+
+  /** The chat's notes file, which Claude may write. Kept by the core in `notes/<chat id>/`. */
+  private isNotes(path: string): boolean {
+    return path.replace(/\\/g, "/").endsWith(`/notes/${this.sessionId}/notes.md`);
+  }
+
   /** Keeps the notes as typed and saves them. */
   async saveNotes(text: string): Promise<void> {
     this.notes = text;
@@ -545,6 +565,10 @@ export class Chat {
       this.openPanel(PLAN_TAB);
       return;
     }
+    if (this.isNotes(path)) {
+      this.openPanel(NOTES_TAB);
+      return;
+    }
     let text: string;
     try {
       text = await readDoc(path);
@@ -562,6 +586,11 @@ export class Chat {
   private trackDocument(tool: ToolItem): void {
     const path = docPath(tool);
     if (!path || path === this.planPath) return;
+    // The notes have their own tab, read back from disk.
+    if (this.isNotes(path)) {
+      void this.refreshNotes();
+      return;
+    }
     const doc = this.docs.find((d) => d.path === path);
     const text = textAfter(tool, doc?.text);
     if (text === null) return;
@@ -827,6 +856,8 @@ export class Chat {
         this.settle();
         if (this.stopping) this.push({ type: "note", text: "stopped" });
         this.stopping = false;
+        // Claude may have written the notes some other way (a shell command, Cursor's tools).
+        void this.refreshNotes();
         this.onTurnEnd?.();
         break;
 
