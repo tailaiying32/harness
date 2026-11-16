@@ -173,7 +173,7 @@
         </div>
       {:else if group.item.type === "user"}
         <div class="row block mine">
-          <div class="body user">{#each withWords(group.item.text, group.item.images) as piece, i (i)}{#if piece.image}<ImageWord image={piece.image} onopen={(image) => chat.openImage(image)} />{:else if piece.file}<FileWord word={piece.text} path={piece.file} onopen={(path) => chat.openDropped(path)} />{:else}{piece.text}{/if}{/each}</div>
+          <div class="body user">{#each withWords(group.item.text, group.item.images) as piece, i (i)}{#if piece.image}<ImageWord image={piece.image} onopen={(image) => chat.openImage(image)} />{:else if piece.file}<FileWord word={piece.text} path={piece.file} onopen={(path) => chat.openDropped(path)} />{:else if piece.url}<a class="link" href={piece.url}>{piece.text}</a>{:else}{piece.text}{/if}{/each}</div>
           <!-- Claude reads a message sent mid-turn after its current step,
                unless the user would rather cut that step short. -->
           {#if group.item.queued}
@@ -323,6 +323,13 @@
     color: var(--bright);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  /* Web addresses in the user's messages, like links in Claude's. A click
+     opens them in the default browser (see clicks.ts). */
+  .user .link {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
   /* Under a message Claude hasn't taken in yet. */
   .now {

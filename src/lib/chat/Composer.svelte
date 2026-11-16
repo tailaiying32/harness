@@ -7,7 +7,7 @@
   import { agentLabel, clipboardFiles, CLAUDE, onFileDrop, pickFolder, readImageFile, type AgentId, type Mode, type ModelInfo } from "../ipc";
   import { agentModes, type AgentModels } from "../models";
   import { prLabel, prShort, shortPath } from "../paths";
-  import { IMAGE_WORD, type Chat } from "../state/chat.svelte";
+  import { IMAGE_WORD, webLinks, type Chat } from "../state/chat.svelte";
   import { loadPrefs, savePrefs } from "../themes";
   import { indent, newLine, outdent, renumbered, type Edit } from "./editing";
   import { imageType } from "./files";
@@ -158,11 +158,16 @@
     syncMirror();
   }
 
-  // ---- Images and files ----
+  // ---- Images, files and web addresses ----
   // A pasted or dropped image becomes an `[image n]` word in the text, and a
   // file a `[name]` word. A plain text area can't colour part of its text, so
-  // while the draft has any, a copy of the text sits behind the box with the
-  // words coloured, and the box's own text is drawn see-through on top of it.
+  // while the draft has any, or a web address, a copy of the text sits behind
+  // the box with those coloured, and the box's own text is drawn see-through
+  // on top of it.
+  //
+  // A word opens on a click: the cursor can't go inside it, so a click there
+  // has nothing else to do. A web address is text you may still be fixing, so
+  // a click puts the cursor in it as usual, and Cmd+click opens it.
 
   /** The words in the draft that stand for an image or a file, in order. */
   function words(): { at: number; text: string; open: () => void }[] {
@@ -179,20 +184,65 @@
     return out.sort((a, b) => a.at - b.at);
   }
 
-  /** The draft in pieces: plain text, and the words of images and files it carries. */
+  /** The draft in pieces: plain text, the words of images and files it carries, and web addresses. */
   const pieces = $derived.by(() => {
-    if (!chat.draftImages.length && !chat.draftFiles.length) return null;
-    const out: { text: string; word?: boolean }[] = [];
+    const found: { at: number; text: string; open?: () => void; url?: string }[] = [
+      ...words(),
+      ...webLinks(chat.draft).map((link) => ({ ...link, url: link.text })),
+    ].sort((a, b) => a.at - b.at);
+    if (!found.length) return null;
+    const out: { text: string; open?: () => void; url?: string }[] = [];
     let at = 0;
-    for (const word of words()) {
-      if (word.at < at) continue;
-      out.push({ text: chat.draft.slice(at, word.at) }, { text: word.text, word: true });
-      at = word.at + word.text.length;
+    for (const piece of found) {
+      if (piece.at < at) continue;
+      out.push({ text: chat.draft.slice(at, piece.at) }, { text: piece.text, open: piece.open, url: piece.url });
+      at = piece.at + piece.text.length;
     }
-    if (at === 0) return null;
     // A final newline needs something after it to take up its line.
     out.push({ text: chat.draft.slice(at) + "\u200b" });
     return out;
+  });
+
+  /** The word or web address under the pointer, found where the copy behind the box draws it. */
+  function pieceAt(x: number, y: number) {
+    if (!mirror || !pieces) return undefined;
+    for (const span of mirror.querySelectorAll<HTMLElement>("[data-piece]")) {
+      for (const r of span.getClientRects()) {
+        if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return pieces[Number(span.dataset.piece)];
+      }
+    }
+  }
+
+  // The pointer turns to a hand over a word, and over a web address while Cmd
+  // is held. Only looked at while the pointer is over the box.
+  let pointer: { x: number; y: number } | null = null;
+
+  function hover(cmd: boolean) {
+    const piece = pointer ? pieceAt(pointer.x, pointer.y) : undefined;
+    box.style.cursor = piece?.open || (piece?.url && cmd) ? "pointer" : "";
+  }
+
+  function onPointerMove(e: PointerEvent) {
+    pointer = { x: e.clientX, y: e.clientY };
+    hover(e.metaKey);
+  }
+
+  function onPointerLeave() {
+    pointer = null;
+    box.style.cursor = "";
+  }
+
+  // Pressing or letting go of Cmd with the pointer still.
+  $effect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (pointer && e.key === "Meta") hover(e.metaKey);
+    };
+    window.addEventListener("keydown", key);
+    window.addEventListener("keyup", key);
+    return () => {
+      window.removeEventListener("keydown", key);
+      window.removeEventListener("keyup", key);
+    };
   });
 
   /** Keeps the copy behind the box lined up: same width (less any scroll bar) and scroll. */
@@ -268,13 +318,13 @@
     })();
   }
 
-  // Clicking inside an image's or a file's word opens it.
-  function onClick() {
-    const { selectionStart: at, selectionEnd } = box;
-    if (at !== selectionEnd) return;
-    words()
-      .find((w) => at > w.at && at < w.at + w.text.length)
-      ?.open();
+  // Clicking an image's or a file's word opens it; Cmd+click a web address
+  // opens it in the default browser. A drag that selected text opens nothing.
+  function onClick(e: MouseEvent) {
+    if (box.selectionStart !== box.selectionEnd) return;
+    const piece = pieceAt(e.clientX, e.clientY);
+    if (piece?.open) piece.open();
+    else if (piece?.url && e.metaKey) void openUrl(piece.url).catch(() => {});
   }
 
   // A word is one thing: the cursor steps over it, never into it, and a
@@ -282,7 +332,7 @@
 
   /** Where the moving end of the selection last came to rest. */
   let lastFocus = 0;
-  /** While the mouse is down the cursor is left alone, so a click can land inside a word and open it. */
+  /** While the mouse is down the cursor is left alone; it is moved out of any word once the click is done. */
   let pressing = false;
 
   /**
@@ -321,7 +371,7 @@
     const released = () => {
       if (!pressing) return;
       pressing = false;
-      // After the click itself, which opens a word the cursor landed in.
+      // After the click itself, which may open the word under the pointer.
       setTimeout(() => snap(true));
     };
     document.addEventListener("selectionchange", moved);
@@ -395,7 +445,7 @@
       <div class="field">
         {#if pieces}
           <div class="mirror" bind:this={mirror} aria-hidden="true">
-            {#each pieces as piece, i (i)}{#if piece.word}<span class="word">{piece.text}</span>{:else}{piece.text}{/if}{/each}
+            {#each pieces as piece, i (i)}{#if piece.open}<span class="word" data-piece={i}>{piece.text}</span>{:else if piece.url}<span class="link" data-piece={i}>{piece.text}</span>{:else}{piece.text}{/if}{/each}
           </div>
         {/if}
         <textarea
@@ -406,6 +456,8 @@
           onkeydown={onKey}
           onpaste={onPaste}
           onclick={onClick}
+          onpointermove={onPointerMove}
+          onpointerleave={onPointerLeave}
           onpointerdown={() => (pressing = true)}
           onkeyup={() => snap()}
           onscroll={syncMirror}
@@ -536,6 +588,11 @@
   }
   .mirror .word {
     color: var(--accent);
+  }
+  .mirror .link {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
   textarea.see-through {
     position: relative;
