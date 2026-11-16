@@ -29,18 +29,15 @@ pub const SERVER: &str = "harness_browser";
 pub const INSTRUCTION: &str = "This app has a browser in its side panel for localhost pages. To \
 check a web UI you are building, use the harness_browser tools (open, read, click, type, console, \
 screenshot, resize); the user sees the same page. The panel is narrow, so pages show their \
-small-screen layout; use resize (e.g. 1440) to check the desktop layout.";
+small-screen layout; use resize (e.g. 1440 x 900) to check the desktop layout.";
 
 /// How long an action may take before it is given up.
 const ACTION_WAIT: Duration = Duration::from_secs(15);
 /// How long `open` waits for a page to load.
 const LOAD_WAIT: Duration = Duration::from_secs(20);
-/// How often, during an action, to check that the page hasn't taken the
-/// window's keys (see `keep_keys`).
-const KEYS_POLL: Duration = Duration::from_millis(30);
-/// How long to keep checking once the action is done: WebKit can hand the
-/// keys over a moment later.
-const KEYS_TAIL: Duration = Duration::from_millis(500);
+/// How often to check that no page has taken the window's keys without the
+/// user clicking into it (see `guard_keys`).
+const KEYS_POLL: Duration = Duration::from_millis(50);
 /// After a click: how long to watch for a page load it started.
 const CLICK_SETTLE: Duration = Duration::from_millis(400);
 /// Where a hidden browser is parked: far left of the window, out of sight.
@@ -50,9 +47,9 @@ const PARK_X: f64 = -20_000.0;
 const PUT_AWAY_AFTER: Duration = Duration::from_secs(10 * 60);
 /// How often put-away is checked.
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
-/// Narrowest and widest layout width `resize` takes, in CSS pixels.
-const MIN_WIDTH: f64 = 320.0;
-const MAX_WIDTH: f64 = 3840.0;
+/// Smallest and largest window side `resize` takes, in CSS pixels.
+const MIN_SIDE: f64 = 240.0;
+const MAX_SIDE: f64 = 3840.0;
 /// Longest image edge sent to the agent, in pixels (larger ones are shrunk by it anyway).
 const SHOT_MAX_EDGE: f64 = 1568.0;
 
@@ -114,15 +111,18 @@ pub fn tools() -> Value {
         },
         {
             "name": "screenshot",
-            "description": "A picture of the page as shown in the side panel, to check how the UI looks.",
+            "description": "A picture of the page at its full layout size (after resize: the size asked for, not the shrunk view in the panel), to check how the UI looks.",
             "inputSchema": none,
         },
         {
             "name": "resize",
-            "description": "Set how wide the page lays out, in CSS pixels, without changing the panel: the page is zoomed to fit, so e.g. 1440 shows the full desktop layout, smaller. Stays until changed, across loads. Omit width (or 0) to go back to the panel's own width.",
+            "description": "Set the page's window size in CSS pixels, like resizing a browser window: the page lays out at exactly this size (window.innerWidth/innerHeight), and the side panel shows it shrunk to fit. Screenshots come out at this size. E.g. 1440 x 900 for desktop, 390 x 844 for a phone. Stays until changed, across loads. Omit height to fill the panel's height; omit width (or 0) to go back to the panel's own size.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "width": { "type": "number", "description": "Layout width in CSS pixels, e.g. 1440 for desktop or 390 for a phone" } },
+                "properties": {
+                    "width": { "type": "number", "description": "Window width in CSS pixels, e.g. 1440" },
+                    "height": { "type": "number", "description": "Window height in CSS pixels, e.g. 900" },
+                },
             },
         },
     ])
@@ -181,7 +181,7 @@ struct Page {
     /// Waiting for the current load to finish.
     load_waiters: Vec<oneshot::Sender<()>>,
     /// The page's native view, by address, to tell whether it holds the
-    /// window's keys (see `keep_keys`). 0 where that isn't checked.
+    /// window's keys (see `guard_keys`). 0 where that isn't checked.
     view: usize,
 }
 
@@ -192,17 +192,81 @@ struct Place {
     /// The panel body; None until the window has placed it.
     rect: Option<Rect>,
     visible: bool,
-    /// Width the agent wants the page laid out at (`resize`); None fits the panel.
-    width: Option<f64>,
+    /// Window size the agent asked for (`resize`); None fits the panel.
+    size: Option<Size>,
 }
 
+/// A page window size the agent asked for, in CSS pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Size {
+    width: f64,
+    /// None: as tall as the panel holds at the zoom the width needs.
+    height: Option<f64>,
+}
+
+/// Where a page's web view goes and how it is zoomed, in the window's logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Frame {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    zoom: f64,
+}
+
+impl Frame {
+    /// The page's layout size (`innerWidth` x `innerHeight`) in CSS pixels,
+    /// rounded down as WebKit does.
+    fn layout(&self) -> (f64, f64) {
+        ((self.width / self.zoom).floor(), (self.height / self.zoom).floor())
+    }
+}
+
+/// How many whole-point view widths below the largest that fits `frame` tries,
+/// looking for one whose height also maps back to the asked height.
+const FIT_TRIES: usize = 64;
+
 impl Place {
-    /// Page zoom that lays the page out at `width` inside the panel.
-    fn zoom(&self) -> f64 {
-        match (self.width, self.rect) {
-            (Some(width), Some(rect)) if rect.width > 0.0 => rect.width / width,
-            _ => 1.0,
+    /// Where the page goes in the panel. With no size asked for it fills the
+    /// panel. With one, the web view is that size times a zoom, and the page is
+    /// zoomed by the same amount, so it lays out at the size asked for. The
+    /// zoom shrinks it to fit the panel (never enlarges it); it sits at the
+    /// top, centred across.
+    ///
+    /// The view's size is cut to whole points (wry and WebKit both drop the
+    /// fraction), and WebKit rounds the layout size down. So the zoom is
+    /// width / asked width for a whole-point width, which makes the layout
+    /// width exact; of the widths that fit, the first whose whole-point height
+    /// maps back to within half a pixel of the asked height wins. The zoom is
+    /// then lowered a hair so float error can't round the layout down a pixel.
+    fn frame(&self) -> Option<Frame> {
+        let rect = self.rect?;
+        let Some(size) = self.size else {
+            return Some(Frame { x: rect.x, y: rect.y, width: rect.width, height: rect.height, zoom: 1.0 });
+        };
+        let mut fit = (rect.width / size.width).min(1.0);
+        if let Some(height) = size.height {
+            fit = fit.min(rect.height / height);
         }
+        let largest = (size.width * fit).floor().max(1.0);
+        let pick = |width: f64| {
+            let zoom = width / size.width;
+            let height = size.height.map_or(rect.height.floor(), |h| (h * zoom - 1e-9).ceil());
+            let over = size.height.map_or(0.0, |h| height / zoom - h);
+            (width, height, zoom, over)
+        };
+        let (width, height, zoom, _) = (0..FIT_TRIES)
+            .map(|i| largest - i as f64)
+            .take_while(|w| *w >= 1.0)
+            .map(pick)
+            .find(|c| c.3 < 0.5)
+            .unwrap_or_else(|| pick(largest));
+        let zoom = if zoom < 1.0 { zoom / (1.0 + 1e-5) } else { zoom };
+        Some(Frame { x: rect.x + (rect.width - width) / 2.0, y: rect.y, width, height, zoom })
+    }
+
+    fn zoom(&self) -> f64 {
+        self.frame().map_or(1.0, |f| f.zoom)
     }
 }
 
@@ -224,6 +288,11 @@ struct Inner {
     next_action: Mutex<u64>,
     /// One web view made at a time, so two calls can't both make one.
     make_lock: tokio::sync::Mutex<()>,
+    /// The page the user last clicked into (its view's address), or 0 when
+    /// the last click was anywhere else. Only that page may hold the keys.
+    clicked: Mutex<usize>,
+    /// What last held the window's keys rightfully: where they go back to.
+    keys_home: Mutex<usize>,
 }
 
 #[derive(Clone)]
@@ -240,7 +309,19 @@ impl Browsers {
             next: Mutex::new(0),
             next_action: Mutex::new(0),
             make_lock: tokio::sync::Mutex::new(()),
+            clicked: Mutex::new(0),
+            keys_home: Mutex::new(0),
         }));
+        browsers.watch_clicks();
+        // Keys taken by a page the user didn't click into go back; ends with the app.
+        let weak = Arc::downgrade(&browsers.0);
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(KEYS_POLL).await;
+                let Some(inner) = weak.upgrade() else { return };
+                Browsers(inner).guard_keys().await;
+            }
+        });
         // Put away pages left unused; ends with the app.
         let weak = Arc::downgrade(&browsers.0);
         tauri::async_runtime::spawn(async move {
@@ -327,28 +408,47 @@ impl Browsers {
         self.send(chat, event);
     }
 
-    /// Lays the chat's page out `width` CSS pixels wide (None: the panel's
-    /// width), by zooming it to fit the panel. Says what it did.
-    fn resize(&self, chat: &str, width: Option<f64>) -> Result<String, String> {
-        let width = width.filter(|w| *w > 0.0).map(|w| w.round().clamp(MIN_WIDTH, MAX_WIDTH));
+    /// Gives the chat's page a window size in CSS pixels (no width: the
+    /// panel's own size), shown shrunk to fit the panel. With a page open,
+    /// waits for it to take the new size and redraw, so a screenshot right
+    /// after shows it, and says the size the page measures.
+    async fn resize(&self, chat: &str, width: Option<f64>, height: Option<f64>) -> Result<String, String> {
+        let side = |v: Option<f64>| v.filter(|v| *v > 0.0).map(|v| v.round().clamp(MIN_SIDE, MAX_SIDE));
+        let size = side(width).map(|width| Size { width, height: side(height) });
         let place = {
             let mut places = self.0.places.lock().unwrap();
             let place = places.entry(chat.to_string()).or_default();
-            place.width = width;
+            place.size = size;
             *place
         };
         if let Some(webview) = self.webview(chat) {
             apply_place(&webview, place);
         }
-        let panel = place.rect.map(|r| r.width.round());
-        Ok(match (width, panel) {
-            (None, Some(panel)) => format!("The page lays out at the panel's width again ({panel} px)."),
-            (None, None) => "The page lays out at the panel's width again.".into(),
-            (Some(w), Some(_)) => format!(
-                "The page now lays out {w} px wide, shown at {:.0}% to fit the panel.",
-                place.zoom() * 100.0
+        let Some(frame) = place.frame() else {
+            return Ok(match size {
+                None => "The page fits the panel again.".into(),
+                Some(Size { width, height: Some(height) }) => {
+                    format!("The page will lay out at {width} x {height} once the panel shows.")
+                }
+                Some(Size { width, height: None }) => format!("The page will lay out {width} px wide once the panel shows."),
+            });
+        };
+        let (mut w, mut h) = frame.layout();
+        if self.webview(chat).is_some() {
+            let want = json!({ "width": w, "height": if size.is_some_and(|s| s.height.is_some()) { h } else { 0.0 } });
+            if let Ok(Value::Array(got)) = self.page_action(chat, "settle", &want).await {
+                if let [Some(gw), Some(gh)] = [got.first().and_then(Value::as_f64), got.get(1).and_then(Value::as_f64)] {
+                    (w, h) = (gw, gh);
+                }
+            }
+        }
+        Ok(match size {
+            None => format!("The page fits the panel again ({w} x {h})."),
+            Some(_) if frame.zoom >= 1.0 => format!("The page now lays out at {w} x {h}, shown at full size."),
+            Some(_) => format!(
+                "The page now lays out at {w} x {h}, shown at {:.0}% to fit the panel.",
+                frame.zoom * 100.0
             ),
-            (Some(w), None) => format!("The page will lay out {w} px wide once the panel shows."),
         })
     }
 
@@ -482,7 +582,9 @@ impl Browsers {
         let app = self.0.app.clone();
         // Starts blank: the page's scripts are set up before the first real load.
         let blank = tauri::Url::parse("about:blank").expect("valid");
+        // Not focused: a focused new web view brings the app to the front.
         let builder = WebviewBuilder::new(&label, WebviewUrl::External(blank))
+            .focused(false)
             .initialization_script(BRIDGE_JS)
             .on_navigation(move |url| {
                 if is_local(url) {
@@ -603,19 +705,6 @@ impl Browsers {
 
     /// Runs one of the agent's tool calls. Returns MCP content items.
     pub async fn call(&self, chat: &str, tool: &str, args: &Value) -> Result<Vec<Value>, String> {
-        let keys = self.keys_holder().await;
-        // Dropped when the call ends, which tells `keep_keys` the action is done.
-        let (_running, done) = oneshot::channel::<()>();
-        {
-            let browsers = self.clone();
-            let chat = chat.to_string();
-            tauri::async_runtime::spawn(async move { browsers.keep_keys(&chat, keys, done).await });
-        }
-        self.run_tool(chat, tool, args).await
-    }
-
-    /// One tool call, as `call` runs it.
-    async fn run_tool(&self, chat: &str, tool: &str, args: &Value) -> Result<Vec<Value>, String> {
         let text = |s: String| Ok(vec![json!({ "type": "text", "text": s })]);
         // A page put away while unused comes back for the agent's next look.
         if tool != "open" {
@@ -649,10 +738,11 @@ impl Browsers {
                     other => other.to_string(),
                 })
             }
-            "resize" => text(self.resize(chat, args["width"].as_f64())?),
+            "resize" => text(self.resize(chat, args["width"].as_f64(), args["height"].as_f64()).await?),
             "screenshot" => {
                 let webview = self.webview(chat).ok_or("No page is open; call open first.")?;
-                let png = screenshot(&webview).await?;
+                let zoom = self.0.places.lock().unwrap().get(chat).map_or(1.0, Place::zoom);
+                let png = screenshot(&webview, zoom).await?;
                 use base64::Engine;
                 let data = base64::engine::general_purpose::STANDARD.encode(png);
                 Ok(vec![json!({ "type": "image", "data": data, "mimeType": "image/png" })])
@@ -661,47 +751,54 @@ impl Browsers {
         }
     }
 
-    /// The agent's actions mustn't move the user's keys. Focusing a box in a
-    /// page (to type in it or click it) makes WebKit give that page the
-    /// window's keys, even when it is parked off screen for a chat not on
-    /// show, so the user's typing in another chat would land in it. If the
-    /// page took the keys, they go back to `before` (what held them before
-    /// the action), or to the main window when that's gone.
-    ///
-    /// A page on show that held the keys before the action keeps them: the
-    /// user clicked into it. A parked page never keeps them, even if it held
-    /// them before: that can only be an earlier action's doing, not yet undone
-    /// (two quick actions in a row).
-    ///
-    /// Checks while the action runs and for `KEYS_TAIL` after (`done` closes
-    /// when it ends).
-    async fn keep_keys(&self, chat: &str, before: usize, mut done: oneshot::Receiver<()>) {
-        let mut ended: Option<Instant> = None;
-        loop {
-            match ended {
-                Some(at) if at.elapsed() > KEYS_TAIL => return,
-                Some(_) => {}
-                None if matches!(done.try_recv(), Err(oneshot::error::TryRecvError::Empty)) => {}
-                None => ended = Some(Instant::now()),
-            }
-            tokio::time::sleep(KEYS_POLL).await;
-            let page = self.0.pages.lock().unwrap().get(chat).map(|p| p.view).unwrap_or(0);
-            let shown = self.0.places.lock().unwrap().get(chat).is_some_and(|p| p.visible);
-            if page == 0 || (page == before && shown) || self.keys_holder().await != page {
-                continue;
-            }
-            let back = self
-                .0
-                .pages
-                .lock()
-                .unwrap()
-                .values()
-                .find(|p| p.view == before && p.view != page)
-                .map(|p| p.webview.clone())
-                .or_else(|| self.0.app.get_webview("main"));
-            if let Some(webview) = back {
-                let _ = webview.set_focus();
-            }
+    /// Pages mustn't take the user's keys. A page that focuses a box (the
+    /// agent typing or clicking in it, or the page's own script, like a box
+    /// that takes the cursor when a dev server reloads the page) makes WebKit
+    /// give it the window's keys, even when it is parked off screen for a chat
+    /// not on show, and the user's typing lands there. So a page may hold the
+    /// keys only if the user's last click was in it; otherwise they go back to
+    /// what last held them rightfully, or to the main window.
+    async fn guard_keys(&self) {
+        let pages: Vec<(usize, Webview)> = {
+            let pages = self.0.pages.lock().unwrap();
+            pages.values().filter(|p| p.view != 0).map(|p| (p.view, p.webview.clone())).collect()
+        };
+        if pages.is_empty() {
+            return;
+        }
+        let holder = self.keys_holder().await;
+        if holder == 0 {
+            return;
+        }
+        let clicked = *self.0.clicked.lock().unwrap();
+        if holder == clicked || !pages.iter().any(|(view, _)| *view == holder) {
+            *self.0.keys_home.lock().unwrap() = holder;
+            return;
+        }
+        let home = *self.0.keys_home.lock().unwrap();
+        let back = pages
+            .iter()
+            .find(|(view, _)| *view == home && home == clicked)
+            .map(|(_, webview)| webview.clone())
+            .or_else(|| self.0.app.get_webview("main"));
+        if let Some(webview) = back {
+            let _ = webview.set_focus();
+        }
+    }
+
+    /// Notes which page, if any, each mouse press in the window lands in.
+    fn watch_clicks(&self) {
+        #[cfg(target_os = "macos")]
+        {
+            let weak = Arc::downgrade(&self.0);
+            let _ = self.0.app.run_on_main_thread(move || {
+                mac::watch_clicks(move |hit| {
+                    let Some(inner) = weak.upgrade() else { return };
+                    let views: Vec<usize> = inner.pages.lock().unwrap().values().map(|p| p.view).collect();
+                    let page = views.into_iter().find(|&view| view != 0 && mac::is_inside(hit, view)).unwrap_or(0);
+                    *inner.clicked.lock().unwrap() = page;
+                });
+            });
         }
     }
 
@@ -792,13 +889,13 @@ fn put_away_after() -> Duration {
 }
 
 /// Places a page: over the panel body when visible, parked out of sight
-/// otherwise, zoomed to lay out at the width the agent asked for.
+/// otherwise, sized and zoomed to lay out at the size the agent asked for.
 fn apply_place(webview: &Webview, place: Place) {
-    let Some(rect) = place.rect else { return };
-    let x = if place.visible { rect.x } else { PARK_X };
-    let _ = webview.set_size(LogicalSize::new(rect.width, rect.height));
-    let _ = webview.set_position(LogicalPosition::new(x, rect.y));
-    let _ = webview.set_zoom(place.zoom());
+    let Some(frame) = place.frame() else { return };
+    let x = if place.visible { frame.x } else { PARK_X };
+    let _ = webview.set_size(LogicalSize::new(frame.width, frame.height));
+    let _ = webview.set_position(LogicalPosition::new(x, frame.y));
+    let _ = webview.set_zoom(frame.zoom);
 }
 
 /// What `eval_with_callback` hands back: the script's value as JSON. The
@@ -829,12 +926,17 @@ async fn eval(webview: &Webview, script: String) -> Result<Value, String> {
     Ok(decode(&raw))
 }
 
-/// A PNG of what the web view shows.
+/// A PNG of what the web view shows, drawn at the page's layout size (the
+/// view's size undone by `zoom`), not the shrunk size it shows at.
 #[cfg(target_os = "macos")]
-async fn screenshot(webview: &Webview) -> Result<Vec<u8>, String> {
+async fn screenshot(webview: &Webview, zoom: f64) -> Result<Vec<u8>, String> {
     let (tx, rx) = oneshot::channel::<Result<Vec<u8>, String>>();
     let scale = webview.window().scale_factor().unwrap_or(2.0);
-    let size = webview.size().map(|s| s.to_logical::<f64>(scale)).ok();
+    let size = webview
+        .size()
+        .map(|s| s.to_logical::<f64>(scale))
+        .map(|s| LogicalSize::new(s.width / zoom, s.height / zoom))
+        .ok();
     webview
         .with_webview(move |platform| mac::snapshot(platform.inner(), scale, size, tx))
         .map_err(|e| e.to_string())?;
@@ -845,19 +947,22 @@ async fn screenshot(webview: &Webview) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn screenshot(_webview: &Webview) -> Result<Vec<u8>, String> {
+async fn screenshot(_webview: &Webview, _zoom: f64) -> Result<Vec<u8>, String> {
     Err("Screenshots aren't supported on this system yet; use read and console instead.".into())
 }
 
 #[cfg(target_os = "macos")]
 mod mac {
     use std::ffi::c_void;
+    use std::ptr::NonNull;
     use std::sync::Mutex;
 
     use block2::RcBlock;
     use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage};
     use objc2::MainThreadOnly;
-    use objc2_foundation::{NSDictionary, NSError, NSNumber, NSString};
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSDictionary, NSError, NSNumber, NSPoint, NSString};
     use objc2_web_kit::{WKSnapshotConfiguration, WKUserScript, WKUserScriptInjectionTime, WKWebView};
     use tauri::LogicalSize;
     use tokio::sync::oneshot;
@@ -880,13 +985,13 @@ mod mac {
         // SAFETY: `with_webview` runs this on the main thread.
         let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
         let config = unsafe { WKSnapshotConfiguration::new(mtm) };
-        // Shrink so the long edge stays within what the agent takes.
+        // Drawn at `size` (which can be larger than the view: WebKit paints the
+        // page again at that size, so it stays sharp), shrunk so the long edge
+        // stays within what the agent takes.
         if let Some(size) = size {
             let long = size.width.max(size.height) * scale;
-            if long > SHOT_MAX_EDGE {
-                let width = size.width * SHOT_MAX_EDGE / long;
-                unsafe { config.setSnapshotWidth(Some(&NSNumber::new_f64(width))) };
-            }
+            let width = size.width * (SHOT_MAX_EDGE / long).min(1.0);
+            unsafe { config.setSnapshotWidth(Some(&NSNumber::new_f64(width))) };
         }
         let block = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
             if image.is_null() {
@@ -912,9 +1017,52 @@ mod mac {
             return 0;
         }
         // SAFETY: Tauri's live NSWindow; called on the main thread.
-        let window: &objc2::runtime::AnyObject = unsafe { &*(window as *const objc2::runtime::AnyObject) };
-        let holder: *mut objc2::runtime::AnyObject = unsafe { objc2::msg_send![window, firstResponder] };
+        let window: &AnyObject = unsafe { &*(window as *const AnyObject) };
+        let holder: *mut AnyObject = unsafe { msg_send![window, firstResponder] };
         holder as usize
+    }
+
+    /// Calls `on_click` with the view under every mouse press in the app, on
+    /// the main thread, for the app's whole life. Run on the main thread.
+    pub fn watch_clicks(on_click: impl Fn(*mut AnyObject) + 'static) {
+        let block = RcBlock::new(move |event: NonNull<AnyObject>| -> *mut AnyObject {
+            let event = event.as_ptr();
+            // SAFETY: AppKit hands a live NSEvent, on the main thread.
+            unsafe {
+                let window: *mut AnyObject = msg_send![&*event, window];
+                if !window.is_null() {
+                    // Hit-tested from the content view's parent, as the window
+                    // does: the browser's web views sit beside the main one.
+                    let content: *mut AnyObject = msg_send![&*window, contentView];
+                    let frame: *mut AnyObject = if content.is_null() { content } else { msg_send![&*content, superview] };
+                    if !frame.is_null() {
+                        let at: NSPoint = msg_send![&*event, locationInWindow];
+                        let hit: *mut AnyObject = msg_send![&*frame, hitTest: at];
+                        on_click(hit);
+                    }
+                }
+            }
+            event
+        });
+        // Left, right and other mouse buttons going down.
+        let mask: u64 = (1 << 1) | (1 << 3) | (1 << 25);
+        // SAFETY: a class method taking a mask and a block; on the main thread.
+        let monitor: *mut AnyObject =
+            unsafe { msg_send![objc2::class!(NSEvent), addLocalMonitorForEventsMatchingMask: mask, handler: &*block] };
+        if !monitor.is_null() {
+            // Kept for the app's life.
+            let _: *mut AnyObject = unsafe { msg_send![monitor, retain] };
+        }
+    }
+
+    /// Whether `hit` is the view at address `view` or inside it. On the main
+    /// thread, with `view` a live page's web view.
+    pub fn is_inside(hit: *mut AnyObject, view: usize) -> bool {
+        if hit.is_null() || view == 0 {
+            return false;
+        }
+        // SAFETY: both are live NSViews, on the main thread.
+        unsafe { msg_send![&*hit, isDescendantOf: view as *mut AnyObject] }
     }
 
     /// Leaves `script` as the page's only start-up script, for every load from now on.
@@ -1110,6 +1258,18 @@ const BRIDGE_JS: &str = r#"
       if (out === undefined) out = String(value);
       return out.length > MAX_TEXT ? out.slice(0, MAX_TEXT) + "\n… (cut)" : out;
     },
+    // After a resize: waits (up to a second) for the new size to reach the
+    // page, then two frames so its resize handlers have run and painted.
+    // A page off screen may get no frames, so each is capped.
+    async settle({ width, height }) {
+      const frame = () => new Promise((r) => { requestAnimationFrame(() => r()); setTimeout(r, 100); });
+      for (let i = 0; i < 20 && (innerWidth !== width || (height && innerHeight !== height)); i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await frame();
+      await frame();
+      return [innerWidth, innerHeight];
+    },
   };
 
   const results = {};
@@ -1163,12 +1323,45 @@ mod tests {
     }
 
     #[test]
-    fn zoom_fits_the_asked_width_into_the_panel() {
-        let rect = Some(Rect { x: 0.0, y: 0.0, width: 720.0, height: 900.0 });
-        assert_eq!(Place { rect, visible: true, width: None }.zoom(), 1.0);
-        assert_eq!(Place { rect, visible: true, width: Some(1440.0) }.zoom(), 0.5);
-        assert_eq!(Place { rect, visible: true, width: Some(360.0) }.zoom(), 2.0);
-        assert_eq!(Place { rect: None, visible: false, width: Some(1440.0) }.zoom(), 1.0);
+    fn the_asked_size_is_shrunk_to_fit_at_the_top() {
+        let rect = Some(Rect { x: 100.0, y: 50.0, width: 720.0, height: 900.0 });
+        let at = |width, height| Place { rect, visible: true, size: Some(Size { width, height }) }.frame().unwrap();
+        // Nothing asked: fills the panel.
+        let fill = Place { rect, visible: true, size: None }.frame().unwrap();
+        assert_eq!(fill, Frame { x: 100.0, y: 50.0, width: 720.0, height: 900.0, zoom: 1.0 });
+        // Desktop: width-bound, half size, top of the panel.
+        let desk = at(1440.0, Some(900.0));
+        assert_eq!((desk.x, desk.y, desk.width, desk.height), (100.0, 50.0, 720.0, 450.0));
+        assert_eq!(desk.layout(), (1440.0, 900.0));
+        // Tall: height-bound, centred across.
+        let tall = at(720.0, Some(1800.0));
+        assert_eq!((tall.x, tall.y, tall.width, tall.height), (280.0, 50.0, 360.0, 900.0));
+        assert_eq!(tall.layout(), (720.0, 1800.0));
+        // Small: shown at full size, never enlarged.
+        let phone = at(390.0, Some(844.0));
+        assert_eq!(phone.zoom, 1.0);
+        assert_eq!(phone.layout(), (390.0, 844.0));
+        // Width only: as tall as the panel holds.
+        assert_eq!(at(1440.0, None).layout(), (1440.0, 1800.0));
+        // No panel yet: nowhere to put it.
+        assert!(Place { rect: None, visible: false, size: Some(Size { width: 1440.0, height: None }) }.frame().is_none());
+    }
+
+    #[test]
+    fn an_odd_panel_still_gives_the_exact_size() {
+        // A real panel: fractional width (seen live as 1439 x 900 before).
+        let rect = Some(Rect { x: 878.90625, y: 39.0, width: 521.09375, height: 861.0 });
+        for (width, height) in [(1440.0, 900.0), (1366.0, 768.0), (1920.0, 1080.0), (1280.0, 800.0), (2560.0, 1440.0)] {
+            let frame = Place { rect, visible: true, size: Some(Size { width, height: Some(height) }) }.frame().unwrap();
+            // Whole points (the view drops fractions), inside the panel.
+            assert_eq!(frame.width, frame.width.floor());
+            assert_eq!(frame.height, frame.height.floor());
+            assert!(frame.width <= 521.09375 && frame.height <= 861.0);
+            // What the page measures, as WebKit works it out in single precision.
+            let zoom = frame.zoom as f32;
+            let inner = ((frame.width as f32 / zoom).floor(), (frame.height as f32 / zoom).floor());
+            assert_eq!(inner, (width as f32, height as f32), "{width} x {height}");
+        }
     }
 
     #[test]

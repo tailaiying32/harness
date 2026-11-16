@@ -37,7 +37,7 @@
     if (open && chat.panelView === view) chat.panelOpen = false;
     else {
       chat.showView(view);
-      if (view === "terminal") terminals.focusNext++;
+      if (view === "terminal") terminals.wantsKeys = true;
     }
   }
 </script>

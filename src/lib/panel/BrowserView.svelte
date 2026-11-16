@@ -1,7 +1,8 @@
 <script lang="ts">
   // The panel's browser view: the space the page itself sits over. Its address,
   // ↻ and × are in the top bar (see PanelBar). The page is a separate web view the
-  // core holds (one per chat, localhost only), placed over `slot` whenever
+  // core holds (one per chat, localhost only), placed over `slot` (or at its
+  // top, shrunk, when Claude gave it a window size) whenever
   // this view is on screen and nothing is drawn over it; otherwise the core
   // parks it out of sight at the same size, so Claude still sees it as shown.
   import { onDestroy } from "svelte";

@@ -100,9 +100,8 @@
     return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
   }
 
-  // An agent working in its browser page can take the window's keys for a
-  // moment (the core hands them straight back; see `keep_keys` in
-  // browser.rs). The box being typed in loses its cursor then, so it gets it
+  // A browser page can take the window's keys for a moment (the core hands
+  // them straight back; see `guard_keys` in browser.rs). The box being typed in loses its cursor then, so it gets it
   // back when the keys return with nothing else picked.
   let lastBox: HTMLElement | null = null;
   function noteFocus(e: FocusEvent) {
