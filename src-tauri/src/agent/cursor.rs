@@ -19,7 +19,9 @@ pub struct CursorAdapter;
 /// Asks for plain model ids with names, and each model's effort levels as
 /// options of their own, instead of one id per combination.
 fn client_meta() -> Value {
-    json!({ "parameterizedModelPicker": true })
+    // `subagents`: each subagent runs as its own session, announced on the
+    // chat's session (`subagent_spawned`, `subagent_state_update`).
+    json!({ "parameterizedModelPicker": true, "subagents": true })
 }
 
 /// How long listing the models may take in all (one call per model).

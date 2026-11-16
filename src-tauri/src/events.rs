@@ -25,6 +25,22 @@ pub enum Block {
     ToolCall { tool_id: String, name: String, input: Value },
 }
 
+/// One command or agent running in the background.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BackgroundTask {
+    pub id: String,
+    /// The agent's own word for it, e.g. "local_bash" or "local_agent".
+    pub kind: String,
+    pub description: String,
+}
+
+/// One part of what fills the context window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextPart {
+    pub name: String,
+    pub tokens: u64,
+}
+
 /// What kind of answer an approval request wants from the user.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -138,6 +154,49 @@ pub enum AgentEvent {
         running: u32,
         /// How many of those are agents. A chat with any shows as working.
         agents: u32,
+        /// What each one is, for the chat info view.
+        #[serde(default)]
+        tasks: Vec<BackgroundTask>,
+    },
+    /// A subagent (or other agent task) started. `tool_id` is the main chat's
+    /// tool call that started it; its steps carry that as `parent_tool_id`.
+    TaskStarted {
+        task_id: String,
+        tool_id: Option<String>,
+        description: String,
+        /// The kind of subagent, e.g. "general-purpose".
+        agent_type: Option<String>,
+        /// Runs on after its tool call returns; only `TaskEnded` says it's done.
+        background: bool,
+    },
+    /// What a running task is doing now. Frequent, so not saved.
+    TaskProgress {
+        task_id: String,
+        tool_id: Option<String>,
+        /// A short live line, e.g. "Reading src/one.txt".
+        description: Option<String>,
+        tool_uses: Option<u32>,
+        last_tool: Option<String>,
+    },
+    /// A task finished: "completed", "failed" or "stopped". `summary` is the
+    /// answer it handed back, when the agent sends one.
+    TaskEnded {
+        task_id: String,
+        tool_id: Option<String>,
+        status: String,
+        summary: Option<String>,
+        /// How long it ran, when the agent says.
+        #[serde(default)]
+        duration_ms: Option<u64>,
+    },
+    /// How full the context window is, read after each turn. Saved, so a
+    /// reopened chat shows its last reading.
+    ContextUsage {
+        used: u64,
+        max: u64,
+        /// What takes the space, largest first; empty when not known.
+        #[serde(default)]
+        parts: Vec<ContextPart>,
     },
     Error {
         message: String,
@@ -222,6 +281,7 @@ impl AgentEvent {
                 | AgentEvent::Status { .. }
                 | AgentEvent::Compacting { .. }
                 | AgentEvent::BackgroundWork { .. }
+                | AgentEvent::TaskProgress { .. }
                 | AgentEvent::TitleChanged { .. }
                 | AgentEvent::PrsChanged { .. }
                 | AgentEvent::BrowserState { .. }
@@ -342,7 +402,21 @@ mod tests {
             AgentEvent::UserMessage { text: "hi".into(), id: None, images: vec![] }
         );
         assert!(!AgentEvent::Status { state: SessionState::Idle }.is_saved());
-        assert!(!AgentEvent::BackgroundWork { running: 1, agents: 0 }.is_saved());
+        assert!(!AgentEvent::BackgroundWork { running: 1, agents: 0, tasks: vec![] }.is_saved());
+        assert!(!AgentEvent::TaskProgress {
+            task_id: "a".into(),
+            tool_id: None,
+            description: None,
+            tool_uses: None,
+            last_tool: None
+        }
+        .is_saved());
+        assert!(AgentEvent::ContextUsage { used: 1, max: 2, parts: vec![] }.is_saved());
+        // Background readings saved before the task list existed still load.
+        assert_eq!(
+            serde_json::from_str::<AgentEvent>(r#"{"kind":"background_work","running":1,"agents":0}"#).unwrap(),
+            AgentEvent::BackgroundWork { running: 1, agents: 0, tasks: vec![] }
+        );
         assert!(!AgentEvent::Compacting { active: true }.is_saved());
         assert!(AgentEvent::Compacted { auto: false }.is_saved());
         assert!(AgentEvent::SignInNeeded { message: "x".into() }.is_saved());

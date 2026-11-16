@@ -1073,7 +1073,7 @@ mod tests {
             self.fake.told.lock().unwrap().clone()
         }
         fn background(&self, running: u32) {
-            self.agent_says(AgentEvent::BackgroundWork { running, agents: 0 });
+            self.agent_says(AgentEvent::BackgroundWork { running, agents: 0, tasks: vec![] });
         }
         fn count(&self, what: &str) -> usize {
             self.told().iter().filter(|t| *t == what).count()

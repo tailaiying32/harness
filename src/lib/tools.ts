@@ -118,7 +118,14 @@ function wording(tool: ToolCall): [string, string, string] {
     case "Agent":
       return [`ran a subagent`, `Running a subagent`, `run a subagent`];
     case "TodoWrite":
+    case "TaskUpdate":
       return [`updated its task list`, `Updating its task list`, `update its task list`];
+    // Claude Code 2.1.3xx keeps its task list with these instead of TodoWrite.
+    case "TaskCreate":
+      return [`added a task`, `Adding a task`, `add a task`];
+    case "TaskList":
+    case "TaskGet":
+      return [`checked its task list`, `Checking its task list`, `check its task list`];
     case "ExitPlanMode":
       return [`presented a plan`, `Presenting a plan`, `present a plan`];
     case "AskUserQuestion":

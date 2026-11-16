@@ -331,7 +331,7 @@
 
     for (const message of test.messages) {
       // Lines starting with `@` steer the test instead of being sent:
-      //   @model <name> (cursor:<name> for Cursor's), @mode <mode>
+      //   @model <name> (cursor:<name> for Cursor's, claude:<name> to switch back), @mode <mode>
       //   @answer <allow|always_allow|deny|none>  how approvals are answered from here on
       //   @worktree <worktree|here|none>  how the worktree card is answered
       //   @turn          wait for the open chat's next turn to end (after a move to a
@@ -357,6 +357,9 @@
       //   @termtab       open another tab in the project's main folder
       //   @termclose     close the tab on show, answering "close" if it asks
       //   @docs          show the docs view (the terminal goes off screen)
+      //   @info          show chat info's page
+      //   @agent <n>     unfold the nth subagent in chat info (from 0)
+      //   @agents        wait (up to 5 min) until no subagent is running
       //   @notes <text>  write the open chat's notes (the rest of the line, spaces and all)
       //   @docedit <text>  save <text> as the open chat's first document, as typing in its tab does
       //   @planedit <text>  add a line to the next plan before it is auto-approved
@@ -364,7 +367,7 @@
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
-        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|image|file|browser|settings|termtab|termclose|docs)(?:\s+(\S+))?$/) ??
+        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|image|file|browser|settings|termtab|termclose|docs|info|agent|agents)(?:\s+(\S+))?$/) ??
         message.match(/^@(notes|docedit|planedit|terminal|termwait)\s+(.+)$/s) ??
         [];
       const current = app.current;
@@ -374,6 +377,9 @@
       if (directive === "model" && value.startsWith("cursor:")) {
         current.setAgent("cursor", loadPrefs().mode);
         await current.changeModel(value.slice("cursor:".length));
+      } else if (directive === "model" && value.startsWith("claude:")) {
+        current.setAgent("claude-code", loadPrefs().mode);
+        await current.changeModel(value.slice("claude:".length));
       } else if (directive === "model") await current.changeModel(value);
       if (directive === "mode") await current.changeMode(value as Mode);
       if (directive === "answer") answer = value === "none" ? null : (value as Decision);
@@ -408,6 +414,15 @@
         }
       }
       if (directive === "settings") showSettings = !showSettings;
+      if (directive === "info") current.openInfo();
+      if (directive === "agent") {
+        const agent = current.info.agents[Number(value)];
+        if (agent) current.openInfo(agent.toolId);
+        await pause(200);
+      }
+      if (directive === "agents") {
+        for (let i = 0; i < 1500 && current.info.running > 0; i++) await pause(200);
+      }
       const project = current.projectPath.trim();
       if (directive === "terminal") {
         current.showView("terminal");
@@ -502,6 +517,23 @@
           },
           items: current.items.map((item) => ({ ...item })),
           panelView: current.panelView,
+          info: {
+            context: current.info.context,
+            tasks: current.info.tasks.map((t) => ({ ...t })),
+            agents: current.info.agents.map((a) => ({
+              name: a.name,
+              state: a.state,
+              background: a.background,
+              steps: a.steps.length,
+              tools: a.steps.filter((s) => s.type === "tool").map((s) => (s.type === "tool" ? s.name : "")),
+              answer: a.answer.slice(0, 120),
+              durationMs: a.durationMs ?? null,
+            })),
+            background: current.info.background.map((b) => ({ ...b })),
+            unfolded: [...current.info.unfolded],
+            // What the page shows, as text.
+            shown: document.querySelector<HTMLElement>(".panel")?.innerText.slice(0, 1500) ?? null,
+          },
           notes: current.notes,
           plans: current.items.filter((item) => item.type === "approval" && item.approval === "plan").map((item) => ({ ...item })),
           terminal: termReport,
