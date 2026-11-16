@@ -161,7 +161,8 @@
     savePrefs({ panelWidth: DEFAULT_PANEL_WIDTH });
   }
 
-  let feedback = $state("");
+  // The panel is rebuilt for each chat, so what is typed in its boxes lives on
+  // the chat (planNote, sideDraft), like the main message box's draft.
   let box = $state<HTMLTextAreaElement>();
 
   function grow() {
@@ -171,8 +172,15 @@
   }
 
   // The side chat's own message box. Enter sends; Shift+Enter starts a new line.
-  let ask = $state("");
   let askBox = $state<HTMLTextAreaElement>();
+
+  // A box shown again with kept text is sized to fit it.
+  $effect(() => {
+    if (box) untrack(grow);
+  });
+  $effect(() => {
+    if (askBox) untrack(growAsk);
+  });
   const side = $derived(chat.panelView === "side" ? chat.side : null);
 
   function growAsk() {
@@ -184,9 +192,9 @@
   function askKey(e: KeyboardEvent) {
     if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
     e.preventDefault();
-    if (!side || !ask.trim()) return;
-    void side.send(ask);
-    ask = "";
+    if (!side || !chat.sideDraft.trim()) return;
+    void side.send(chat.sideDraft);
+    chat.sideDraft = "";
     queueMicrotask(growAsk);
   }
 
@@ -195,9 +203,9 @@
   function keepPlanning() {
     if (!plan) return;
     const edited = editedPlan();
-    const note = feedback.trim() || "Keep planning.";
+    const note = chat.planNote.trim() || "Keep planning.";
     void chat.answer(plan, "deny", edited ? `I edited the plan; here is my version:\n\n${edited}\n\n${note}` : note);
-    feedback = "";
+    chat.planNote = "";
   }
 </script>
 
@@ -218,7 +226,7 @@
         <!-- svelte-ignore a11y_autofocus -->
         <textarea
           bind:this={askBox}
-          bind:value={ask}
+          bind:value={chat.sideDraft}
           oninput={growAsk}
           onkeydown={askKey}
           rows="1"
@@ -257,7 +265,7 @@
           <span class="marker">&gt;</span>
           <textarea
             bind:this={box}
-            bind:value={feedback}
+            bind:value={chat.planNote}
             oninput={grow}
             rows="1"
             placeholder="what should change? (optional)"
