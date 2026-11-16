@@ -7,7 +7,6 @@
 // shows it, and keeps its screen and scrollback.
 
 import {
-  closeWindow,
   terminalAttach,
   terminalClose,
   terminalNew,
@@ -140,14 +139,6 @@ class Terminals {
     } catch {
       // Gone already.
     }
-  }
-
-  /** Cmd+W: a terminal with the keys closes its tab; otherwise the window closes. */
-  closeKey(project: string): void {
-    const inTerminal = document.activeElement?.closest(".terminal-host");
-    const tab = this.shown(project);
-    if (inTerminal && tab) void this.askClose(tab.id);
-    else void closeWindow().catch(() => {});
   }
 
   /** Whether the keys are in a terminal right now. */

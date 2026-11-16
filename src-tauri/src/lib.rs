@@ -88,7 +88,7 @@ async fn load_session(state: State<'_, AppState>, session_id: String) -> Result<
 /// Moves a chat to the trash.
 #[tauri::command]
 async fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    state.side.end(&session_id);
+    state.side.end_chat(&session_id);
     state.browsers.close(&session_id);
     let sessions = state.sessions.clone();
     sessions.delete(&session_id).await
@@ -175,12 +175,12 @@ async fn send_message(
         .await
 }
 
-/// Ask the chat's side chat something (`/btw`). Starts it as a copy of the
-/// chat on the first question.
+/// Ask one of a chat's side chats something. Starts it as a copy of the chat
+/// on its first question.
 #[tauri::command]
 async fn side_send(
     state: State<'_, AppState>,
-    chat_id: String,
+    side_id: String,
     project_path: String,
     model: Option<String>,
     effort: Option<String>,
@@ -195,18 +195,25 @@ async fn side_send(
     }
     state
         .side
-        .send(&chat_id, binary, &project_path, model, effort, &text, &message_id)
+        .send(&side_id, binary, &project_path, model, effort, &text, &message_id)
 }
 
 #[tauri::command]
-fn side_interrupt(state: State<'_, AppState>, chat_id: String) -> Result<(), String> {
-    state.side.interrupt(&chat_id)
+fn side_interrupt(state: State<'_, AppState>, side_id: String) -> Result<(), String> {
+    state.side.interrupt(&side_id)
 }
 
-/// End the chat's side chat and forget it.
+/// End a side chat and forget it.
 #[tauri::command]
-async fn side_end(state: State<'_, AppState>, chat_id: String) -> Result<(), String> {
-    state.side.end(&chat_id);
+async fn side_end(state: State<'_, AppState>, side_id: String) -> Result<(), String> {
+    state.side.end(&side_id);
+    Ok(())
+}
+
+/// A fresh window: end the side chats an earlier one left running.
+#[tauri::command]
+async fn side_end_all(state: State<'_, AppState>) -> Result<(), String> {
+    state.side.end_all();
     Ok(())
 }
 
@@ -433,17 +440,34 @@ async fn write_doc(state: State<'_, AppState>, path: String, text: String) -> Re
         .map_err(|e| e.to_string())?
 }
 
-/// The user typed an address in a chat's browser. Makes the browser if needed.
+/// The user typed an address in a chat's browser: into `tab`, else the tab
+/// on show, else a new tab.
 #[tauri::command]
-async fn browser_navigate(state: State<'_, AppState>, chat_id: String, url: String) -> Result<(), String> {
+async fn browser_navigate(state: State<'_, AppState>, chat_id: String, tab: Option<String>, url: String) -> Result<(), String> {
     let browsers = state.browsers.clone();
-    browsers.navigate(&chat_id, &url).await
+    browsers.navigate(&chat_id, tab.as_deref(), &url).await
 }
 
 #[tauri::command]
-async fn browser_reload(state: State<'_, AppState>, chat_id: String) -> Result<(), String> {
+async fn browser_reload(state: State<'_, AppState>, chat_id: String, tab: String) -> Result<(), String> {
     let browsers = state.browsers.clone();
-    browsers.reload(&chat_id).await
+    browsers.reload(&chat_id, &tab).await
+}
+
+/// A new empty tab in a chat's browser, shown. Returns its id.
+#[tauri::command]
+fn browser_new_tab(state: State<'_, AppState>, chat_id: String) -> String {
+    state.browsers.new_tab(&chat_id)
+}
+
+#[tauri::command]
+fn browser_pick(state: State<'_, AppState>, chat_id: String, tab: String) -> Result<(), String> {
+    state.browsers.pick(&chat_id, &tab)
+}
+
+#[tauri::command]
+fn browser_close_tab(state: State<'_, AppState>, chat_id: String, tab: String) -> Result<(), String> {
+    state.browsers.close_tab(&chat_id, &tab)
 }
 
 /// Where the side panel's body is, in the window's logical pixels, and whether
@@ -458,20 +482,17 @@ fn browser_close(state: State<'_, AppState>, chat_id: String) {
     state.browsers.close(&chat_id);
 }
 
-/// What a chat's browser shows, if it has one: for a window that reloaded.
+/// A chat's browser tabs and the one on show: for a chat the window loads later.
 #[derive(serde::Serialize)]
-struct BrowserInfo {
-    url: String,
-    title: String,
-    loading: bool,
+struct BrowserTabs {
+    tabs: Vec<events::BrowserTab>,
+    shown: Option<String>,
 }
 
 #[tauri::command]
-fn browser_current(state: State<'_, AppState>, chat_id: String) -> Option<BrowserInfo> {
-    state
-        .browsers
-        .current(&chat_id)
-        .map(|(url, title, loading)| BrowserInfo { url, title, loading })
+fn browser_current(state: State<'_, AppState>, chat_id: String) -> BrowserTabs {
+    let (tabs, shown) = state.browsers.current(&chat_id);
+    BrowserTabs { tabs, shown }
 }
 
 /// A project's terminal tabs, in order.
@@ -671,7 +692,13 @@ fn app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wr
                 app,
                 "File",
                 true,
-                &[&MenuItem::with_id(app, CLOSE_KEY, "Close Window", true, Some("CmdOrCtrl+W"))?],
+                &[
+                    &MenuItem::with_id(app, TAB_KEYS[0].0, "New Tab", true, Some("CmdOrCtrl+T"))?,
+                    &MenuItem::with_id(app, TAB_KEYS[1].0, "Close Tab or Window", true, Some("CmdOrCtrl+W"))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &MenuItem::with_id(app, TAB_KEYS[2].0, "Show Previous Tab", true, Some("CmdOrCtrl+Shift+["))?,
+                    &MenuItem::with_id(app, TAB_KEYS[3].0, "Show Next Tab", true, Some("CmdOrCtrl+Shift+]"))?,
+                ],
             )?,
             &Submenu::with_items(
                 app,
@@ -701,9 +728,14 @@ fn app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wr
     )
 }
 
-/// The menu item Cmd+W runs.
+/// The tab keys' menu items, and the action each sends to the window.
 #[cfg(target_os = "macos")]
-const CLOSE_KEY: &str = "close-key";
+const TAB_KEYS: [(&str, &str); 4] = [
+    ("tab-new", "new"),
+    ("tab-close", "close"),
+    ("tab-prev", "prev"),
+    ("tab-next", "next"),
+];
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -730,8 +762,11 @@ pub fn run() {
                 app.set_menu(app_menu(app.handle())?)?;
                 let out = out.clone();
                 app.on_menu_event(move |_, event| {
-                    if event.id() == CLOSE_KEY {
-                        out(Envelope { session_id: String::new(), event: AgentEvent::CloseKey {} });
+                    if let Some((_, action)) = TAB_KEYS.iter().find(|(id, _)| event.id() == *id) {
+                        out(Envelope {
+                            session_id: String::new(),
+                            event: AgentEvent::TabKey { action: action.to_string() },
+                        });
                     }
                 });
             }
@@ -739,7 +774,7 @@ pub fn run() {
             let agents = Agents::default();
             agents.add(agent::CLAUDE, claude.clone(), None);
             agents.add(agent::CURSOR, Arc::new(CursorAdapter), None);
-            let side = SideChats::new(claude, store.clone(), out.clone(), dir.join("notes"));
+            let side = SideChats::new(claude, store.clone(), out.clone(), dir.join("notes"), dir.join("side_copies.json"));
             let browsers = Browsers::new(app.handle().clone(), out.clone());
             let terminals = Terminals::new(out.clone(), store.clone());
             let sessions = SessionManager::new(agents.clone(), store.clone(), out, dir);
@@ -857,6 +892,7 @@ pub fn run() {
             side_send,
             side_interrupt,
             side_end,
+            side_end_all,
             close_session,
             read_doc,
             write_doc,
@@ -866,6 +902,9 @@ pub fn run() {
             browser_reload,
             browser_place,
             browser_close,
+            browser_new_tab,
+            browser_pick,
+            browser_close_tab,
             browser_current,
             terminal_tabs,
             terminal_new,

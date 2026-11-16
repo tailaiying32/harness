@@ -251,23 +251,33 @@ pub enum AgentEvent {
         request_id: String,
         plan: String,
     },
-    /// The chat's side-panel browser: what it shows. Not saved.
-    BrowserState {
-        url: String,
-        title: String,
-        loading: bool,
+    /// The chat's side-panel browser: every tab, and the one on show. Sent
+    /// whole on every change; an empty list means the browser closed. Not saved.
+    BrowserTabs {
+        tabs: Vec<BrowserTab>,
+        shown: Option<String>,
     },
-    /// The chat's browser was closed. Not saved.
-    BrowserClosed {},
     /// A project's terminal tabs changed: one opened, closed, or what runs in
     /// it changed. Sent with an empty session ID. Not saved.
     TerminalTabs {
         project: String,
         tabs: Vec<crate::terminal::TabInfo>,
     },
-    /// Cmd+W was pressed: the window closes a terminal tab if one has focus,
-    /// or else closes itself. Sent with an empty session ID. Not saved.
-    CloseKey {},
+    /// A tab key from the Mac menu: Cmd+T ("new"), Cmd+W ("close"), Cmd+Shift+[
+    /// ("prev") or Cmd+Shift+] ("next"). The window applies it to the panel
+    /// view that has the keys; Cmd+W with none closes the window. Menu keys
+    /// arrive even while a browser page holds the keys. Sent with an empty
+    /// session ID. Not saved.
+    TabKey { action: String },
+}
+
+/// One tab of a chat's browser. `url` is empty for a new tab with no page yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BrowserTab {
+    pub id: String,
+    pub url: String,
+    pub title: String,
+    pub loading: bool,
 }
 
 impl AgentEvent {
@@ -284,10 +294,9 @@ impl AgentEvent {
                 | AgentEvent::TaskProgress { .. }
                 | AgentEvent::TitleChanged { .. }
                 | AgentEvent::PrsChanged { .. }
-                | AgentEvent::BrowserState { .. }
-                | AgentEvent::BrowserClosed { .. }
+                | AgentEvent::BrowserTabs { .. }
                 | AgentEvent::TerminalTabs { .. }
-                | AgentEvent::CloseKey { .. }
+                | AgentEvent::TabKey { .. }
         )
     }
 

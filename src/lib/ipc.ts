@@ -28,6 +28,9 @@ export const CLAUDE: AgentId = "claude-code";
 export const CURSOR: AgentId = "cursor";
 export const agentLabel = (agent: string) => (agent === CURSOR ? "Cursor" : "Claude Code");
 
+/** A tab key from the Mac menu (or the keyboard elsewhere): Cmd+T, Cmd+W, Cmd+Shift+[ and ]. */
+export type TabAction = "new" | "close" | "prev" | "next";
+
 export type AgentEvent =
   | { kind: "session_started"; agent_session_id: string; model: string | null; mode: string | null }
   | { kind: "status"; state: SessionState }
@@ -90,10 +93,9 @@ export type AgentEvent =
   | { kind: "worktree_changed"; status: WorktreeStatus; branch: string | null }
   | { kind: "prs_changed"; prs: PrInfo[] }
   | { kind: "plan_edited"; request_id: string; plan: string }
-  | { kind: "browser_state"; url: string; title: string; loading: boolean }
-  | { kind: "browser_closed" }
+  | { kind: "browser_tabs"; tabs: BrowserTab[]; shown: string | null }
   | { kind: "terminal_tabs"; project: string; tabs: TerminalTab[] }
-  | { kind: "close_key" };
+  | { kind: "tab_key"; action: TabAction };
 
 /** One command or agent running in the background. `kind` is the agent's own word, e.g. "local_bash". */
 export type BackgroundTask = { id: string; kind: string; description: string };
@@ -216,18 +218,23 @@ export const writeNotes = (chatId: string, text: string) => invoke<void>("write_
 
 export const interrupt = (sessionId: string) => invoke<void>("interrupt", { sessionId });
 
-/** Ask a chat's side chat something. Starts it as a copy of the chat on the first question. */
+/**
+ * Ask one of a chat's side chats something. `sideId` is `<chat id>#side-<tab>`.
+ * Starts it as a copy of the chat on its first question.
+ */
 export const sideSend = (
-  chatId: string,
+  sideId: string,
   projectPath: string,
   model: string,
   effort: string,
   text: string,
   messageId: string,
-) => invoke<void>("side_send", { chatId, projectPath, model, effort, text, messageId });
-export const sideInterrupt = (chatId: string) => invoke<void>("side_interrupt", { chatId });
-/** End a chat's side chat and forget it. */
-export const sideEnd = (chatId: string) => invoke<void>("side_end", { chatId });
+) => invoke<void>("side_send", { sideId, projectPath, model, effort, text, messageId });
+export const sideInterrupt = (sideId: string) => invoke<void>("side_interrupt", { sideId });
+/** End a side chat and forget it. */
+export const sideEnd = (sideId: string) => invoke<void>("side_end", { sideId });
+/** A fresh window: end the side chats an earlier one left running. */
+export const sideEndAll = () => invoke<void>("side_end_all");
 
 export const setMode = (sessionId: string, mode: Mode) => invoke<void>("set_mode", { sessionId, mode });
 
@@ -353,21 +360,28 @@ export const readDoc = (path: string) => invoke<string>("read_doc", { path });
 /** Saves the user's edit to a markdown file the panel has read. */
 export const writeDoc = (path: string, text: string) => invoke<void>("write_doc", { path, text });
 
-// ---- The side panel's browser (one per chat, localhost pages only) ----
+// ---- The side panel's browser (tabs per chat, localhost pages only) ----
 
-/** What a chat's browser shows. */
-export type BrowserInfo = { url: string; title: string; loading: boolean };
+/** One tab of a chat's browser. `url` is "" for a new tab with no page yet. */
+export type BrowserTab = { id: string; url: string; title: string; loading: boolean };
 /** Where the panel's body is, in CSS pixels from the window's top left. */
 export type BrowserRect = { x: number; y: number; width: number; height: number };
 
-/** Opens an address the user typed; makes the chat's browser if needed. */
-export const browserNavigate = (chatId: string, url: string) => invoke<void>("browser_navigate", { chatId, url });
-export const browserReload = (chatId: string) => invoke<void>("browser_reload", { chatId });
+/** Opens an address the user typed: in `tab`, else the tab on show, else a new tab. */
+export const browserNavigate = (chatId: string, tab: string | null, url: string) =>
+  invoke<void>("browser_navigate", { chatId, tab, url });
+export const browserReload = (chatId: string, tab: string) => invoke<void>("browser_reload", { chatId, tab });
+/** A new empty tab, shown. Returns its id. */
+export const browserNewTab = (chatId: string) => invoke<string>("browser_new_tab", { chatId });
+export const browserPick = (chatId: string, tab: string) => invoke<void>("browser_pick", { chatId, tab });
+export const browserCloseTab = (chatId: string, tab: string) => invoke<void>("browser_close_tab", { chatId, tab });
 /** Puts the browser over the panel's body, or parks it out of sight. */
 export const browserPlace = (chatId: string, rect: BrowserRect, visible: boolean) =>
   invoke<void>("browser_place", { chatId, rect, visible });
+/** Closes all of a chat's tabs. */
 export const browserClose = (chatId: string) => invoke<void>("browser_close", { chatId });
-export const browserCurrent = (chatId: string) => invoke<BrowserInfo | null>("browser_current", { chatId });
+export const browserCurrent = (chatId: string) =>
+  invoke<{ tabs: BrowserTab[]; shown: string | null }>("browser_current", { chatId });
 
 // ---- The side panel's terminal (tabs belong to a project) ----
 

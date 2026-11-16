@@ -1,10 +1,11 @@
-//! The side panel's browser: one web view per chat, for localhost pages, that
+//! The side panel's browser: localhost pages in tabs, several per chat, that
 //! both the user and the agent use. The agent drives it through tools (see
 //! `tools()` and `call()`); nothing here knows which agent that is.
 //!
-//! The page is a second web view the main window holds, placed over the side
-//! panel's body. When it isn't on screen it is parked off to the side at the
-//! same size, so what the agent reads and sees matches what the user would.
+//! Each page is a web view the main window holds. The tab on show is placed
+//! over the side panel's body; every other tab, and every tab while the
+//! panel shows something else, is parked off to the side at the same size,
+//! so what the agent reads and sees matches what the user would.
 //!
 //! The agent's actions run as scripts inside the page (`BRIDGE_JS`), started
 //! with `eval` and read back with `eval_with_callback`. The page gets no way to
@@ -19,7 +20,7 @@ use tauri::webview::{PageLoadEvent, WebviewBuilder};
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Webview, WebviewUrl};
 use tokio::sync::oneshot;
 
-use crate::events::{AgentEvent, Envelope};
+use crate::events::{AgentEvent, BrowserTab, Envelope};
 use crate::sessions::Out;
 
 /// Name the agent knows the browser's tools by.
@@ -28,8 +29,10 @@ pub const SERVER: &str = "harness_browser";
 /// A line for the agent's instructions.
 pub const INSTRUCTION: &str = "This app has a browser in its side panel for localhost pages. To \
 check a web UI you are building, use the harness_browser tools (open, read, click, type, console, \
-screenshot, resize); the user sees the same page. The panel is narrow, so pages show their \
-small-screen layout; use resize (e.g. 1440 x 900) to check the desktop layout.";
+screenshot, resize, tabs, close); the user sees the same pages. It has tabs: open loads into the \
+tab on show unless you ask for a new one, and every tool takes an optional tab id (see tabs). The \
+panel is narrow, so pages show their small-screen layout; use resize (e.g. 1440 x 900) to check \
+the desktop layout.";
 
 /// How long an action may take before it is given up.
 const ACTION_WAIT: Duration = Duration::from_secs(15);
@@ -40,10 +43,10 @@ const LOAD_WAIT: Duration = Duration::from_secs(20);
 const KEYS_POLL: Duration = Duration::from_millis(50);
 /// After a click: how long to watch for a page load it started.
 const CLICK_SETTLE: Duration = Duration::from_millis(400);
-/// Where a hidden browser is parked: far left of the window, out of sight.
+/// Where a hidden page is parked: far left of the window, out of sight.
 const PARK_X: f64 = -20_000.0;
-/// How long a browser may sit off screen and unused before its page is put
-/// away (`HARNESS_BROWSER_IDLE_SECONDS` overrides it, for tests).
+/// How long a page may sit off screen and unused before it is put away
+/// (`HARNESS_BROWSER_IDLE_SECONDS` overrides it, for tests).
 const PUT_AWAY_AFTER: Duration = Duration::from_secs(10 * 60);
 /// How often put-away is checked.
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
@@ -53,23 +56,46 @@ const MAX_SIDE: f64 = 3840.0;
 /// Longest image edge sent to the agent, in pixels (larger ones are shrunk by it anyway).
 const SHOT_MAX_EDGE: f64 = 1568.0;
 
+/// The `tab` every tool but `tabs` takes.
+fn tab_param() -> Value {
+    json!({ "type": "string", "description": "Tab id from tabs; default: the tab on show" })
+}
+
 /// The tools, as MCP tool definitions.
 pub fn tools() -> Value {
-    let none = json!({ "type": "object", "properties": {} });
+    let only_tab = json!({ "type": "object", "properties": { "tab": tab_param() } });
     json!([
         {
             "name": "open",
-            "description": "Open a localhost page in the side panel's browser (e.g. http://localhost:5173) and wait for it to load. Only localhost, 127.0.0.1 and [::1] are allowed. Opening the same address again reloads it.",
+            "description": "Open a localhost page in the side panel's browser (e.g. http://localhost:5173) and wait for it to load. Only localhost, 127.0.0.1 and [::1] are allowed. Loads into the tab on show (or the tab given), replacing its page; set new_tab to keep that page and open another tab, which then is the one on show. Says which tab it used. Opening the same address again reloads it.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "url": { "type": "string", "description": "Address, e.g. localhost:5173/settings" } },
+                "properties": {
+                    "url": { "type": "string", "description": "Address, e.g. localhost:5173/settings" },
+                    "new_tab": { "type": "boolean", "description": "Open in a new tab instead of replacing a page" },
+                    "tab": tab_param(),
+                },
                 "required": ["url"],
             },
         },
         {
+            "name": "tabs",
+            "description": "List the browser's tabs: each one's id, title and address, and which is on show. Pass an id as `tab` to any other tool to work in that tab.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+        {
+            "name": "close",
+            "description": "Close a browser tab and its page.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "tab": { "type": "string", "description": "Tab id from tabs" } },
+                "required": ["tab"],
+            },
+        },
+        {
             "name": "read",
-            "description": "Read the open page: its address, title, visible text, and a numbered list of the buttons, links and fields on it, each with a selector to pass to click or type.",
-            "inputSchema": none,
+            "description": "Read a page: its address, title, visible text, and a numbered list of the buttons, links and fields on it, each with a selector to pass to click or type.",
+            "inputSchema": only_tab,
         },
         {
             "name": "click",
@@ -79,6 +105,7 @@ pub fn tools() -> Value {
                 "properties": {
                     "selector": { "type": "string" },
                     "text": { "type": "string", "description": "Visible text or label of the element, used when no selector is given" },
+                    "tab": tab_param(),
                 },
             },
         },
@@ -91,37 +118,39 @@ pub fn tools() -> Value {
                     "selector": { "type": "string" },
                     "text": { "type": "string" },
                     "submit": { "type": "boolean" },
+                    "tab": tab_param(),
                 },
                 "required": ["selector", "text"],
             },
         },
         {
             "name": "console",
-            "description": "Errors and warnings the page logged (console.error/warn, uncaught errors, failed loads of scripts and images) since the last open or console call. Kept across reloads.",
-            "inputSchema": none,
+            "description": "Errors and warnings a page logged (console.error/warn, uncaught errors, failed loads of scripts and images) since the last open or console call. Kept across reloads.",
+            "inputSchema": only_tab,
         },
         {
             "name": "run",
-            "description": "Run JavaScript in the page and return its result as JSON. An expression is returned as is; a function body needs `return`. Can be async (await).",
+            "description": "Run JavaScript in a page and return its result as JSON. An expression is returned as is; a function body needs `return`. Can be async (await).",
             "inputSchema": {
                 "type": "object",
-                "properties": { "script": { "type": "string" } },
+                "properties": { "script": { "type": "string" }, "tab": tab_param() },
                 "required": ["script"],
             },
         },
         {
             "name": "screenshot",
-            "description": "A picture of the page at its full layout size (after resize: the size asked for, not the shrunk view in the panel), to check how the UI looks.",
-            "inputSchema": none,
+            "description": "A picture of a page at its full layout size (after resize: the size asked for, not the shrunk view in the panel), to check how the UI looks.",
+            "inputSchema": only_tab,
         },
         {
             "name": "resize",
-            "description": "Set the page's window size in CSS pixels, like resizing a browser window: the page lays out at exactly this size (window.innerWidth/innerHeight), and the side panel shows it shrunk to fit. Screenshots come out at this size. E.g. 1440 x 900 for desktop, 390 x 844 for a phone. Stays until changed, across loads. Omit height to fill the panel's height; omit width (or 0) to go back to the panel's own size.",
+            "description": "Set a page's window size in CSS pixels, like resizing a browser window: the page lays out at exactly this size (window.innerWidth/innerHeight), and the side panel shows it shrunk to fit. Screenshots come out at this size. E.g. 1440 x 900 for desktop, 390 x 844 for a phone. Stays with the tab until changed, across loads. Omit height to fill the panel's height; omit width (or 0) to go back to the panel's own size.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "width": { "type": "number", "description": "Window width in CSS pixels, e.g. 1440" },
                     "height": { "type": "number", "description": "Window height in CSS pixels, e.g. 900" },
+                    "tab": tab_param(),
                 },
             },
         },
@@ -171,6 +200,72 @@ pub struct Rect {
     pub height: f64,
 }
 
+/// One tab's page, by chat and tab id.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Key {
+    chat: String,
+    tab: String,
+}
+
+impl Key {
+    fn new(chat: &str, tab: &str) -> Self {
+        Self { chat: chat.to_string(), tab: tab.to_string() }
+    }
+}
+
+/// A chat's tabs, in order, and the one on show. A tab may have no page yet
+/// (a new tab before an address is typed) or have it put away.
+#[derive(Default, Debug)]
+struct Tabs {
+    order: Vec<String>,
+    shown: Option<String>,
+    /// Tab ids are counted per chat: "1", "2", ...
+    next: u64,
+}
+
+impl Tabs {
+    /// Adds a tab at the end and shows it.
+    fn add(&mut self) -> String {
+        self.next += 1;
+        let id = self.next.to_string();
+        self.order.push(id.clone());
+        self.shown = Some(id.clone());
+        id
+    }
+
+    /// The tab on show: the one picked, else the newest.
+    fn shown(&self) -> Option<&str> {
+        self.shown
+            .as_deref()
+            .filter(|id| self.order.iter().any(|t| t == id))
+            .or(self.order.last().map(String::as_str))
+    }
+
+    /// Takes a tab out. If it was on show, the one now in its place (or the
+    /// last) shows instead. False if there was no such tab.
+    fn remove(&mut self, id: &str) -> bool {
+        let Some(at) = self.order.iter().position(|t| t == id) else {
+            return false;
+        };
+        let was_shown = self.shown() == Some(id);
+        self.order.remove(at);
+        if was_shown {
+            self.shown = self.order.get(at.min(self.order.len().saturating_sub(1))).cloned();
+        }
+        true
+    }
+
+    /// The tab a tool works in: the one named, else the one on show.
+    fn resolve(&self, asked: Option<&str>) -> Result<String, String> {
+        match asked {
+            Some(id) if self.order.iter().any(|t| t == id) => Ok(id.to_string()),
+            Some(id) if self.order.is_empty() => Err(format!("There is no tab {id}: no page is open; call open first.")),
+            Some(id) => Err(format!("There is no tab {id}. The tabs are: {}.", self.order.join(", "))),
+            None => self.shown().map(str::to_string).ok_or_else(|| "No page is open; call open first.".to_string()),
+        }
+    }
+}
+
 struct Page {
     webview: Webview,
     /// Last time the agent used it or the user had it on screen.
@@ -185,8 +280,10 @@ struct Page {
     view: usize,
 }
 
-/// Where the window wants a chat's browser. Kept apart from the page, so it
-/// holds before the page is made and while it is put away.
+/// Where a page goes: the panel body the window gave for its chat, whether
+/// it is the one on show there, and the size the agent asked for it. Kept
+/// apart from the page, so it holds before the page is made and while it is
+/// put away.
 #[derive(Clone, Copy, Default)]
 struct Place {
     /// The panel body; None until the window has placed it.
@@ -279,9 +376,13 @@ struct Away {
 struct Inner {
     app: AppHandle,
     out: Out,
-    pages: Mutex<HashMap<String, Page>>,
+    tabs: Mutex<HashMap<String, Tabs>>,
+    pages: Mutex<HashMap<Key, Page>>,
+    /// By chat: where the window wants its pages (no size; see `place_of`).
     places: Mutex<HashMap<String, Place>>,
-    away: Mutex<HashMap<String, Away>>,
+    /// Window sizes the agent asked for, by tab.
+    sizes: Mutex<HashMap<Key, Size>>,
+    away: Mutex<HashMap<Key, Away>>,
     /// Numbers web view labels, which can't hold every character a chat ID may.
     next: Mutex<u64>,
     /// Numbers actions run in pages.
@@ -303,8 +404,10 @@ impl Browsers {
         let browsers = Self(Arc::new(Inner {
             app,
             out,
+            tabs: Mutex::default(),
             pages: Mutex::default(),
             places: Mutex::default(),
+            sizes: Mutex::default(),
             away: Mutex::default(),
             next: Mutex::new(0),
             next_action: Mutex::new(0),
@@ -334,34 +437,44 @@ impl Browsers {
         browsers
     }
 
-    /// Closes the pages of browsers off screen and unused for `after`, keeping
-    /// their address: going back to one (the user, or the agent's next tool
-    /// call) loads it again. The window isn't told; its tab and address stay.
-    fn put_away_unused(&self, after: Duration) {
+    /// The tab on show in each chat whose panel shows its browser.
+    fn on_screen(&self) -> Vec<Key> {
         let visible: Vec<String> = {
             let places = self.0.places.lock().unwrap();
             places.iter().filter(|(_, p)| p.visible).map(|(chat, _)| chat.clone()).collect()
         };
-        let stale: Vec<(String, Page)> = {
+        let tabs = self.0.tabs.lock().unwrap();
+        visible
+            .into_iter()
+            .filter_map(|chat| tabs.get(&chat).and_then(Tabs::shown).map(|tab| Key::new(&chat, tab)))
+            .collect()
+    }
+
+    /// Closes pages off screen and unused for `after`, keeping their address:
+    /// going back to one (the user, or the agent's next tool call in it)
+    /// loads it again. The window isn't told; its tab and address stay.
+    fn put_away_unused(&self, after: Duration) {
+        let on_screen = self.on_screen();
+        let stale: Vec<(Key, Page)> = {
             let mut pages = self.0.pages.lock().unwrap();
             let now = Instant::now();
-            for chat in &visible {
-                if let Some(page) = pages.get_mut(chat) {
+            for key in &on_screen {
+                if let Some(page) = pages.get_mut(key) {
                     page.used = now;
                 }
             }
-            let chats: Vec<String> = pages
+            let keys: Vec<Key> = pages
                 .iter()
                 .filter(|(_, p)| !p.loading && p.load_waiters.is_empty() && now.duration_since(p.used) >= after)
-                .map(|(chat, _)| chat.clone())
+                .map(|(key, _)| key.clone())
                 .collect();
-            chats.into_iter().filter_map(|c| pages.remove(&c).map(|p| (c, p))).collect()
+            keys.into_iter().filter_map(|k| pages.remove(&k).map(|p| (k, p))).collect()
         };
         let mut away = self.0.away.lock().unwrap();
-        for (chat, page) in stale {
+        for (key, page) in stale {
             let _ = page.webview.close();
             away.insert(
-                chat,
+                key,
                 Away {
                     url: page.url,
                     title: page.title,
@@ -371,57 +484,105 @@ impl Browsers {
     }
 
     /// Brings a put-away page back, waiting for it to load when `wait` is set.
-    /// False if the chat had nothing put away.
-    async fn bring_back(&self, chat: &str, wait: bool) -> Result<bool, String> {
-        let Some(away) = self.0.away.lock().unwrap().remove(chat) else {
+    /// False if the tab had nothing put away.
+    async fn bring_back(&self, key: &Key, wait: bool) -> Result<bool, String> {
+        let Some(away) = self.0.away.lock().unwrap().remove(key) else {
             return Ok(false);
         };
         let url = tauri::Url::parse(&away.url).map_err(|e| e.to_string())?;
-        self.load(chat, url, wait).await?;
+        self.load(key, url, wait).await?;
         Ok(true)
     }
 
     /// The page is in use now.
-    fn touch(&self, chat: &str) {
-        if let Some(page) = self.0.pages.lock().unwrap().get_mut(chat) {
+    fn touch(&self, key: &Key) {
+        if let Some(page) = self.0.pages.lock().unwrap().get_mut(key) {
             page.used = Instant::now();
         }
     }
 
-    fn send(&self, chat: &str, event: AgentEvent) {
+    /// What the window shows of a chat's browser: every tab, and the one on show.
+    fn tab_list(&self, chat: &str) -> (Vec<BrowserTab>, Option<String>) {
+        let (order, shown) = {
+            let tabs = self.0.tabs.lock().unwrap();
+            match tabs.get(chat) {
+                Some(t) => (t.order.clone(), t.shown().map(str::to_string)),
+                None => return (Vec::new(), None),
+            }
+        };
+        let pages = self.0.pages.lock().unwrap();
+        let away = self.0.away.lock().unwrap();
+        let list = order
+            .into_iter()
+            .map(|id| {
+                let key = Key::new(chat, &id);
+                let (url, title, loading) = match (pages.get(&key), away.get(&key)) {
+                    (Some(p), _) => (p.url.clone(), p.title.clone(), p.loading),
+                    (None, Some(a)) => (a.url.clone(), a.title.clone(), false),
+                    (None, None) => (String::new(), String::new(), false),
+                };
+                BrowserTab { id, url, title, loading }
+            })
+            .collect();
+        (list, shown)
+    }
+
+    /// Tells the window what the chat's browser now holds.
+    fn tabs_event(&self, chat: &str) {
+        let (tabs, shown) = self.tab_list(chat);
         (self.0.out)(Envelope {
             session_id: chat.to_string(),
-            event,
+            event: AgentEvent::BrowserTabs { tabs, shown },
         });
     }
 
-    fn state_event(&self, chat: &str) {
-        let event = {
-            let pages = self.0.pages.lock().unwrap();
-            let Some(page) = pages.get(chat) else { return };
-            AgentEvent::BrowserState {
-                url: page.url.clone(),
-                title: page.title.clone(),
-                loading: page.loading,
-            }
-        };
-        self.send(chat, event);
+    /// Where a tab's page goes: its chat's panel, if it is the tab on show,
+    /// at the size the agent asked for it.
+    fn place_of(&self, key: &Key) -> Place {
+        let mut place = self.0.places.lock().unwrap().get(&key.chat).copied().unwrap_or_default();
+        let shown = self.0.tabs.lock().unwrap().get(&key.chat).and_then(|t| t.shown().map(str::to_string));
+        place.visible = place.visible && shown.as_deref() == Some(key.tab.as_str());
+        place.size = self.0.sizes.lock().unwrap().get(key).copied();
+        place
     }
 
-    /// Gives the chat's page a window size in CSS pixels (no width: the
-    /// panel's own size), shown shrunk to fit the panel. With a page open,
-    /// waits for it to take the new size and redraw, so a screenshot right
-    /// after shows it, and says the size the page measures.
-    async fn resize(&self, chat: &str, width: Option<f64>, height: Option<f64>) -> Result<String, String> {
+    /// Puts each of a chat's pages where it goes: the one on show over the
+    /// panel, the rest parked. A put-away page coming on screen is loaded again.
+    fn arrange(&self, chat: &str) {
+        let order = self.0.tabs.lock().unwrap().get(chat).map(|t| t.order.clone()).unwrap_or_default();
+        for tab in order {
+            let key = Key::new(chat, &tab);
+            let place = self.place_of(&key);
+            if let Some(webview) = self.webview(&key) {
+                apply_place(&webview, place);
+                if place.visible {
+                    self.touch(&key);
+                }
+            } else if place.visible && self.0.away.lock().unwrap().contains_key(&key) {
+                let browsers = self.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = browsers.bring_back(&key, false).await;
+                });
+            }
+        }
+    }
+
+    /// Gives a tab's page a window size in CSS pixels (no width: the panel's
+    /// own size), shown shrunk to fit the panel. With a page open, waits for
+    /// it to take the new size and redraw, so a screenshot right after shows
+    /// it, and says the size the page measures.
+    async fn resize(&self, key: &Key, width: Option<f64>, height: Option<f64>) -> Result<String, String> {
         let side = |v: Option<f64>| v.filter(|v| *v > 0.0).map(|v| v.round().clamp(MIN_SIDE, MAX_SIDE));
         let size = side(width).map(|width| Size { width, height: side(height) });
-        let place = {
-            let mut places = self.0.places.lock().unwrap();
-            let place = places.entry(chat.to_string()).or_default();
-            place.size = size;
-            *place
-        };
-        if let Some(webview) = self.webview(chat) {
+        {
+            let mut sizes = self.0.sizes.lock().unwrap();
+            match size {
+                Some(size) => sizes.insert(key.clone(), size),
+                None => sizes.remove(key),
+            };
+        }
+        let place = self.place_of(key);
+        if let Some(webview) = self.webview(key) {
             apply_place(&webview, place);
         }
         let Some(frame) = place.frame() else {
@@ -434,9 +595,9 @@ impl Browsers {
             });
         };
         let (mut w, mut h) = frame.layout();
-        if self.webview(chat).is_some() {
+        if self.webview(key).is_some() {
             let want = json!({ "width": w, "height": if size.is_some_and(|s| s.height.is_some()) { h } else { 0.0 } });
-            if let Ok(Value::Array(got)) = self.page_action(chat, "settle", &want).await {
+            if let Ok(Value::Array(got)) = self.page_action(key, "settle", &want).await {
                 if let [Some(gw), Some(gh)] = [got.first().and_then(Value::as_f64), got.get(1).and_then(Value::as_f64)] {
                     (w, h) = (gw, gh);
                 }
@@ -452,89 +613,152 @@ impl Browsers {
         })
     }
 
-    fn webview(&self, chat: &str) -> Option<Webview> {
-        self.0.pages.lock().unwrap().get(chat).map(|p| p.webview.clone())
+    fn webview(&self, key: &Key) -> Option<Webview> {
+        self.0.pages.lock().unwrap().get(key).map(|p| p.webview.clone())
+    }
+
+    /// Adds an empty tab to a chat's browser and shows it.
+    fn add_tab(&self, chat: &str) -> String {
+        let id = self.0.tabs.lock().unwrap().entry(chat.to_string()).or_default().add();
+        self.arrange(chat);
+        id
+    }
+
+    /// The tab a tool works in (see `Tabs::resolve`).
+    fn resolve(&self, chat: &str, asked: Option<&str>) -> Result<Key, String> {
+        let tabs = self.0.tabs.lock().unwrap();
+        let tab = match tabs.get(chat) {
+            Some(t) => t.resolve(asked)?,
+            None => Tabs::default().resolve(asked)?,
+        };
+        Ok(Key::new(chat, &tab))
     }
 
     // ---- Called by the window ----
 
-    /// The user typed an address. Makes the chat's browser if needed.
-    pub async fn navigate(&self, chat: &str, input: &str) -> Result<(), String> {
-        let url = local_url(input)?;
-        self.load(chat, url, false).await.map(|_| ())
+    /// A new empty tab, shown; the user types its address next.
+    pub fn new_tab(&self, chat: &str) -> String {
+        let id = self.add_tab(chat);
+        self.tabs_event(chat);
+        id
     }
 
-    pub async fn reload(&self, chat: &str) -> Result<(), String> {
-        if self.bring_back(chat, false).await? {
+    /// The user typed an address: into the tab given, else the one on show,
+    /// else a new one.
+    pub async fn navigate(&self, chat: &str, tab: Option<&str>, input: &str) -> Result<(), String> {
+        let url = local_url(input)?;
+        let key = match tab {
+            Some(tab) => self.resolve(chat, Some(tab))?,
+            None => match self.resolve(chat, None) {
+                Ok(key) => key,
+                Err(_) => Key::new(chat, &self.add_tab(chat)),
+            },
+        };
+        self.load(&key, url, false).await.map(|_| ())
+    }
+
+    pub async fn reload(&self, chat: &str, tab: &str) -> Result<(), String> {
+        let key = self.resolve(chat, Some(tab))?;
+        if self.bring_back(&key, false).await? {
             return Ok(());
         }
-        let webview = self.webview(chat).ok_or("No page open")?;
-        self.touch(chat);
+        let webview = self.webview(&key).ok_or("No page open")?;
+        self.touch(&key);
         webview.reload().map_err(|e| e.to_string())
     }
 
-    /// Where the panel body is, and whether the browser should show there. A
-    /// put-away page shown again is loaded again.
+    /// The user picked a tab.
+    pub fn pick(&self, chat: &str, tab: &str) -> Result<(), String> {
+        {
+            let mut tabs = self.0.tabs.lock().unwrap();
+            let tabs = tabs.get_mut(chat).ok_or("No browser tabs")?;
+            if !tabs.order.iter().any(|t| t == tab) {
+                return Err(format!("There is no tab {tab}"));
+            }
+            tabs.shown = Some(tab.to_string());
+        }
+        self.arrange(chat);
+        self.tabs_event(chat);
+        Ok(())
+    }
+
+    /// Closes one tab and its page; the tab beside it shows instead.
+    pub fn close_tab(&self, chat: &str, tab: &str) -> Result<(), String> {
+        let key = Key::new(chat, tab);
+        {
+            let mut tabs = self.0.tabs.lock().unwrap();
+            let Some(list) = tabs.get_mut(chat) else {
+                return Err(format!("There is no tab {tab}"));
+            };
+            if !list.remove(tab) {
+                return Err(format!("There is no tab {tab}. The tabs are: {}.", list.order.join(", ")));
+            }
+            if list.order.is_empty() {
+                tabs.remove(chat);
+            }
+        }
+        let page = self.0.pages.lock().unwrap().remove(&key);
+        self.0.away.lock().unwrap().remove(&key);
+        self.0.sizes.lock().unwrap().remove(&key);
+        if let Some(page) = page {
+            let _ = page.webview.close();
+        }
+        self.arrange(chat);
+        self.tabs_event(chat);
+        Ok(())
+    }
+
+    /// Where the panel body is, and whether the browser shows there.
     pub fn place(&self, chat: &str, rect: Rect, visible: bool) {
-        let place = {
+        {
             let mut places = self.0.places.lock().unwrap();
             let place = places.entry(chat.to_string()).or_default();
             if rect.width > 0.0 && rect.height > 0.0 {
                 place.rect = Some(rect);
             }
             place.visible = visible;
-            *place
-        };
-        if let Some(webview) = self.webview(chat) {
-            apply_place(&webview, place);
-            if visible {
-                self.touch(chat);
-            }
-        } else if visible && self.0.away.lock().unwrap().contains_key(chat) {
-            let browsers = self.clone();
-            let chat = chat.to_string();
-            tauri::async_runtime::spawn(async move {
-                let _ = browsers.bring_back(&chat, false).await;
-            });
         }
+        self.arrange(chat);
     }
 
-    /// Closes the chat's browser, if it has one, put away or not.
+    /// Closes all of a chat's tabs, when the chat goes.
     pub fn close(&self, chat: &str) {
-        let page = self.0.pages.lock().unwrap().remove(chat);
-        let away = self.0.away.lock().unwrap().remove(chat);
+        let had = self.0.tabs.lock().unwrap().remove(chat).is_some();
         self.0.places.lock().unwrap().remove(chat);
-        if let Some(page) = &page {
+        self.0.sizes.lock().unwrap().retain(|k, _| k.chat != chat);
+        self.0.away.lock().unwrap().retain(|k, _| k.chat != chat);
+        let pages: Vec<Page> = {
+            let mut pages = self.0.pages.lock().unwrap();
+            let keys: Vec<Key> = pages.keys().filter(|k| k.chat == chat).cloned().collect();
+            keys.iter().filter_map(|k| pages.remove(k)).collect()
+        };
+        for page in &pages {
             let _ = page.webview.close();
         }
-        if page.is_some() || away.is_some() {
-            self.send(chat, AgentEvent::BrowserClosed {});
+        if had {
+            self.tabs_event(chat);
         }
     }
 
-    /// The chat's browser, if any (put away counts), for a chat the window loads later.
-    pub fn current(&self, chat: &str) -> Option<(String, String, bool)> {
-        if let Some(p) = self.0.pages.lock().unwrap().get(chat) {
-            return Some((p.url.clone(), p.title.clone(), p.loading));
-        }
-        let away = self.0.away.lock().unwrap();
-        away.get(chat).map(|a| (a.url.clone(), a.title.clone(), false))
+    /// The chat's tabs, for a chat the window loads later.
+    pub fn current(&self, chat: &str) -> (Vec<BrowserTab>, Option<String>) {
+        self.tab_list(chat)
     }
 
     // ---- Loading ----
 
-    /// Shows `url` in the chat's browser, making it first if needed, and waits
-    /// for the load when `wait` is set. Returns the page's address and title.
-    async fn load(&self, chat: &str, url: tauri::Url, wait: bool) -> Result<(String, String), String> {
+    /// Shows `url` in a tab, making its page first if needed, and waits for
+    /// the load when `wait` is set. Returns the page's address and title.
+    async fn load(&self, key: &Key, url: tauri::Url, wait: bool) -> Result<(String, String), String> {
         // A new address replaces whatever was put away.
-        self.0.away.lock().unwrap().remove(chat);
+        self.0.away.lock().unwrap().remove(key);
         let done = {
             let _guard = self.0.make_lock.lock().await;
             let (tx, rx) = oneshot::channel();
             let mut tx = Some(tx);
             let existing = {
                 let mut pages = self.0.pages.lock().unwrap();
-                match pages.get_mut(chat) {
+                match pages.get_mut(key) {
                     Some(page) => {
                         page.used = Instant::now();
                         page.load_waiters.extend(tx.take());
@@ -553,11 +777,11 @@ impl Browsers {
                         .ok();
                     webview.navigate(url.clone()).map_err(|e| e.to_string())?;
                 }
-                None => self.make(chat, url.clone(), tx.take().expect("unused")).await?,
+                None => self.make(key, url.clone(), tx.take().expect("unused")).await?,
             }
             rx
         };
-        self.state_event(chat);
+        self.tabs_event(&key.chat);
         if wait {
             match tokio::time::timeout(LOAD_WAIT, done).await {
                 Ok(_) => {}
@@ -565,12 +789,16 @@ impl Browsers {
             }
         }
         let pages = self.0.pages.lock().unwrap();
-        let page = pages.get(chat).ok_or("The browser was closed")?;
+        let page = pages.get(key).ok_or("The tab was closed")?;
         Ok((page.url.clone(), page.title.clone()))
     }
 
-    /// Makes a chat's browser showing `url`. `loaded` fires when the first load ends.
-    async fn make(&self, chat: &str, url: tauri::Url, loaded: oneshot::Sender<()>) -> Result<(), String> {
+    /// Makes a tab's page showing `url`. `loaded` fires when the first load ends.
+    async fn make(&self, key: &Key, url: tauri::Url, loaded: oneshot::Sender<()>) -> Result<(), String> {
+        // Closed meanwhile: nothing to make.
+        if !self.0.tabs.lock().unwrap().get(&key.chat).is_some_and(|t| t.order.contains(&key.tab)) {
+            return Err("The tab was closed".into());
+        }
         let window = self.0.app.get_window("main").ok_or("The main window is gone")?;
         let label = {
             let mut next = self.0.next.lock().unwrap();
@@ -578,7 +806,7 @@ impl Browsers {
             format!("browser-{}", *next)
         };
         let weak: Weak<Inner> = Arc::downgrade(&self.0);
-        let chat_id = chat.to_string();
+        let page_key = key.clone();
         let app = self.0.app.clone();
         // Starts blank: the page's scripts are set up before the first real load.
         let blank = tauri::Url::parse("about:blank").expect("valid");
@@ -597,7 +825,7 @@ impl Browsers {
             })
             .on_page_load(move |webview, payload| {
                 let Some(inner) = weak.upgrade() else { return };
-                Browsers(inner).page_loaded(&chat_id, webview, payload.url().to_string(), payload.event());
+                Browsers(inner).page_loaded(&page_key, webview, payload.url().to_string(), payload.event());
             });
 
         // Parked until the window says where the panel is.
@@ -634,7 +862,7 @@ impl Browsers {
         let view = 0;
 
         self.0.pages.lock().unwrap().insert(
-            chat.to_string(),
+            key.clone(),
             Page {
                 webview: webview.clone(),
                 used: Instant::now(),
@@ -646,22 +874,19 @@ impl Browsers {
             },
         );
         // Where the window last wanted it, if it said already.
-        let place = self.0.places.lock().unwrap().get(chat).copied();
-        if let Some(place) = place {
-            apply_place(&webview, place);
-        }
+        apply_place(&webview, self.place_of(key));
         webview.navigate(url).map_err(|e| e.to_string())?;
         Ok(())
     }
 
-    fn page_loaded(&self, chat: &str, webview: Webview, url: String, event: PageLoadEvent) {
+    fn page_loaded(&self, key: &Key, webview: Webview, url: String, event: PageLoadEvent) {
         // The blank page a browser starts on isn't news.
         if url == "about:blank" {
             return;
         }
         {
             let mut pages = self.0.pages.lock().unwrap();
-            let Some(page) = pages.get_mut(chat) else { return };
+            let Some(page) = pages.get_mut(key) else { return };
             page.url = url;
             match event {
                 PageLoadEvent::Started => page.loading = true,
@@ -669,25 +894,24 @@ impl Browsers {
             }
         }
         if let PageLoadEvent::Started = event {
-            self.state_event(chat);
+            self.tabs_event(&key.chat);
             return;
         }
         // Read the title, then tell the window and anyone waiting.
         let browsers = self.clone();
-        let chat_id = chat.to_string();
-        let chat = chat_id.clone();
+        let read_key = key.clone();
         let asked = webview.eval_with_callback("document.title", move |title| {
-            browsers.title_read(&chat, &serde_json::from_str::<String>(&title).unwrap_or_default());
+            browsers.title_read(&read_key, &serde_json::from_str::<String>(&title).unwrap_or_default());
         });
         if asked.is_err() {
-            self.title_read(&chat_id, "");
+            self.title_read(key, "");
         }
     }
 
-    fn title_read(&self, chat: &str, title: &str) {
+    fn title_read(&self, key: &Key, title: &str) {
         let waiters = {
             let mut pages = self.0.pages.lock().unwrap();
-            let Some(page) = pages.get_mut(chat) else { return };
+            let Some(page) = pages.get_mut(key) else { return };
             page.title = title.to_string();
             if page.loading {
                 Vec::new()
@@ -698,50 +922,80 @@ impl Browsers {
         for waiter in waiters {
             let _ = waiter.send(());
         }
-        self.state_event(chat);
+        self.tabs_event(&key.chat);
     }
 
     // ---- Tools ----
 
+    /// The `tabs` tool's answer.
+    fn tabs_text(&self, chat: &str) -> String {
+        let (list, shown) = self.tab_list(chat);
+        if list.is_empty() {
+            return "No tabs are open; call open to open a page.".into();
+        }
+        let on_screen = self.0.places.lock().unwrap().get(chat).is_some_and(|p| p.visible);
+        tabs_lines(&list, shown.as_deref(), on_screen)
+    }
+
     /// Runs one of the agent's tool calls. Returns MCP content items.
     pub async fn call(&self, chat: &str, tool: &str, args: &Value) -> Result<Vec<Value>, String> {
         let text = |s: String| Ok(vec![json!({ "type": "text", "text": s })]);
-        // A page put away while unused comes back for the agent's next look.
-        if tool != "open" {
-            self.bring_back(chat, true).await?;
-        }
-        self.touch(chat);
+        let asked = args["tab"].as_str().filter(|t| !t.trim().is_empty()).map(str::trim);
         match tool {
+            "tabs" => return text(self.tabs_text(chat)),
+            "close" => {
+                let tab = asked.ok_or("Say which tab to close (see tabs).")?;
+                self.close_tab(chat, tab)?;
+                return text(format!("Closed tab {tab}."));
+            }
             "open" => {
                 let url = local_url(args["url"].as_str().unwrap_or_default())?;
-                let (url, title) = self.load(chat, url, true).await?;
-                let errors = self.page_action(chat, "peekErrors", &json!({})).await.unwrap_or_default();
-                let mut out = format!("Opened {url}");
+                let key = if args["new_tab"].as_bool() == Some(true) && asked.is_none() {
+                    Key::new(chat, &self.add_tab(chat))
+                } else {
+                    match self.resolve(chat, asked) {
+                        Ok(key) => key,
+                        Err(e) if asked.is_some() => return Err(e),
+                        Err(_) => Key::new(chat, &self.add_tab(chat)),
+                    }
+                };
+                let (url, title) = self.load(&key, url, true).await?;
+                let errors = self.page_action(&key, "peekErrors", &json!({})).await.unwrap_or_default();
+                let mut out = format!("Opened {url} in tab {}", key.tab);
                 if !title.is_empty() {
                     out.push_str(&format!(" ({title})"));
                 }
                 if let Some(n) = errors.as_u64().filter(|n| *n > 0) {
                     out.push_str(&format!(". The page logged {n} error(s) or warning(s); see console."));
                 }
-                text(out)
+                return text(out);
             }
+            _ => {}
+        }
+        let key = self.resolve(chat, asked)?;
+        // A page put away while unused comes back for the agent's next look.
+        self.bring_back(&key, true).await?;
+        self.touch(&key);
+        match tool {
             "read" | "click" | "type" | "run" | "console" => {
-                if self.webview(chat).is_none() {
-                    return Err("No page is open; call open first.".into());
+                if self.webview(&key).is_none() {
+                    return Err(format!("Tab {} has no page yet; call open with tab {0}.", key.tab));
                 }
-                let value = self.page_action(chat, tool, args).await?;
+                let value = self.page_action(&key, tool, args).await?;
                 if tool == "click" {
-                    self.settle(chat).await;
+                    self.settle(&key).await;
                 }
                 text(match value {
                     Value::String(s) => s,
                     other => other.to_string(),
                 })
             }
-            "resize" => text(self.resize(chat, args["width"].as_f64(), args["height"].as_f64()).await?),
+            "resize" => text(self.resize(&key, args["width"].as_f64(), args["height"].as_f64()).await?),
             "screenshot" => {
-                let webview = self.webview(chat).ok_or("No page is open; call open first.")?;
-                let zoom = self.0.places.lock().unwrap().get(chat).map_or(1.0, Place::zoom);
+                let webview = self
+                    .webview(&key)
+                    .ok_or_else(|| format!("Tab {} has no page yet; call open with tab {0}.", key.tab))?;
+                let zoom = self.place_of(&key).zoom();
                 let png = screenshot(&webview, zoom).await?;
                 use base64::Engine;
                 let data = base64::engine::general_purpose::STANDARD.encode(png);
@@ -826,11 +1080,11 @@ impl Browsers {
     }
 
     /// After a click: if it started a page load, wait for it.
-    async fn settle(&self, chat: &str) {
+    async fn settle(&self, key: &Key) {
         tokio::time::sleep(CLICK_SETTLE).await;
         let rx = {
             let mut pages = self.0.pages.lock().unwrap();
-            let Some(page) = pages.get_mut(chat) else { return };
+            let Some(page) = pages.get_mut(key) else { return };
             if !page.loading {
                 return;
             }
@@ -841,9 +1095,9 @@ impl Browsers {
         let _ = tokio::time::timeout(LOAD_WAIT, rx).await;
     }
 
-    /// Runs one of `BRIDGE_JS`'s actions in the chat's page and returns its result.
-    async fn page_action(&self, chat: &str, op: &str, args: &Value) -> Result<Value, String> {
-        let webview = self.webview(chat).ok_or("No page is open; call open first.")?;
+    /// Runs one of `BRIDGE_JS`'s actions in a tab's page and returns its result.
+    async fn page_action(&self, key: &Key, op: &str, args: &Value) -> Result<Value, String> {
+        let webview = self.webview(key).ok_or("No page is open; call open first.")?;
         let id = {
             let mut next = self.0.next_action.lock().unwrap();
             *next += 1;
@@ -870,7 +1124,7 @@ impl Browsers {
                 return Err(format!("The page didn't answer in {} seconds.", ACTION_WAIT.as_secs()));
             }
             tokio::time::sleep(Duration::from_millis(60)).await;
-            let webview = self.webview(chat).ok_or("The browser was closed")?;
+            let webview = self.webview(key).ok_or("The tab was closed")?;
             reply = eval(
                 &webview,
                 format!("(window.__hb ? window.__hb.take({id}) : JSON.stringify({{done:true, ok:false, value:'The page changed before the action finished.'}}))"),
@@ -878,6 +1132,21 @@ impl Browsers {
             .await?;
         }
     }
+}
+
+/// The `tabs` tool's lines: id, title, address, and which is on show.
+fn tabs_lines(list: &[BrowserTab], shown: Option<&str>, on_screen: bool) -> String {
+    let mut out = String::new();
+    for tab in list {
+        let title = if tab.title.is_empty() { "(no title)" } else { tab.title.as_str() };
+        let url = if tab.url.is_empty() { "(empty)" } else { tab.url.as_str() };
+        out.push_str(&format!("{}  {title}  {url}", tab.id));
+        if shown == Some(tab.id.as_str()) {
+            out.push_str(if on_screen { ", on screen" } else { ", shown when the browser panel is open" });
+        }
+        out.push('\n');
+    }
+    out.trim_end().to_string()
 }
 
 fn put_away_after() -> Duration {
@@ -1370,5 +1639,68 @@ mod tests {
             assert!(tool["name"].is_string());
             assert_eq!(tool["inputSchema"]["type"], "object");
         }
+    }
+
+    #[test]
+    fn tabs_count_up_and_a_new_one_shows() {
+        let mut tabs = Tabs::default();
+        assert_eq!(tabs.add(), "1");
+        assert_eq!(tabs.add(), "2");
+        assert_eq!(tabs.shown(), Some("2"));
+        tabs.shown = Some("1".into());
+        assert_eq!(tabs.shown(), Some("1"));
+        // Ids aren't reused after a close.
+        tabs.remove("2");
+        assert_eq!(tabs.add(), "3");
+    }
+
+    #[test]
+    fn closing_the_tab_on_show_shows_the_one_beside_it() {
+        let mut tabs = Tabs::default();
+        for _ in 0..3 {
+            tabs.add();
+        }
+        tabs.shown = Some("2".into());
+        assert!(tabs.remove("2"));
+        assert_eq!(tabs.shown(), Some("3"));
+        assert!(tabs.remove("3"));
+        assert_eq!(tabs.shown(), Some("1"));
+        // Closing one not on show leaves the pick alone.
+        tabs.add();
+        tabs.shown = Some("1".into());
+        assert!(tabs.remove("4"));
+        assert_eq!(tabs.shown(), Some("1"));
+        assert!(!tabs.remove("9"));
+        assert!(tabs.remove("1"));
+        assert_eq!(tabs.shown(), None);
+    }
+
+    #[test]
+    fn a_tool_works_in_the_tab_named_or_the_one_on_show() {
+        let mut tabs = Tabs::default();
+        assert_eq!(tabs.resolve(None).unwrap_err(), "No page is open; call open first.");
+        assert!(tabs.resolve(Some("1")).unwrap_err().contains("no page is open"));
+        tabs.add();
+        tabs.add();
+        tabs.shown = Some("1".into());
+        assert_eq!(tabs.resolve(None).unwrap(), "1");
+        assert_eq!(tabs.resolve(Some("2")).unwrap(), "2");
+        assert_eq!(tabs.resolve(Some("7")).unwrap_err(), "There is no tab 7. The tabs are: 1, 2.");
+    }
+
+    #[test]
+    fn the_tab_list_marks_the_one_on_show() {
+        let tab = |id: &str, url: &str, title: &str| BrowserTab {
+            id: id.into(),
+            url: url.into(),
+            title: title.into(),
+            loading: false,
+        };
+        let list = [tab("1", "http://localhost:5173/", "My app"), tab("2", "", "")];
+        assert_eq!(
+            tabs_lines(&list, Some("1"), true),
+            "1  My app  http://localhost:5173/, on screen\n2  (no title)  (empty)"
+        );
+        assert!(tabs_lines(&list, Some("2"), false).ends_with("(empty), shown when the browser panel is open"));
     }
 }

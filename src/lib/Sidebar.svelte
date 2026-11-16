@@ -4,6 +4,7 @@
   import type { AppState, Dot } from "./state/app.svelte";
   import type { SessionRow } from "./ipc";
   import BranchMark from "./BranchMark.svelte";
+  import RenameField from "./RenameField.svelte";
   import { prLabel, shortPath } from "./paths";
   import { loadPrefs, savePrefs } from "./themes";
 
@@ -107,25 +108,13 @@
     return needsYou(session) || session.prs.some((pr) => pr.state === "open" || pr.state === "draft");
   }
 
-  /** The chat being renamed, and the text typed so far. */
+  /** The chat being renamed. */
   let renaming = $state<string | null>(null);
-  let draft = $state("");
 
-  function startRename(id: string, title: string) {
-    draft = title;
-    renaming = id;
-  }
-
-  async function finishRename(save: boolean) {
+  async function finishRename(save: boolean, text: string) {
     const id = renaming;
     renaming = null;
-    if (save && id) await app.rename(id, draft);
-  }
-
-  /** Puts the cursor in the box with the whole name selected. */
-  function focusAll(node: HTMLInputElement) {
-    node.focus();
-    node.select();
+    if (save && id) await app.rename(id, text);
   }
 
   /** The chat asking "delete? yes / no" before it goes to the trash. */
@@ -175,18 +164,9 @@
               <button class="no" onclick={() => (deleting = null)}>no</button>
             {:else if renaming === session.id}
               <span class="dot {dot}">{glyph[dot]}</span>
-              <input
-                class="rename"
-                use:focusAll
-                bind:value={draft}
-                onblur={() => finishRename(true)}
-                onkeydown={(e) => {
-                  if (e.key === "Enter") finishRename(true);
-                  else if (e.key === "Escape") finishRename(false);
-                }}
-              />
+              <RenameField class="in-row" value={session.title} done={finishRename} />
             {:else}
-              <button class="open" ondblclick={() => startRename(session.id, session.title)} onclick={() => app.open(session.id)} title="{session.title} (double-click to rename)">
+              <button class="open" ondblclick={() => (renaming = session.id)} onclick={() => app.open(session.id)} title="{session.title} (double-click to rename)">
                 <span class="dot {dot}" title={meaning[dot]}>{glyph[dot]}</span>
                 <span class="title">{session.title || "untitled"}</span>
               </button>
@@ -381,22 +361,9 @@
   .danger {
     color: var(--bad);
   }
-  /* Edited in place: the title's own text with a thin underline, none of the
-     system's field box or blue focus ring. */
-  .rename {
-    flex: 1;
-    min-width: 0;
-    color: var(--bright);
-    background: none;
-    border: 0;
-    border-bottom: 1px solid var(--dim);
-    border-radius: 0;
-    padding: 0;
-    /* The row's gap sits between mark and field; titles have none. */
-    margin: 0 0 0 -1ch;
-    outline: 0;
-    appearance: none;
-    line-height: inherit;
+  /* The row's gap sits between mark and field; titles have none. */
+  .row :global(.in-row) {
+    margin-left: -1ch;
   }
   /* Lined up with the titles, as faint as the folder path. */
   .more {

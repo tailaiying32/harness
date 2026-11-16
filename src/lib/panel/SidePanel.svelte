@@ -165,7 +165,7 @@
   }
 
   // The panel is rebuilt for each chat, so what is typed in its boxes lives on
-  // the chat (planNote, sideDraft), like the main message box's draft.
+  // the chat (planNote; a side chat's own draft), like the main message box's draft.
   let box = $state<HTMLTextAreaElement>();
 
   function grow() {
@@ -195,9 +195,9 @@
   function askKey(e: KeyboardEvent) {
     if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
     e.preventDefault();
-    if (!side || !chat.sideDraft.trim()) return;
-    void side.send(chat.sideDraft);
-    chat.sideDraft = "";
+    if (!side || !side.draft.trim()) return;
+    void side.send(side.draft);
+    side.draft = "";
     queueMicrotask(growAsk);
   }
 
@@ -222,24 +222,30 @@
   {:else if chat.panelView === "info"}
     <InfoView {chat} />
   {:else if side}
-    <div class="side">
-      <ChatView chat={side} problem={null} />
-    </div>
-    <div class="foot">
-      <div class="feedback">
-        <span class="marker">&gt;</span>
-        <!-- svelte-ignore a11y_autofocus -->
-        <textarea
-          bind:this={askBox}
-          bind:value={chat.sideDraft}
-          oninput={growAsk}
-          onkeydown={askKey}
-          rows="1"
-          autofocus
-          placeholder="ask on the side"
-        ></textarea>
+    <!-- Marked so the tab keys know a side chat has the keys (see tabKeys.ts).
+         Keyed, so switching tabs swaps the whole view, box and all. -->
+    {#key side.sessionId}
+      <div class="tabbed" data-tabs="side">
+        <div class="side">
+          <ChatView chat={side} problem={null} />
+        </div>
+        <div class="foot">
+          <div class="feedback">
+            <span class="marker">&gt;</span>
+            <!-- svelte-ignore a11y_autofocus -->
+            <textarea
+              bind:this={askBox}
+              bind:value={side.draft}
+              oninput={growAsk}
+              onkeydown={askKey}
+              rows="1"
+              autofocus
+              placeholder="ask on the side"
+            ></textarea>
+          </div>
+        </div>
       </div>
-    </div>
+    {/key}
   {:else}
 
   <!-- Each tab starts at its top. -->
@@ -339,6 +345,10 @@
     }
   }
   /* The side chat: the same view as the main chat, in the panel's space. */
+  /* Lays out as if it weren't there. */
+  .tabbed {
+    display: contents;
+  }
   .side {
     flex: 1;
     min-height: 0;

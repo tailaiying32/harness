@@ -308,7 +308,7 @@ src-tauri/
       mod.rs           AgentAdapter and RunningAgent traits
       claude_code.rs   the only file that knows Claude Code's wire format
     sessions.rs        SessionManager: live processes, saving, resume, idle shutdown
-    side_chat.rs       SideChats: one read-only side chat per chat (/btw), never saved
+    side_chat.rs       SideChats: read-only side chats, several per chat as tabs (/btw), never saved
     store.rs           SQLite schema, reads, writes
     images.rs          pasted images and images from tools, as files per chat
     locate.rs          find the claude binary
@@ -687,9 +687,10 @@ Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-roll
   before worktrees existed.
 - **Self-test steps**: `@worktree <worktree|here|none>` answers the worktree card,
   `@moved` waits for a turn to end in the worktree, `@turn` for any turn end.
-  A message starting with `/btw ` goes to the side chat and the test waits for
-  its answer; `@endside` ends the side chat. The report has `side` (its items),
-  `panelView` and `planPending`.
+  A message starting with `/btw ` goes to the side chat on show and the test
+  waits for its answer; `@newside` starts another side chat tab, `@endside`
+  ends the one on show. The report has `side` (the shown one's items),
+  `sides` (every tab's title), `panelView` and `planPending`.
 
 ### Session lifecycle (`sessions.rs`)
 
@@ -881,8 +882,9 @@ interrupt(session_id)
 set_mode(session_id, mode) / set_model(session_id, model)   saved; a live process is told
 list_models()
 close_session(session_id) ask the chat's process to exit (used by the self-test)
-side_send(chat_id, project_path, model, effort, text, message_id)   ask the side chat; starts it as a copy
-side_interrupt(chat_id) / side_end(chat_id)   stop its turn / end it and forget it
+side_send(side_id, project_path, model, effort, text, message_id)   ask a side chat (`<chat id>#side-<tab>`); starts it as a copy
+side_interrupt(side_id) / side_end(side_id)   stop its turn / end it and forget it
+side_end_all()            a fresh window ends the side chats a reloaded one left running
 autotest() / autotest_wait(ms) / autotest_report(text)
 ```
 
@@ -1131,7 +1133,7 @@ Mocked up on the same board:
   claude.ai connectors (Gmail, Drive…) loaded from the second message on
   (tested, CLI 2.1.322). No approval channel, so anything needing permission
   is refused without asking. Nothing is saved by Harness: its events go to
-  the window as `<chat id>#side` (`side_chat.rs`). Its process closes after
+  the window under the side chat's own id (`side_chat.rs`). Its process closes after
   the chats' idle time and resumes its own session on the next question, so
   a forgotten side chat costs no memory; that is why Claude Code saves it.
   **× end** stops it and, a few seconds later, deletes Claude Code's saved
@@ -1139,11 +1141,25 @@ Mocked up on the same board:
   `~/.claude/projects/*/`). Quitting or deleting the chat ends it too.
   Switching chats or hiding the panel doesn't. A plan that arrives while
   side chat is showing doesn't switch the panel; ● on `docs` in the top bar
-  says it's waiting. In the panel, side chat is drawn as one tab, like a
-  document's, whose × ends it (several side chats as tabs were considered
-  and left for later). The tab is named from the first side question by the
+  says it's waiting. Each tab is named from its first question by the
   same small model that names chats (`make_title`); it reads "side chat"
-  until the name arrives, and the name is not saved. **Tested** live with the self-test (`/btw …` messages,
+  until the name arrives, and the name is not saved.
+- **Several side chats, as tabs (2026-11-16).** The side chat view has a tab
+  row like the terminal's: + (or Cmd+T) starts an empty one, × (or Cmd+W)
+  ends that one, and the tab beside it takes its place. Each forks the main
+  chat as it is when its first question is sent; they never see each other.
+  `/btw` asks the one on show, starting one if there are none. Ids are
+  `<chat id>#side-<8 random hex>`: random, so a reloaded window never reuses
+  an id the core still knows, and each process start gets a run number
+  unique across all side chats, so an old process's late events can't land
+  in a new side chat. Cleanup, each closing a leak found along the way:
+  a fresh window calls `side_end_all` (a reload lost the side chats on
+  screen, but the core kept them, and the next `/btw` quietly resumed the old
+  one, untitled); switching away from a chat that never started ends its side
+  chats; a side chat ended before its copy was named deletes the copy when the
+  name arrives; and the core lists live copies in `side_copies.json` in the
+  data folder, deleting any left there at the next start (after a crash or
+  force quit). Trashing a chat ends all its side chats (`end_chat`). **Tested** live with the self-test (`/btw …` messages,
   `@endside`): answers from the copied chat, a file read, idle close then
   resume with its history, the saved copy deleted on end, the main chat
   untouched, and a plan arriving while in side chat.
@@ -1322,9 +1338,9 @@ Mocked up on the same board:
 ### Browser (`browser.rs`, built 2026-11-14)
 
 A page beside the chat, for localhost frontend work: the user looks at it,
-Claude drives it. One per chat, made the first time either of them opens an
-address; closed by its tab's × or when the chat is deleted; put away when
-left unused (below). Not tied to the chat's Claude Code process: an idle close
+Claude drives it. Pages are tabs, several per chat (2026-11-16), each made
+the first time either of them opens an address in it; closed by its tab's ×,
+or all of them when the chat is deleted; put away when left unused (below). Not tied to the chat's Claude Code process: an idle close
 leaves the page as it is. Only http(s) on
 `localhost`, `127.0.0.1` or `[::1]` loads; a link anywhere else opens in the
 default browser (`on_navigation`). The side chat gets no browser tools.
@@ -1341,8 +1357,9 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   (`.slot`, CSS px = logical px) with `browser_place` on every layout change,
   at most once a frame, and whether it should show: the browser view is on
   screen and nothing covers the panel (Settings, the image view: App passes
-  `covered`). Not shown = parked at x = -20000 at the same size, so Claude's
-  reads and screenshots match what the user would see. Leaving the view
+  `covered`). The rect and "shows" belong to the chat; only its tab on show
+  is placed there (`Browsers::arrange`). Not shown = parked at x = -20000 at
+  the same size, so Claude's reads and screenshots match what the user would see. Leaving the view
   (another view, chat or the panel hidden) unmounts the component, which parks it.
 - **Claude's tools** are an in-process MCP server over the existing pipe:
   `--mcp-config {"mcpServers":{"harness_browser":{"type":"sdk",...}}}`, and
@@ -1353,6 +1370,14 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   `initialize` from the host is needed first; the tools come as deferred tools
   (Claude loads them with ToolSearch). Agent-agnostic side: `AppTools` in
   `agent/mod.rs`, made per chat by `SessionManager::set_app_tools`.
+- **Tabs for Claude (2026-11-16):** `tabs` lists id, title, address and the
+  one on show; `close {tab}` closes one; every other tool takes an optional
+  `tab` id and otherwise works in the tab on show. `open` loads into the tab
+  on show (or the one given) unless `new_tab` is set; a new tab it opens
+  becomes the one on show, but the panel isn't opened for it. Tab ids count
+  up per chat ("1", "2", …). The tool descriptions explain tabs on their own,
+  because Cursor hears `INSTRUCTION` only on a fresh conversation. Cursor gets
+  the same tools over `mcp_http.rs`, so nothing was Cursor-specific.
 - **Actions** run as scripts in the page (`BRIDGE_JS`): started with `eval`,
   answered through `eval_with_callback` as a JSON string, async ones (`run`)
   collected by polling `__hb.take(id)`. The page has no way to call the app.
@@ -1362,7 +1387,7 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   setter as fallback. Errors and warnings (console, uncaught, failed loads of
   scripts and images) are kept in `sessionStorage`, so they outlast a reload;
   `open` clears them, `console` reads and clears them.
-- **Putting away:** a browser off screen and unused (no tool call, not on
+- **Putting away:** a tab off screen and unused (no tool call, not on
   screen) for 10 minutes has its page closed, which frees its page process
   (gone 15 to 30 s later); the chat keeps the address and the window keeps
   its tab. The agent's next tool call, showing the view, or ↻ loads it again,
@@ -1393,20 +1418,24 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   screen (window hidden, display off; parked likely too) gets no frames, so
   its resize handlers wait until it shows; CSS layout is right at once. Not
   checked by eye: the shrunk page in the panel (the display was off).
-- **Window side:** `Chat.browser` (page), `browserOn` (view open, maybe with
-  no page yet: an empty address line). Claude opening a page never switches
+- **Window side:** `Chat.browserTabs` and `browserShownTab`, sent whole by
+  the core in a `browser_tabs` event on every change (an empty list = closed);
+  `Chat.browser` is the tab on show; `browserOn` (view open, maybe with no tab
+  yet: an empty address line). The bar shows the tabs (title, else host, else
+  "new tab"), +, ↻, the address of the tab on show, then the shared corner
+  buttons. + (or Cmd+T) makes an empty tab and puts the cursor in the address. Claude opening a page never switches
   the panel; instead a successful `open` adds a line to the chat, like a
   plan's: "Page · localhost:5173 · open browser" (a `page` item, rebuilt from
-  history on replay; only the latest line has the button, which loads the
-  address again if the browser was closed since). The address copies on one
+  history on replay; only the latest line has the button, which shows the tab
+  on that address, or opens it in a new tab). The address copies on one
   click, like the panel's (accent for a moment, no underline). The line never
   wraps: a long address is cut short with "…" where it stops fitting, and
   "open browser" stays in view (2026-11-16). No marks in the bars: the
   user disliked a ● beside ◂ (2026-11-14). The globe icon in the top bar
   opens the view at any time; with no page yet it shows an empty address line
-  in the bar, and typing there makes the browser. A chat loaded after its page was opened asks `browser_current`.
+  in the bar, and typing there makes a tab. A chat loaded after its pages were opened asks `browser_current`.
 - **Self-test:** `@browser <url>` types an address (waits for the load),
-  `@settings` toggles settings; the report has `browser {on, page, pageLines, slot}`.
+  `@settings` toggles settings; the report has `browser {on, page, tabs, pageLines, slot}`.
 
 ### Notes and plan edits (built 2026-11-14, branch `harness/chat-notes`)
 
@@ -1552,9 +1581,16 @@ Patterns canvas "Terminal" (file `tHBjJsfaSXZFYgQhxfUVbS`).
   text size changes come through the `harness-look` event.
 - **Keys** (only while the terminal has the keys): Cmd+T new tab in the main
   folder, Cmd+Shift+[ / ] previous / next tab, Cmd+K clear, Cmd+W close tab.
-  Cmd+W elsewhere closes the window as before: on the Mac the default menu's
-  Close Window is replaced by a custom item (`app_menu` in `lib.rs`) that
-  sends `close_key`, and the window decides. Ctrl keys always go to the shell.
+  Cmd+W elsewhere closes the window as before. Ctrl keys always go to the shell.
+- **Tab keys everywhere with tabs (2026-11-16):** the same Cmd+T, Cmd+W and
+  Cmd+Shift+[ / ] work in the side chat and browser views too, only while
+  that view has the keys (a side chat's box; the browser's address or a page
+  clicked into). On the Mac they are menu items (`TAB_KEYS` in `lib.rs`:
+  New Tab, Close Tab or Window, Show Previous / Next Tab) that send `tab_key
+  {action}`; menu keys arrive even while a browser page holds the keys. The
+  window's `tabKey` (`state/tabKeys.ts`) picks the view that has the keys;
+  with none, Cmd+W closes the window and the rest do nothing. Off a Mac
+  there is no menu, so the window's key handler calls the same router.
 - **Memory** (release build, 2026-11-15): one terminal open adds about 6 MB
   to the window's web page (38 → 44 MB at start) and 1 MB to the core; each
   shell is about 4 MB.

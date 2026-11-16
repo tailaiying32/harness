@@ -1,12 +1,13 @@
 <script lang="ts">
-  // The panel's browser view: the space the page itself sits over. Its address,
-  // ↻ and × are in the top bar (see PanelBar). The page is a separate web view the
-  // core holds (one per chat, localhost only), placed over `slot` (or at its
+  // The panel's browser view: the address row, then the space the page itself
+  // sits over. Its tabs are in the top bar (see PanelBar). The tab on show is a
+  // separate web view the core holds (localhost only), placed over `slot` (or at its
   // top, shrunk, when Claude gave it a window size) whenever
   // this view is on screen and nothing is drawn over it; otherwise the core
   // parks it out of sight at the same size, so Claude still sees it as shown.
   import { onDestroy } from "svelte";
   import { browserPlace, type BrowserRect } from "../ipc";
+  import AddressRow from "./AddressRow.svelte";
   import type { Chat } from "../state/chat.svelte";
 
   let { chat, covered }: { chat: Chat; covered: boolean } = $props();
@@ -64,7 +65,8 @@
   });
 </script>
 
-<!-- An address that couldn't be opened, typed in the top bar. -->
+<AddressRow {chat} />
+<!-- An address that couldn't be opened, typed above. -->
 {#if chat.browserProblem}
   <div class="problem">{chat.browserProblem}</div>
 {/if}

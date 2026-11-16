@@ -4,8 +4,6 @@
   // address, the terminal's tabs, or chat info's tabs. What it doesn't fill stays empty for
   // dragging the window.
   import BarIcon from "../BarIcon.svelte";
-  import { openUrl } from "@tauri-apps/plugin-opener";
-  import { browserNavigate, browserReload } from "../ipc";
   import { shortBranch } from "../paths";
   import { NOTES_TAB, PLAN_TAB, type Chat } from "../state/chat.svelte";
   import { terminals } from "../state/terminals.svelte";
@@ -77,6 +75,18 @@
     };
   });
 
+  // ---- Side chats ----
+  /** Each side chat's tab name: its title, with " 2", " 3" where two share one. */
+  const sideTabs = $derived.by(() => {
+    const seen = new Map<string, number>();
+    return chat.sides.map((side) => {
+      const base = side.title || "side chat";
+      const n = (seen.get(base) ?? 0) + 1;
+      seen.set(base, n);
+      return { id: side.sessionId, name: n > 1 ? `${base} ${n}` : base };
+    });
+  });
+
   // ---- Docs ----
   const active = $derived(chat.activeTab);
 
@@ -87,84 +97,34 @@
     return path.split(/[\\/]/).slice(-2).join("/");
   }
 
-  // ---- Browser ----
+  // ---- Browser (its address row is in BrowserView) ----
   const page = $derived(chat.browser);
-  let address = $state("");
-  let editing = $state(false);
-  /** The click that focused the box; its mouseup would otherwise undo select-all. */
-  let focusClick = false;
-  /** The last mousedown was that focusing click. */
-  let justFocused = false;
 
-  /**
-   * Click handling: the first click selects the whole address. A second click
-   * places the cursor, even a quick one, which the system counts as a
-   * double-click and would turn into a word selection.
-   */
-  function pressAddress(e: MouseEvent) {
-    const box = e.currentTarget as HTMLInputElement;
-    if (document.activeElement !== box) {
-      focusClick = justFocused = true;
-      return;
-    }
-    if (justFocused && e.detail === 2) {
-      e.preventDefault();
-      const at = offsetAt(box, e.clientX);
-      box.setSelectionRange(at, at);
-    }
-    justFocused = false;
-  }
-
-  /** The text position nearest to `x` in a one-line box, measured with the box's own font. */
-  function offsetAt(box: HTMLInputElement, x: number): number {
-    const style = getComputedStyle(box);
-    const pen = document.createElement("canvas").getContext("2d");
-    if (!pen) return box.value.length;
-    pen.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-    const target = x - box.getBoundingClientRect().left - parseFloat(style.paddingLeft) + box.scrollLeft;
-    let before = 0;
-    for (let i = 1; i <= box.value.length; i++) {
-      const width = pen.measureText(box.value.slice(0, i)).width;
-      if (width >= target) return target - before < width - target ? i - 1 : i;
-      before = width;
-    }
-    return box.value.length;
-  }
-
-  // The address follows the page, except while the user types in it.
-  $effect(() => {
-    const url = page?.url;
-    if (!editing) address = url ?? "";
-  });
-
-  async function go(e: KeyboardEvent) {
-    const box = e.target as HTMLInputElement;
-    if (e.key === "Escape") {
-      address = page?.url ?? "";
-      box.blur();
-      return;
-    }
-    if (e.key !== "Enter" || e.isComposing) return;
-    e.preventDefault();
-    chat.browserProblem = "";
+  /** A tab's name: the page's title, else its host, else "new tab". */
+  function pageLabel(tab: { url: string; title: string }): string {
+    if (tab.title) return tab.title;
     try {
-      await browserNavigate(chat.sessionId, address);
-      box.blur();
-    } catch (err) {
-      chat.browserProblem = String(err);
+      return new URL(tab.url).host || "new tab";
+    } catch {
+      return "new tab";
     }
   }
 </script>
 
-<!-- Full screen: the panel covers the chat (never the sidebar); again, or
-     Escape, brings the chat back. On every view, just before its ×. -->
-{#snippet widen()}
+<!-- The same pair at the right of every view. Full screen: the panel covers
+     the chat (never the sidebar); again, or Escape, brings the chat back. ×
+     only hides the panel, like clicking the view's icon again; ending a side
+     chat or closing the page is the small × by its name. -->
+{#snippet corner()}
   <button
     class="icon"
     title={chat.panelWide ? "Bring the chat back (Esc)" : "Full screen"}
     onclick={() => (chat.panelWide = !chat.panelWide)}
   >
     <BarIcon name={chat.panelWide ? "narrow" : "widen"} />
+  </button>
+  <button class="icon" title="Hide the panel" onclick={() => (chat.panelOpen = false)}>
+    <BarIcon name="close" />
   </button>
 {/snippet}
 
@@ -197,7 +157,7 @@
       {/if}
     </span>
     <span class="spacer" data-tauri-drag-region></span>
-    {@render widen()}
+    {@render corner()}
     {#if asking}
       <div class="ask" role="alertdialog" bind:this={askBox} style:left="{askLeft}px">
         <span class="question">{askingName} is running. Close it?</span>
@@ -208,61 +168,34 @@
       </div>
     {/if}
   {:else if chat.panelView === "browser"}
-    <!-- Before the address, like most browsers. Left out until a page is
-         open, so an empty bar starts with the address box, not a gap. -->
-    {#if page}
-      <button
-        class="icon reload"
-        class:busy={page.loading}
-        title="Reload"
-        onclick={() => void browserReload(chat.sessionId).catch(() => {})}
-      >
-        <BarIcon name="reload" />
-      </button>
-    {/if}
-    <!-- One click selects the whole address, ready to type over or copy. -->
-    <input
-      class="address"
-      bind:value={address}
-      onmousedown={pressAddress}
-      onmouseup={(e) => {
-        if (focusClick) e.preventDefault();
-        focusClick = false;
-      }}
-      onfocus={(e) => {
-        editing = true;
-        e.currentTarget.select();
-      }}
-      onblur={() => (editing = false)}
-      onkeydown={go}
-      spellcheck="false"
-      autocomplete="off"
-      placeholder="Type a url"
-    />
-    <!-- With the panel's other buttons at the right, not after the address. -->
-    <button
-      class="icon"
-      class:off={!page}
-      title="Open in your browser"
-      onclick={() => page && void openUrl(page.url).catch(() => {})}
-    >
-      <BarIcon name="external" />
-    </button>
-    {@render widen()}
-    <button class="icon" title="Close the browser" onclick={() => chat.closeBrowser()}>
-      <BarIcon name="close" />
-    </button>
+    <!-- Marked so the tab keys know the browser has the keys (see tabKeys.ts). -->
+    <div class="tabs pages" data-tabs="browser">
+      {#each chat.browserTabs as tab (tab.id)}
+        <span class="tab" class:on={tab.id === page?.id}>
+          <button title={tab.url || "new tab"} onclick={() => chat.pickBrowserTab(tab.id)}>{pageLabel(tab)}</button>
+          <button class="shut" title="Close this tab" onclick={() => chat.closeBrowserTab(tab.id)}>×</button>
+        </span>
+      {/each}
+    </div>
+    <button class="plus" title="New tab" onclick={() => chat.newBrowserTab()}>+</button>
+    <span class="spacer" data-tauri-drag-region></span>
+    {@render corner()}
   {:else if chat.panelView === "info"}
     <span class="name on">chat info</span>
     <span class="spacer" data-tauri-drag-region></span>
-    {@render widen()}
+    {@render corner()}
   {:else if chat.panelView === "side" && chat.side}
-    <span class="name on">{chat.side.title || "side chat"}</span>
+    <div class="tabs">
+      {#each sideTabs as { id, name } (id)}
+        <span class="tab" class:on={id === chat.side.sessionId}>
+          <button onclick={() => chat.pickSide(id)}>{name}</button>
+          <button class="shut" title="End this side chat; it is forgotten" onclick={() => chat.endSide(id)}>×</button>
+        </span>
+      {/each}
+    </div>
+    <button class="plus" title="New side chat" onclick={() => chat.newSide()}>+</button>
     <span class="spacer" data-tauri-drag-region></span>
-    {@render widen()}
-    <button class="icon" title="End the side chat; it is forgotten" onclick={() => chat.endSide()}>
-      <BarIcon name="close" />
-    </button>
+    {@render corner()}
   {:else}
     <!-- Many tabs scroll sideways. -->
     <div class="tabs">
@@ -287,7 +220,7 @@
       {/each}
     </div>
     <span class="spacer" data-tauri-drag-region></span>
-    {@render widen()}
+    {@render corner()}
   {/if}
 </div>
 
@@ -343,6 +276,12 @@
   .icon {
     display: flex;
   }
+  /* A page's title can be long; its tab keeps to a few words. */
+  .pages .tab button:first-child {
+    max-width: 18ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   /* The terminal's + and its menu, which opens downward over the panel. */
   .picker {
     position: relative;
@@ -394,36 +333,5 @@
   }
   .keep {
     color: var(--dim);
-  }
-  .icon.off {
-    visibility: hidden;
-  }
-  /* Turns while the page loads. */
-  .reload.busy :global(svg) {
-    animation: turn 0.9s linear infinite;
-  }
-  @keyframes turn {
-    to {
-      transform: rotate(360deg);
-    }
-  }
-  /* Fills the bar up to the buttons, so anywhere there is clickable. A long
-     address is cut short with an ellipsis. */
-  .address {
-    flex: 1;
-    min-width: 12ch;
-    text-overflow: ellipsis;
-    border: 0;
-    outline: 0;
-    padding: 0;
-    background: transparent;
-    color: var(--dim);
-    caret-color: var(--accent);
-  }
-  .address:focus {
-    color: var(--bright);
-  }
-  .address::placeholder {
-    color: var(--faint);
   }
 </style>

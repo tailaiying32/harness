@@ -2,8 +2,10 @@
 
 import {
   answerApproval,
-  browserClose,
+  browserCloseTab,
   browserNavigate,
+  browserNewTab,
+  browserPick,
   browserCurrent,
   closeSession,
   chooseWorktree,
@@ -22,7 +24,7 @@ import {
   setModel,
   type AgentEvent,
   type ApprovalKind,
-  type BrowserInfo,
+  type BrowserTab,
   type Decision,
   type ImageRef,
   type Mode,
@@ -326,8 +328,14 @@ export class Chat {
   // ---- The side panel ----
   /** The panel's views: the plan and documents, the side chat, or the browser. */
   panelView = $state<PanelView>("docs");
-  /** The side chat (`/btw`), while one is open. It is never saved. */
-  side = $state<Chat | null>(null);
+  /** The side chats (`/btw`, or the side view's +), one per tab. Never saved. */
+  sides = $state<Chat[]>([]);
+  /** The side chat tab picked; the last one if it is gone. */
+  sideShown = $state<string | null>(null);
+  /** The side chat on show, if there are any. */
+  get side(): Chat | null {
+    return this.sides.find((s) => s.sessionId === this.sideShown) ?? this.sides.at(-1) ?? null;
+  }
   /**
    * Something besides the notes: a plan, a document, the side chat or the
    * browser. Closing one of those closes the panel when nothing else is left,
@@ -373,65 +381,116 @@ export class Chat {
     this.panelOpen = this.panelOpen && this.hasPanelWork;
   }
 
-  // ---- The browser (a localhost page beside the chat; Claude can drive it) ----
-  /** The browser view is open, with or without a page yet. */
+  // ---- The browser (localhost pages in tabs beside the chat; Claude can drive it) ----
+  /** The browser view is open, with or without a tab yet. */
   browserOn = $state(false);
-  /** The page it shows, once there is one. Lives in the core, not saved. */
-  browser = $state<BrowserInfo | null>(null);
+  /** Its tabs, as the core last said. They live in the core, not saved. */
+  browserTabs = $state<BrowserTab[]>([]);
+  /** The tab on show. */
+  browserShownTab = $state<string | null>(null);
   /** Why the address last typed couldn't be opened; cleared by the next one. */
   browserProblem = $state("");
+  /** Counts up when the address box should take the cursor (a new empty tab). */
+  focusAddress = $state(0);
+  /** The tab on show, if there are any. */
+  get browser(): BrowserTab | null {
+    return this.browserTabs.find((t) => t.id === this.browserShownTab) ?? this.browserTabs.at(-1) ?? null;
+  }
   /** The browser is what the panel shows right now. */
   get browserShown(): boolean {
     return this.panelOpen && this.panelView === "browser";
   }
 
-  /** Opens the browser view: the page if there is one, an empty address line if not. */
+  /** Opens the browser view: the tab on show if there is one, an empty address line if not. */
   openBrowser(): void {
     this.browserOn = true;
     this.panelView = "browser";
     this.panelOpen = true;
   }
 
-  /** From a page line in the chat: shows the browser, loading `url` again if the browser was closed since. */
+  /** + or Cmd+T: a new empty tab, with the cursor in the address box. */
+  async newBrowserTab(): Promise<void> {
+    this.openBrowser();
+    try {
+      this.browserShownTab = await browserNewTab(this.sessionId);
+      this.focusAddress++;
+    } catch (e) {
+      this.browserProblem = String(e);
+    }
+  }
+
+  pickBrowserTab(id: string): void {
+    this.browserShownTab = id;
+    void browserPick(this.sessionId, id).catch(() => {});
+  }
+
+  /** The tab before or after the one on show, wrapping round. */
+  stepBrowserTab(by: number): void {
+    const n = this.browserTabs.length;
+    if (n < 2) return;
+    const at = this.browserTabs.findIndex((t) => t.id === this.browser?.id);
+    this.pickBrowserTab(this.browserTabs[(at + by + n) % n].id);
+  }
+
+  /**
+   * Closes a tab and its page (the one on show if none is named). After the
+   * last, the panel goes back to another view, or closes; with no tabs at
+   * all, the browser view itself goes.
+   */
+  async closeBrowserTab(id: string | undefined = this.browser?.id): Promise<void> {
+    if (!id) {
+      this.leaveBrowser();
+      return;
+    }
+    try {
+      await browserCloseTab(this.sessionId, id);
+    } catch {
+      // Already gone.
+    }
+  }
+
+  /** From a page line in the chat: shows the tab on that address, or opens it in a new tab. */
   async showPage(url: string): Promise<void> {
     if (this.owner) return this.owner.showPage(url);
     this.openBrowser();
-    if (this.browser) return;
+    const same = (a: string) => {
+      try {
+        return new URL(a).href === new URL(url).href;
+      } catch {
+        return a === url;
+      }
+    };
+    const open = this.browserTabs.find((t) => same(t.url));
+    if (open) {
+      this.pickBrowserTab(open.id);
+      return;
+    }
     try {
-      await browserNavigate(this.sessionId, url);
+      const tab = await browserNewTab(this.sessionId);
+      this.browserShownTab = tab;
+      await browserNavigate(this.sessionId, tab, url);
     } catch (e) {
       this.showError(String(e));
     }
   }
 
-  /** Closes the browser and its page. The panel goes back to another view, or closes. */
-  async closeBrowser(): Promise<void> {
-    const hadPage = this.browser !== null;
-    this.leaveBrowser();
-    if (hadPage) {
-      try {
-        await browserClose(this.sessionId);
-      } catch {
-        // Already gone.
-      }
-    }
-  }
-
   private leaveBrowser(): void {
     this.browserOn = false;
-    this.browser = null;
+    this.browserTabs = [];
+    this.browserShownTab = null;
     this.browserProblem = "";
     if (this.panelView !== "browser") return;
     this.panelView = this.side ? "side" : this.terminalOn ? "terminal" : "docs";
     this.panelOpen = this.panelOpen && this.hasPanelWork;
   }
 
-  /** A chat opened again after a reload of the window: pick up its live page. */
+  /** A chat opened again after a reload of the window: pick up its live tabs. */
   async loadBrowser(): Promise<void> {
     try {
-      const info = await browserCurrent(this.sessionId);
-      if (info) {
-        this.browser = info;
+      const { tabs, shown } = await browserCurrent(this.sessionId);
+      if (tabs.length) {
+        this.browserTabs = tabs;
+        this.browserShownTab = shown;
         this.browserOn = true;
       }
     } catch {
@@ -538,8 +597,6 @@ export class Chat {
   planDraft = $state<string | null>(null);
   /** What is typed under the plan ("what should change?"), not sent yet. Kept here so switching chats keeps it. */
   planNote = $state("");
-  /** What is typed in the side chat's box, not sent yet. */
-  sideDraft = $state("");
 
   /** Opens the panel on docs; on `tab` if given, bringing it back if it was closed. */
   openPanel(tab?: string): void {
@@ -951,15 +1008,16 @@ export class Chat {
         this.title = event.title;
         break;
 
-      // Claude or the user opened or moved the page. The panel isn't switched
-      // for Claude; the chat's page line (see tool_result) is how to look.
-      case "browser_state":
-        this.browser = { url: event.url, title: event.title, loading: event.loading };
+      // Claude or the user opened, moved or closed a page. The panel isn't
+      // switched for Claude; the chat's page line (see tool_result) is how to look.
+      case "browser_tabs":
+        if (!event.tabs.length) {
+          this.leaveBrowser();
+          break;
+        }
+        this.browserTabs = event.tabs;
+        this.browserShownTab = event.shown;
         this.browserOn = true;
-        break;
-
-      case "browser_closed":
-        this.leaveBrowser();
         break;
 
       // Earlier items stay on screen; Claude now sees a summary of them.
@@ -1032,7 +1090,7 @@ export class Chat {
       const owner = this.owner;
       if (owner) {
         // Pictures are for the main chat; a side chat gets the words only.
-        await sideSend(owner.sessionId, owner.projectPath.trim(), owner.modelChoice, owner.effortChoice, message, messageId);
+        await sideSend(this.sessionId, owner.projectPath.trim(), owner.modelChoice, owner.effortChoice, message, messageId);
       } else {
         await sendMessage(
           this.sessionId,
@@ -1124,37 +1182,76 @@ export class Chat {
     if (tool) tool.declined = true;
   }
 
-  // ---- The side chat ----
+  // ---- Side chats (one per tab) ----
 
-  /** Opens the side chat in the panel, starting an empty one if there is none. */
-  openSide(): Chat {
-    if (!this.side) {
-      const side = new Chat(`${this.sessionId}#side`, this);
-      side.projectPath = this.projectPath;
-      side.workPath = this.workPath;
-      this.side = side;
-    }
+  /** Starts an empty side chat in a new tab and shows it. It copies this chat on its first question. */
+  newSide(): Chat {
+    // Random, not counted: a reloaded window must not reuse an id the core may still know.
+    const side = new Chat(`${this.sessionId}#side-${crypto.randomUUID().slice(0, 8)}`, this);
+    side.projectPath = this.projectPath;
+    side.workPath = this.workPath;
+    this.sides.push(side);
+    this.sideShown = side.sessionId;
     this.panelView = "side";
     this.panelOpen = true;
     // Read back so the caller holds the reactive version.
-    return this.side!;
+    return this.sides.at(-1)!;
   }
 
-  /** Asks the side chat something, opening it first. */
+  /** Opens the side chat view on the tab on show, starting one if there are none. */
+  openSide(): Chat {
+    const side = this.side;
+    if (!side) return this.newSide();
+    this.sideShown = side.sessionId;
+    this.panelView = "side";
+    this.panelOpen = true;
+    return side;
+  }
+
+  pickSide(id: string): void {
+    this.sideShown = id;
+  }
+
+  /** The tab before or after the one on show, wrapping round. */
+  stepSide(by: number): void {
+    const n = this.sides.length;
+    if (n < 2) return;
+    const at = this.sides.findIndex((s) => s.sessionId === this.side?.sessionId);
+    this.sideShown = this.sides[(at + by + n) % n].sessionId;
+  }
+
+  /** Asks the side chat on show something, starting one if there are none. */
   async askSide(question: string): Promise<void> {
     await this.openSide().send(question);
   }
 
-  /** Ends the side chat; it is forgotten. The panel goes back to docs, or closes. */
-  async endSide(): Promise<void> {
-    this.side = null;
-    this.panelView = "docs";
-    this.panelOpen = this.hasPanelWork;
+  /**
+   * Ends a side chat (the one on show if none is named); it is forgotten. The
+   * tab beside it takes its place; after the last, the panel goes to another
+   * view, or closes.
+   */
+  async endSide(id: string | undefined = this.side?.sessionId): Promise<void> {
+    const at = this.sides.findIndex((s) => s.sessionId === id);
+    if (at < 0 || !id) return;
+    const wasShown = this.side?.sessionId === id;
+    this.sides.splice(at, 1);
+    if (wasShown) this.sideShown = this.sides[Math.min(at, this.sides.length - 1)]?.sessionId ?? null;
+    if (!this.sides.length && this.panelView === "side") {
+      this.panelView = this.browserOn ? "browser" : this.terminalOn ? "terminal" : "docs";
+      this.panelOpen = this.panelOpen && this.hasPanelWork;
+    }
     try {
-      await sideEnd(this.sessionId);
+      await sideEnd(id);
     } catch {
       // Nothing running to end.
     }
+  }
+
+  /** Ends every side chat, when this chat is dropped from the window. */
+  endAllSides(): void {
+    for (const side of this.sides) void sideEnd(side.sessionId).catch(() => {});
+    this.sides = [];
+    this.sideShown = null;
   }
 
   /** Shows a view in the panel, opening the panel if it was hidden. Hiding it is the panel toggle's job. */
@@ -1170,7 +1267,7 @@ export class Chat {
     try {
       this.stopping = true;
       if (this.owner) {
-        await sideInterrupt(this.owner.sessionId);
+        await sideInterrupt(this.sessionId);
         return;
       }
       await interrupt(this.sessionId);
