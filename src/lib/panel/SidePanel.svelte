@@ -9,7 +9,7 @@
   // of its tab while Claude waits (mouse only, like every approval: no key
   // approves a plan). Side chat: one tab for the side conversation, its own
   // message box at the foot. Chat info: the chat's context, tasks and
-  // subagents, each unfolding to its steps (see InfoView, AgentView).
+  // subagents (see InfoView), or one subagent full size (see AgentView).
   // Showing and hiding the panel is the top bar's.
   import { contentClick } from "../clicks";
   import ChatView from "../chat/ChatView.svelte";
@@ -17,6 +17,7 @@
   import BrowserView from "./BrowserView.svelte";
   import TerminalView from "./TerminalView.svelte";
   import InfoView from "./InfoView.svelte";
+  import AgentView from "./AgentView.svelte";
   import Markdown from "../chat/Markdown.svelte";
   import { onDestroy, untrack } from "svelte";
   import { NOTES_TAB, PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
@@ -220,7 +221,17 @@
   {:else if chat.panelView === "browser"}
     <BrowserView {chat} {covered} />
   {:else if chat.panelView === "info"}
-    <InfoView {chat} />
+    <!-- Marked so the tab keys know chat info has the keys (see tabKeys.ts). -->
+    <div class="tabbed" data-tabs="info">
+      {#if chat.info.shownAgent}
+        <!-- Keyed, so each agent opens at its newest step. -->
+        {#key chat.info.shownAgent.toolId}
+          <AgentView {chat} agent={chat.info.shownAgent} />
+        {/key}
+      {:else}
+        <InfoView {chat} />
+      {/if}
+    </div>
   {:else if side}
     <!-- Marked so the tab keys know a side chat has the keys (see tabKeys.ts).
          Keyed, so switching tabs swaps the whole view, box and all. -->

@@ -1737,12 +1737,25 @@ Chat info's icon is a small tree with rounded elbows, a dot with two well-spaced
 nodes only" on the Magic Patterns canvas "Chat Info"; picked over a bullet
 list, which looked too much like docs beside it, and the earlier
 "hand-off"). It is close in shape to the branch mark; watch for mix-ups.
-Its row in the top bar
-just says "chat info". Subagents unfold in place on the page (option F on
-the canvas); nothing opens elsewhere. Tried first and dropped on
-2026-11-16: a tab per agent (cluttered), then the agent shown in the page's
-place. Kept in reserve if unfolding feels limiting: an "open" link on the
-box for a full-size view with a ▾ to switch agents (option G).
+Its row in the top bar reads "chat info   run session tests" (changed
+2026-11-16): the overview, then the name of the subagent picked last
+(`ChatInfo.picked`, kept while the overview shows), no mark and no ▾ (the
+user found both noisy). Like a tab, clicking the name from the overview goes
+straight to that agent; clicking it while on the agent opens an in-app menu
+of every subagent, grouped by batch as on the page, each with its mark;
+picking one shows it full size in the panel.
+"chat info" comes back to the overview. Before any is picked the row reads
+"subagents", and clicking it opens the menu. The menu is laid
+against the whole row so it stays inside a narrow panel. The page groups
+subagents by batch, newest batch first (what chat info is for: what's going
+on now), each in launch order under a faint line with the first line of the
+user's message it answers. A batch Claude Code started on its own (a turn
+after a background agent ended) gets the latest message plus "· follow-up".
+History: a tab per agent with names (cluttered); the agent shown in the
+page's place; boxes unfolding in place on the page (option F), dropped
+because a 16-line box was too small to read; then a mark per agent in the
+row (one click to switch), dropped because naming a mark took a hover label
+that broke the terminal feel and the marks piled up in long chats.
 
 - **The page** (`InfoView.svelte`). Sections, each
   left out when empty: context (bar, "92k of 200k · 46%", then what takes
@@ -1750,16 +1763,17 @@ box for a full-size view with a ▾ to switch agents (option G).
   and finished: name and run time, then its last step and how long ago), and
   in the background (commands, not agents). A running agent with no step for
   3 minutes shows "… ago" in the accent colour.
-- **A subagent, unfolded** (`AgentView.svelte` with `boxed`). Clicking its
-  row (marked ● running, ✓ done, ✗ failed or – stopped) opens a box under
-  it, 16 lines tall with a line on its left, that scrolls on its own and
-  stays on the newest step unless scrolled up. It holds the prompt (three
-  lines, all on a click), its steps folded like the chat's (`WorkRun`), the
-  text it wrote, and its answer (`←`), unless that repeats its last text.
-  Clicking the row again folds it; several can be open. Which are open lives
-  on the `Chat`, so it stays when leaving the chat but not after a restart.
-- A subagent's line in an opened work run in the chat shows chat info with
-  that agent unfolded and scrolled into view.
+- **A subagent, full size** (`AgentView.svelte`). Clicking its row on the
+  page (marked ● running, ✓ done, ✗ failed or – stopped), or picking it in
+  the top bar's ▾ menu, shows it in the panel: its mark and name, how it is doing, the
+  prompt (three lines, all on a click), its steps folded like the chat's
+  (`WorkRun`), the text it wrote, and its answer (`←`), unless that repeats
+  its last text. It stays on the newest step unless scrolled up. The agent on
+  show (`ChatInfo.shown`) lives on the `Chat`, so it stays when leaving the
+  chat but not after a restart. Cmd+Shift+[ / ] steps through the overview
+  and each agent while chat info has the keys.
+- A subagent's line in an opened work run in the chat shows chat info on
+  that agent, full size.
 
 State lives in `state/chatInfo.svelte.ts` (`ChatInfo`, one per chat, fed by
 `Chat.handle` before its own switch; events with a `parent_tool_id` stop
@@ -1808,10 +1822,10 @@ so a reopened chat shows run times from `TaskEnded.duration_ms` and no "ago".
   statuses like `TODO_STATUS_COMPLETED`; they are merged by `id`.
 - Cursor reports no context use, so its chats have no context section.
 
-Self-test: `@info`, `@agent <n>` (unfold the nth subagent), `@agents`
+Self-test: `@info` (the overview), `@agent <n>` (the nth subagent full size), `@agents`
 (wait until none runs), `@model claude:<name>`; the report's `info` part.
 Preview: `#open=agents&info` (a chat with a finished, a failed and a live
-subagent; add `&agent` to unfold the first one).
+subagent; add `&agent` to open the first one).
 
 Not covered: subagents started by subagents (one step inside their parent),
 agents inside multi-agent workflows, stopping one subagent from the view,

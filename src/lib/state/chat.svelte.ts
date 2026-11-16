@@ -354,10 +354,10 @@ export class Chat {
   /** What the chat knows about itself; its subagents' steps live here, not in `items`. */
   readonly info = new ChatInfo();
 
-  /** Shows chat info; given a subagent's tool call, unfolds that one and brings it into view. */
+  /** Shows chat info: given a subagent's tool call, that subagent full size; else whatever it showed last. */
   openInfo(toolId?: string): void {
     if (this.owner) return this.owner.openInfo(toolId);
-    if (toolId) this.info.open(toolId);
+    if (toolId) this.info.show(toolId);
     this.panelView = "info";
     this.panelOpen = true;
   }

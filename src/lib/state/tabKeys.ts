@@ -14,7 +14,7 @@ import { terminals } from "./terminals.svelte";
 
 export const MAC = /Mac/.test(navigator.userAgent);
 
-type Owner = "terminal" | "side" | "browser";
+type Owner = "terminal" | "side" | "browser" | "info";
 
 /** Which tabbed view has the keys, if any. */
 function owner(chat: Chat): Owner | null {
@@ -22,6 +22,7 @@ function owner(chat: Chat): Owner | null {
   if (!chat.panelOpen) return null;
   const at = document.activeElement;
   if (chat.panelView === "side" && at?.closest("[data-tabs='side']")) return "side";
+  if (chat.panelView === "info" && at?.closest("[data-tabs='info']")) return "info";
   if (chat.panelView === "browser") {
     // A page the user clicked into holds the keys outside this document.
     if (at?.closest("[data-tabs='browser']") || !document.hasFocus()) return "browser";
@@ -50,6 +51,11 @@ export function tabKey(chat: Chat, action: TabAction): void {
       if (action === "new") void chat.newBrowserTab();
       else if (action === "close") void chat.closeBrowserTab();
       else chat.stepBrowserTab(action === "prev" ? -1 : 1);
+      return;
+    }
+    case "info": {
+      // Its "tabs" are the overview and each subagent: nothing to open or close.
+      if (action === "prev" || action === "next") chat.info.step(action === "prev" ? -1 : 1);
       return;
     }
     default:

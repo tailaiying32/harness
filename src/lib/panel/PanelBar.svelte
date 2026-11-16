@@ -4,6 +4,7 @@
   // address, the terminal's tabs, or chat info's tabs. What it doesn't fill stays empty for
   // dragging the window.
   import BarIcon from "../BarIcon.svelte";
+  import { MARKS } from "./agentMarks";
   import { shortBranch } from "../paths";
   import { NOTES_TAB, PLAN_TAB, type Chat } from "../state/chat.svelte";
   import { terminals } from "../state/terminals.svelte";
@@ -85,6 +86,31 @@
       seen.set(base, n);
       return { id: side.sessionId, name: n > 1 ? `${base} ${n}` : base };
     });
+  });
+
+  // ---- Chat info: the subagent picked last, and a menu of them all ----
+  let agentMenu = $state(false);
+  let agentPicker = $state<HTMLElement>();
+  function pickAgent(id: string) {
+    agentMenu = false;
+    chat.info.show(id);
+  }
+  // A click outside the menu, or Escape, closes it.
+  $effect(() => {
+    const box = agentMenu ? agentPicker : null;
+    if (!box) return;
+    const away = (e: PointerEvent) => {
+      if (!box.contains(e.target as Node)) agentMenu = false;
+    };
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") agentMenu = false;
+    };
+    window.addEventListener("pointerdown", away, true);
+    window.addEventListener("keydown", escape);
+    return () => {
+      window.removeEventListener("pointerdown", away, true);
+      window.removeEventListener("keydown", escape);
+    };
   });
 
   // ---- Docs ----
@@ -181,7 +207,43 @@
     <span class="spacer" data-tauri-drag-region></span>
     {@render corner()}
   {:else if chat.panelView === "info"}
-    <span class="name on">chat info</span>
+    <!-- The overview, then the subagent picked last, with a menu of them all
+         by batch, as the overview has them. -->
+    <div class="info" data-tabs="info">
+      <span class="tab" class:on={!chat.info.shownAgent}>
+        <button onclick={() => chat.info.show(null)}>chat info</button>
+      </span>
+      {#if chat.info.agents.length}
+        {@const picked = chat.info.pickedAgent}
+        <span class="picker agents" bind:this={agentPicker}>
+          <!-- Like a tab: from the overview the name goes to that agent; on it
+               (or before any is picked), the name opens the menu. -->
+          <button
+            class="picked"
+            class:on={!!chat.info.shownAgent}
+            class:open={agentMenu}
+            aria-haspopup="menu"
+            aria-expanded={agentMenu}
+            onclick={() => (picked && !chat.info.shownAgent ? chat.info.show(picked.toolId) : (agentMenu = !agentMenu))}
+          >
+            <span class="who">{picked?.name ?? "subagents"}</span>
+          </button>
+          {#if agentMenu}
+            <div class="menu agent-menu" role="menu">
+              {#each chat.info.batches as batch (batch.batch)}
+                <div class="batch">{batch.ask.trim().split("\n")[0] || "before any message"}{batch.followUp ? " · follow-up" : ""}</div>
+                {#each batch.agents as agent (agent.toolId)}
+                  <button role="menuitem" class:on={agent === chat.info.shownAgent} onclick={() => pickAgent(agent.toolId)}>
+                    <span class="mark {agent.state}">{MARKS[agent.state]}</span>
+                    <span class="who">{agent.name}</span>
+                  </button>
+                {/each}
+              {/each}
+            </div>
+          {/if}
+        </span>
+      {/if}
+    </div>
     <span class="spacer" data-tauri-drag-region></span>
     {@render corner()}
   {:else if chat.panelView === "side" && chat.side}
@@ -255,15 +317,8 @@
     display: flex;
     gap: 1.5ch;
   }
-  .tab.on button:first-child,
-  .name.on {
+  .tab.on button:first-child {
     color: var(--bright);
-  }
-  /* A side chat's name is a few words; keep it to one line. */
-  .name {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   /* A tab's close mark shows on the tab in front, or under the pointer. */
   .shut {
@@ -275,6 +330,77 @@
   }
   .icon {
     display: flex;
+  }
+  /* Chat info's subagents: a mark each, coloured by how it is doing; the
+     one on show at full strength, the rest faded until pointed at. */
+  .info {
+    display: flex;
+    align-items: center;
+    gap: 3ch;
+    min-width: 0;
+  }
+  .info .tab {
+    flex-shrink: 0;
+  }
+  /* The picked subagent's name gives way before anything else in the row. */
+  .picker.agents {
+    flex-shrink: 1;
+    min-width: 0;
+    gap: 1ch;
+    /* Its menu is placed against the whole row, so it stays inside the panel. */
+    position: static;
+  }
+  .picked {
+    display: flex;
+    gap: 1ch;
+    min-width: 0;
+  }
+  .picked.on,
+  .picked.open,
+  .agent-menu button.on {
+    color: var(--bright);
+  }
+  .who {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Every subagent, by batch as on the overview; long lists scroll. */
+  .menu.agent-menu {
+    left: var(--pad-x);
+    min-width: min(28ch, calc(100% - 2 * var(--pad-x)));
+    max-width: min(60ch, calc(100% - 2 * var(--pad-x)));
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+  .agent-menu button {
+    min-width: 0;
+  }
+  .agent-menu button {
+    display: flex;
+  }
+  .batch {
+    padding: 0 2ch;
+    color: var(--faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .batch:not(:first-child) {
+    margin-top: calc(var(--gap) * 0.6);
+  }
+  .mark {
+    width: 2.5ch;
+    flex-shrink: 0;
+  }
+  .mark.running,
+  .mark.done {
+    color: var(--ok);
+  }
+  .mark.failed {
+    color: var(--bad);
+  }
+  .mark.stopped {
+    color: var(--faint);
   }
   /* A page's title can be long; its tab keeps to a few words. */
   .pages .tab button:first-child {

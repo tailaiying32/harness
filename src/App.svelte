@@ -345,7 +345,7 @@
       //   @termclose     close the tab on show, answering "close" if it asks
       //   @docs          show the docs view (the terminal goes off screen)
       //   @info          show chat info's page
-      //   @agent <n>     unfold the nth subagent in chat info (from 0)
+      //   @agent <n>     show the nth subagent full size in chat info (from 0)
       //   @agents        wait (up to 5 min) until no subagent is running
       //   @notes <text>  write the open chat's notes (the rest of the line, spaces and all)
       //   @docedit <text>  save <text> as the open chat's first document, as typing in its tab does
@@ -402,7 +402,10 @@
         }
       }
       if (directive === "settings") showSettings = !showSettings;
-      if (directive === "info") current.openInfo();
+      if (directive === "info") {
+        current.openInfo();
+        current.info.show(null);
+      }
       if (directive === "agent") {
         const agent = current.info.agents[Number(value)];
         if (agent) current.openInfo(agent.toolId);
@@ -518,7 +521,7 @@
               durationMs: a.durationMs ?? null,
             })),
             background: current.info.background.map((b) => ({ ...b })),
-            unfolded: [...current.info.unfolded],
+            shownAgent: current.info.shown,
             // What the page shows, as text.
             shown: document.querySelector<HTMLElement>(".panel")?.innerText.slice(0, 1500) ?? null,
           },

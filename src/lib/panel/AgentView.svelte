@@ -1,17 +1,17 @@
 <script lang="ts">
-  // One subagent's steps in chat info: what it was asked, its steps folded
-  // like the chat's (open one for its output), what it wrote, and the answer
-  // it handed back. `boxed`: drawn in the small box under its row on the page,
-  // whose row already says how it is doing. Stays at the bottom while it
-  // runs, unless the user scrolls up.
+  // One subagent in chat info, full size: its name and how it is doing, what
+  // it was asked, its steps folded like the chat's (open one for its output),
+  // what it wrote, and the answer it handed back. Stays at the bottom while
+  // it runs, unless the user scrolls up.
   import { onMount, tick } from "svelte";
   import Markdown from "../chat/Markdown.svelte";
   import WorkRun from "../chat/WorkRun.svelte";
   import type { Chat } from "../state/chat.svelte";
   import { ago, runTime, type Agent, type AgentStep } from "../state/chatInfo.svelte";
   import type { ToolCall } from "../tools";
+  import { MARKS } from "./agentMarks";
 
-  let { chat, agent, boxed = false }: { chat: Chat; agent: Agent; boxed?: boolean } = $props();
+  let { chat, agent }: { chat: Chat; agent: Agent } = $props();
 
   // Runs of tool calls become one folded line, as in the chat.
   type Group = { kind: "run"; tools: ToolCall[] } | { kind: "text"; text: string };
@@ -81,9 +81,12 @@
   });
 </script>
 
-<div class="scroll" class:boxed bind:this={scroller} onscroll={onScroll}>
+<div class="scroll" bind:this={scroller} onscroll={onScroll}>
   <div class="content" bind:this={content}>
-    {#if !boxed}<div class="faint">{top}</div>{/if}
+    <div class="head">
+      <div class="row"><span class="marker {agent.state}">{MARKS[agent.state]}</span><span class="name">{agent.name}</span></div>
+      <div class="row"><span class="marker"></span><span class="faint">{top}</span></div>
+    </div>
 
     {#if agent.prompt}
       <div class="row">
@@ -128,9 +131,6 @@
 </div>
 
 <style>
-  .scroll.boxed {
-    padding: 0;
-  }
   .scroll {
     flex: 1;
     min-height: 0;
@@ -151,6 +151,19 @@
   }
   .marker.live {
     color: var(--accent);
+  }
+  .marker.running,
+  .marker.done {
+    color: var(--ok);
+  }
+  .marker.failed {
+    color: var(--bad);
+  }
+  .marker.stopped {
+    color: var(--faint);
+  }
+  .name {
+    color: var(--bright);
   }
   .body {
     min-width: 0;
