@@ -76,8 +76,26 @@ pub struct SpawnOptions {
     /// terminal), one group per server.
     pub tools: Vec<AppTools>,
     /// The chat's notes file, which the user writes in the side panel. The
-    /// agent is told where it is and may read it; it may not exist yet.
+    /// agent is told where it is and may read it, and a main chat may write
+    /// it too; it may not exist yet.
     pub notes: Option<PathBuf>,
+}
+
+/// Where the chat's notes are, for the agent's instructions. Read only when the
+/// user mentions them, so nothing changes from turn to turn. `writable`: a main
+/// chat may change them when asked; a side chat can't change files.
+pub fn notes_instruction(notes: &Path, writable: bool) -> String {
+    let rule = if writable {
+        "The user sees it in the app's side panel and may edit it at any time. Read it when they \
+mention their notes. Write to it when they ask you to put something in their notes: read it first, \
+then change only what they asked for and keep the rest of their text."
+    } else {
+        "Read it when they mention their notes. Don't write to it."
+    };
+    format!(
+        "The user keeps notes for this chat in {} (markdown; it may not exist yet). {rule}",
+        notes.display()
+    )
 }
 
 /// A running tool call's result: MCP content items, or an error message.

@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SideOptions, SpawnOptions};
+use super::{AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SideOptions, SpawnOptions, notes_instruction};
 use crate::events::{AgentEvent, ApprovalKind, Block, Decision, ModelInfo, SessionState};
 
 /// How many stderr lines to keep for an error message when the process dies.
@@ -63,11 +63,16 @@ planning, or once this chat already works in a worktree.";
 /// Settings for every main chat launch. Makes Claude Code's own worktree tool
 /// always ask, in every mode, so the request reaches the app instead of Claude
 /// Code making a worktree inside the repo by itself (tested on CLI 2.1.322:
-/// without this it doesn't ask). The app's own tools, if any, never ask.
-fn launch_settings(tools: &[AppTools]) -> String {
+/// without this it doesn't ask). The app's own tools, if any, never ask, nor
+/// do writes to the chat's notes file: `Edit(//<absolute path>)` covers Write
+/// and Edit (tested on CLI 2.1.322 in default mode, path with a space).
+fn launch_settings(tools: &[AppTools], notes: Option<&Path>) -> String {
     let mut permissions = json!({ "ask": ["EnterWorktree"] });
-    if !tools.is_empty() {
-        let allow: Vec<String> = tools.iter().map(|t| format!("mcp__{}", t.server)).collect();
+    let mut allow: Vec<String> = tools.iter().map(|t| format!("mcp__{}", t.server)).collect();
+    if let Some(notes) = notes {
+        allow.push(format!("Edit(/{})", notes.display()));
+    }
+    if !allow.is_empty() {
         permissions["allow"] = json!(allow);
     }
     json!({ "permissions": permissions }).to_string()
@@ -110,16 +115,6 @@ fn notes_access(notes: &Path) -> Vec<String> {
     }
 }
 
-/// Where the chat's notes are, for the agent's instructions. Read only when the
-/// user mentions them, so nothing changes from turn to turn.
-fn notes_instruction(notes: &Path) -> String {
-    format!(
-        "The user keeps notes for this chat in {} (markdown; it may not exist yet). Read it when \
-they mention their notes. Don't write to it.",
-        notes.display()
-    )
-}
-
 /// The command line for one chat's process.
 fn launch_args(opts: &SpawnOptions) -> Vec<String> {
     if let Some(side) = &opts.side {
@@ -140,7 +135,7 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
     ]
     .map(String::from)
     .to_vec();
-    args.extend(["--settings".to_string(), launch_settings(&opts.tools)]);
+    args.extend(["--settings".to_string(), launch_settings(&opts.tools, opts.notes.as_deref())]);
     let mut instructions = format!("{PLAN_INSTRUCTION}\n\n{WORKTREE_INSTRUCTION}");
     if !opts.tools.is_empty() {
         args.extend(["--mcp-config".to_string(), mcp_config(&opts.tools)]);
@@ -152,7 +147,7 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
     if let Some(notes) = &opts.notes {
         args.extend(notes_access(notes));
         instructions.push_str("\n\n");
-        instructions.push_str(&notes_instruction(notes));
+        instructions.push_str(&notes_instruction(notes, true));
     }
     // Per launch: a resumed session does not remember it.
     args.extend(["--append-system-prompt".to_string(), instructions]);
@@ -197,7 +192,7 @@ fn side_args(opts: &SpawnOptions, side: &SideOptions) -> Vec<String> {
     if let Some(notes) = &opts.notes {
         args.extend(notes_access(notes));
         instructions.push_str("\n\n");
-        instructions.push_str(&notes_instruction(notes));
+        instructions.push_str(&notes_instruction(notes, false));
     }
     args.extend(["--append-system-prompt".to_string(), instructions]);
     if let Some(id) = &opts.resume_id {
@@ -1445,6 +1440,31 @@ mod tests {
             let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
             assert!(args[at + 1].contains("/data/notes/chat-1/notes.md"));
         }
+    }
+
+    #[test]
+    fn a_chat_may_write_its_notes_without_asking_but_a_side_chat_may_not() {
+        let opts = |side: Option<SideOptions>| SpawnOptions {
+            binary: "claude".into(),
+            project_path: "/work".into(),
+            resume_id: None,
+            mode: None,
+            model: None,
+            effort: None,
+            side,
+            tools: Vec::new(),
+            notes: Some("/data/notes/chat-1/notes.md".into()),
+        };
+        let arg_after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).map(|at| args[at + 1].clone());
+
+        let main = launch_args(&opts(None));
+        let settings: Value = serde_json::from_str(&arg_after(&main, "--settings").unwrap()).unwrap();
+        assert_eq!(settings["permissions"]["allow"], json!(["Edit(//data/notes/chat-1/notes.md)"]));
+        assert!(arg_after(&main, "--append-system-prompt").unwrap().contains("Write to it when they ask"));
+
+        let side = launch_args(&opts(Some(SideOptions::default())));
+        assert!(arg_after(&side, "--settings").is_none());
+        assert!(arg_after(&side, "--append-system-prompt").unwrap().contains("Don't write to it."));
     }
 
     #[test]

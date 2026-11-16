@@ -683,11 +683,7 @@ fn sign_in_needed(shared: &Shared, e: RpcError) {
 fn instructions(opts: &SpawnOptions) -> Option<String> {
     let mut lines: Vec<String> = opts.tools.iter().map(|t| t.instruction.to_string()).collect();
     if let Some(notes) = &opts.notes {
-        lines.push(format!(
-            "The user keeps notes for this chat in {} (markdown; it may not exist yet). Read it when \
-they mention their notes. Don't write to it.",
-            notes.display()
-        ));
+        lines.push(super::notes_instruction(notes, true));
     }
     let lines: Vec<String> = lines.into_iter().filter(|l| !l.trim().is_empty()).collect();
     (!lines.is_empty()).then(|| format!("(Notes from the app you run in, not from the user.)\n{}", lines.join("\n")))

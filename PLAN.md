@@ -1383,6 +1383,19 @@ ends (`write_notes`), read lazily the first time the tab shows (`read_notes`).
   `--add-dir <notes folder>` (no permission prompt, tested on CLI 2.1.322) and
   a line in its instructions with the file's path. Nothing is sent per turn,
   so prompt caching isn't disturbed.
+- **The main chat writes them too** (2026-11-15), when the user asks ("put
+  this in my notes"): it reads first and changes only what was asked. No
+  approval card: `--settings` allows `Edit(//<notes file>)`, which covers
+  Write and Edit (tested on CLI 2.1.322, default mode, a path with a space).
+  Cursor is told the same; its own permission asks decide. The side chat
+  stays read-only. The panel reads the notes back from disk when a Write or
+  Edit to the file finishes, and at every turn end (catches shell writes).
+  The editor takes the new text even while the user types, replacing only
+  the changed middle so the cursor stays put; that change isn't saved back,
+  and a pending save of older typing is dropped, so neither undoes Claude's
+  write. A link to the notes file opens the notes tab, not a second tab.
+  **Tested** live with the self-test (Haiku, `@answer none`): notes edited
+  with no card, the panel showed the new text, no extra tab.
 - The docs icon is never faded now. Ending the side chat or closing the
   browser still closes the panel when only the notes are left
   (`Chat.hasPanelWork`).

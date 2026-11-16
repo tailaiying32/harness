@@ -51,9 +51,11 @@
 
   function flushNotes() {
     clearTimeout(notesTimer);
-    if (notesUnsaved === null) return;
     const text = notesUnsaved;
     notesUnsaved = null;
+    // Claude wrote the notes since this was typed: its text is on disk and in
+    // the editor now, so saving this would quietly undo it.
+    if (text === null || text !== chat.notes) return;
     void chat.saveNotes(text);
   }
 

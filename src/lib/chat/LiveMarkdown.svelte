@@ -26,6 +26,8 @@
   let host = $state<HTMLElement>();
   let view = $state<EditorView>();
   let gone = false;
+  /** A change from outside is being put in: not an edit to report back. */
+  let taking = false;
 
   onMount(async () => {
     const { createLiveMarkdown } = await import("./liveMarkdown");
@@ -33,18 +35,31 @@
     view = createLiveMarkdown(host, {
       text,
       placeholder,
-      onchange: (t) => onchange(t),
+      onchange: (t) => taking || onchange(t),
       onblur: () => ondone?.(),
     });
     if (autofocus) view.focus();
   });
 
-  // Text changed from outside (a new plan arrived): take it, unless the user
-  // is writing here.
+  // Text changed from outside (a new plan arrived, Claude wrote the notes):
+  // take it, even while the user is writing here. Only the changed middle is
+  // replaced, so the cursor stays where it was in the text around it. Not
+  // reported as an edit: saving it back could undo a later write by Claude.
   $effect(() => {
-    const t = text;
-    if (!view || view.hasFocus || t === view.state.doc.toString()) return;
-    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: t } });
+    const next = text;
+    if (!view) return;
+    const now = view.state.doc.toString();
+    if (next === now) return;
+    let from = 0;
+    while (from < now.length && from < next.length && now[from] === next[from]) from++;
+    let end = 0;
+    while (end < now.length - from && end < next.length - from && now[now.length - 1 - end] === next[next.length - 1 - end]) end++;
+    taking = true;
+    try {
+      view.dispatch({ changes: { from, to: now.length - end, insert: next.slice(from, next.length - end) } });
+    } finally {
+      taking = false;
+    }
   });
 
   onDestroy(() => {
