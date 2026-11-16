@@ -896,8 +896,8 @@ https://www.magicpatterns.com/os/tWmrW2q43Q7sWofaHnFJVj?file=2oZgfpBgi1cedNPY3NJ
   - Dark: background `#111210`, text `#cfccc2`, bright text `#f1eee4`, dim
     `#7d7a70`, faint `#4d4b43`, rule `#24251f`, accent `#d9a35b`, ok `#8fae7e`,
     bad `#d47766`.
-  - Light: background `#f8f7f4`, text `#3a3832`, bright `#191813`, dim
-    `#87857d`, faint `#b8b6af`, rule `#e2e1db`, accent `#a8691c`, ok `#52733f`,
+  - Light: background `#fcfcfb`, text `#3a3832`, bright `#191813`, dim
+    `#858480`, faint `#b7b6b2`, rule `#e6e6e3`, accent `#a8691c`, ok `#52733f`,
     bad `#b0463a`.
 - **Sidebar:** bare chat titles under each project's path, one status dot per
   chat (accent = waiting on the user, ok = working, hollow = idle). No preview
