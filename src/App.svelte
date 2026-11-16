@@ -100,6 +100,19 @@
     return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
   }
 
+  // An agent working in its browser page can take the window's keys for a
+  // moment (the core hands them straight back; see `keep_keys` in
+  // browser.rs). The box being typed in loses its cursor then, so it gets it
+  // back when the keys return with nothing else picked.
+  let lastBox: HTMLElement | null = null;
+  function noteFocus(e: FocusEvent) {
+    if (typing(e.target)) lastBox = e.target as HTMLElement;
+  }
+  function keysBack() {
+    if (document.activeElement && document.activeElement !== document.body) return;
+    if (lastBox?.isConnected) lastBox.focus({ preventScroll: true });
+  }
+
   // Two picked themes, and which shows: one of them always, or whichever the
   // system is in, switching the moment it does.
   let darkTheme = $state(prefs.darkTheme);
@@ -526,6 +539,8 @@
 <!-- A file dropped anywhere but the message box would replace the page. -->
 <svelte:window
   onkeydown={onKey}
+  onfocusin={noteFocus}
+  onfocus={keysBack}
   ondragover={(e) => e.dataTransfer?.types.includes("Files") && e.preventDefault()}
   ondrop={(e) => e.dataTransfer?.types.includes("Files") && e.preventDefault()}
 />
