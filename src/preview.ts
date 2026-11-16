@@ -200,6 +200,11 @@ const imagesChat: AgentEvent[] = [
     is_error: false,
     parent_tool_id: null,
   },
+  // A long address, to show the page line cut short with "…".
+  tool("it4", "mcp__harness_browser__open", {
+    url: "localhost:5173/settings/themes/6ad870ba-ad9b-4475-9f7c-2abca1a5dec3/preview/13facc18-24ed-44d9-a7b8-2019fc4c5bae",
+  }),
+  result("it4", "Opened."),
   ended,
 ];
 
