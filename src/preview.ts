@@ -17,6 +17,28 @@ function emit(session_id: string, event: AgentEvent) {
   callbacks.get(channel)?.({ message: { session_id, event }, index: index++ });
 }
 
+// Each chat's browser tabs, as the core keeps them.
+type PreviewTabs = { tabs: { id: string; url: string; title: string; loading: boolean }[]; shown: string | null; next: number };
+const browsers = new Map<string, PreviewTabs>([
+  ["planning", { tabs: [{ id: "1", url: "http://localhost:5173/", title: "My app", loading: false }], shown: "1", next: 1 }],
+]);
+function browserOf(chat: string): PreviewTabs {
+  let pages = browsers.get(chat);
+  if (!pages) browsers.set(chat, (pages = { tabs: [], shown: null, next: 0 }));
+  return pages;
+}
+function newBrowserTab(chat: string): string {
+  const pages = browserOf(chat);
+  const id = String(++pages.next);
+  pages.tabs.push({ id, url: "", title: "", loading: false });
+  pages.shown = id;
+  return id;
+}
+function emitBrowser(chat: string) {
+  const pages = browserOf(chat);
+  emit(chat, { kind: "browser_tabs", tabs: pages.tabs.map((t) => ({ ...t })), shown: pages.shown });
+}
+
 const home = "/Users/you";
 const now = Date.now();
 const part = (number: number, state: PrInfo["state"], branch: string): PrInfo => ({
@@ -613,6 +635,24 @@ const commands: Record<string, (args: Args) => unknown> = {
     if (waiting) waiting.push(args.messageId);
     else void play(args.sessionId, args.messageId);
   },
+  // Side chats answer at once and are named from their first question.
+  side_send: (args) => {
+    const id = String(args.sideId);
+    const text = String(args.text);
+    setTimeout(() => {
+      emit(id, { kind: "title_changed", title: text.split(/\s+/).slice(0, 3).join(" ") });
+      emit(id, {
+        kind: "assistant_block",
+        message_id: `side-${args.messageId}`,
+        block: { type: "text", text: `A side answer to: ${text}` },
+        parent_tool_id: null,
+      });
+      emit(id, { kind: "turn_ended", ok: true, duration_ms: 300 });
+    }, 300);
+  },
+  side_interrupt: () => undefined,
+  side_end: () => undefined,
+  side_end_all: () => undefined,
   // Notes live in memory here; the "planning" chat starts with some.
   read_notes: (args) => notesByChat.get(String(args.chatId)) ?? "",
   write_notes: (args) => void notesByChat.set(String(args.chatId), String(args.text)),
@@ -682,20 +722,51 @@ const commands: Record<string, (args: Args) => unknown> = {
     if (!bytes) throw "Image gone";
     return bytes;
   },
-  // The browser: no page is drawn here (the real one is a separate web view
-  // the core places over the panel); the tab and address line still work.
+  // The browser: no page is drawn here (the real ones are separate web views
+  // the core places over the panel); the tabs and address line still work.
   browser_navigate: (args: Args) => {
+    const chat = String(args.chatId);
     const url = String(args.url).trim();
     if (!/^(https?:\/\/)?(localhost|127\.0\.0\.1|\[::1\])?(:\d+)?(\/|$)/.test(url)) throw `Only localhost pages can be opened here, not ${url}.`;
     const full = url.includes("://") ? url : `http://${url.startsWith(":") ? "localhost" + url : url}`;
-    emit(String(args.chatId), { kind: "browser_state", url: full, title: "", loading: true });
-    setTimeout(() => emit(String(args.chatId), { kind: "browser_state", url: full, title: "Sample page", loading: false }), 400);
+    const pages = browserOf(chat);
+    const id = (args.tab as string | null) ?? pages.shown ?? newBrowserTab(chat);
+    const tab = pages.tabs.find((t) => t.id === id);
+    if (!tab) throw `There is no tab ${id}`;
+    Object.assign(tab, { url: full, title: "", loading: true });
+    emitBrowser(chat);
+    setTimeout(() => {
+      Object.assign(tab, { title: "Sample page", loading: false });
+      emitBrowser(chat);
+    }, 400);
+  },
+  browser_new_tab: (args: Args) => {
+    const id = newBrowserTab(String(args.chatId));
+    emitBrowser(String(args.chatId));
+    return id;
+  },
+  browser_pick: (args: Args) => {
+    browserOf(String(args.chatId)).shown = String(args.tab);
+    emitBrowser(String(args.chatId));
+  },
+  browser_close_tab: (args: Args) => {
+    const pages = browserOf(String(args.chatId));
+    const at = pages.tabs.findIndex((t) => t.id === args.tab);
+    if (at < 0) return;
+    pages.tabs.splice(at, 1);
+    if (pages.shown === args.tab) pages.shown = pages.tabs[Math.min(at, pages.tabs.length - 1)]?.id ?? null;
+    emitBrowser(String(args.chatId));
   },
   browser_reload: () => {},
   browser_place: () => {},
-  browser_close: (args: Args) => emit(String(args.chatId), { kind: "browser_closed" }),
-  browser_current: (args: Args) =>
-    args.chatId === "planning" ? { url: "http://localhost:5173/", title: "My app", loading: false } : null,
+  browser_close: (args: Args) => {
+    browsers.delete(String(args.chatId));
+    emit(String(args.chatId), { kind: "browser_tabs", tabs: [], shown: null });
+  },
+  browser_current: (args: Args) => {
+    const pages = browserOf(String(args.chatId));
+    return { tabs: pages.tabs.map((t) => ({ ...t })), shown: pages.shown };
+  },
   read_doc: (args: Args) => {
     const path = String(args.path);
     if (path.endsWith("gone.md")) throw "That file doesn't exist.";

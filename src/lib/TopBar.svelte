@@ -1,12 +1,13 @@
 <script lang="ts">
   // The bar along the top of the chat and panel. On a Mac it sits in the window's
   // title bar, beside the window buttons, so it costs no room. Over the chat:
-  // its title, and the panel's five views as icons, pushed against the panel's
+  // its title (click to rename), and the panel's five views as icons, pushed against the panel's
   // line. Clicking a view opens the panel on it; clicking the one on show hides
   // the panel. Over the open panel: that view's own row (see PanelBar), so the
   // panel has none of its own. Empty space drags the window.
   import PanelIcon from "./PanelIcon.svelte";
   import PanelBar from "./panel/PanelBar.svelte";
+  import RenameField from "./RenameField.svelte";
   import type { AppState } from "./state/app.svelte";
   import type { PanelView } from "./state/chat.svelte";
   import { terminals } from "./state/terminals.svelte";
@@ -18,6 +19,15 @@
     app.projects.flatMap((p) => p.sessions).find((s) => s.id === chat.sessionId)?.title ?? "",
   );
   const open = $derived(chat.panelOpen && chat.panelHasContent);
+
+  /** The chat whose name is being edited here; switching chats ends it. */
+  let renaming = $state<string | null>(null);
+
+  async function finishRename(save: boolean, text: string) {
+    const id = renaming;
+    renaming = null;
+    if (save && id) await app.rename(id, text);
+  }
 
   // Side chats copy a Claude Code conversation, so Cursor chats have none.
   const views = $derived(
@@ -46,7 +56,14 @@
      panel --panel-w), so the panel's dividing line runs straight up through the bar. -->
 <header class="bar" data-tauri-drag-region>
   <span class="chat" data-tauri-drag-region>
-    <span class="title" data-tauri-drag-region>{title}</span>
+    <!-- Only the name itself is clickable; the space after it still drags. -->
+    <span class="title" data-tauri-drag-region>
+      {#if renaming && renaming === chat.sessionId}
+        <RenameField value={title} done={finishRename} />
+      {:else if title}
+        <button title="{title} (click to rename)" onclick={() => (renaming = chat.sessionId)}>{title}</button>
+      {/if}
+    </span>
     <span class="views">
       {#each views as { view, name } (view)}
         <button
@@ -89,9 +106,16 @@
   .title {
     flex: 1;
     min-width: 0;
+    display: flex;
+    color: var(--dim);
+  }
+  .title button {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-    color: var(--dim);
+  }
+  .title button:hover {
+    color: var(--fg);
   }
   .views {
     flex-shrink: 0;

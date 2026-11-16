@@ -2,13 +2,11 @@
   // Chat info's page: how full the context is, Claude's task list,
   // the chat's subagents (running and finished) and what runs in the
   // background. Sections with nothing in them are left out. Clicking a
-  // subagent unfolds its steps under its row, in a box of its own that
-  // follows the newest step (see AgentView); clicking again folds it.
+  // subagent shows it full size (see AgentView); so does picking it in the
+  // top bar's ▾ menu (see PanelBar), and "chat info" there comes back here.
   import type { Chat } from "../state/chat.svelte";
   import { ago, QUIET_MS, runTime, span, tokens, type Agent } from "../state/chatInfo.svelte";
   import { past, present } from "../tools";
-  import { tick } from "svelte";
-  import AgentView from "./AgentView.svelte";
   import { MARKS } from "./agentMarks";
 
   let { chat }: { chat: Chat } = $props();
@@ -29,6 +27,9 @@
 
   const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
+  /** A batch's label: the first line of the message it answers. */
+  const askLine = (text: string) => text.trim().split("\n")[0] || "before any message";
+
   /** What the agent did last, in the chat's words. */
   function lastStep(agent: Agent): string {
     if (agent.state === "running" && agent.live) return agent.live;
@@ -47,22 +48,11 @@
     return at ? ago(now - at) : "";
   }
 
-  // An agent opened from the chat is scrolled into view once.
-  let page: HTMLElement;
-  $effect(() => {
-    const id = info.reveal;
-    if (!id) return;
-    void tick().then(() => {
-      page?.querySelector(`[data-agent="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" });
-      info.reveal = null;
-    });
-  });
-
   const quiet = (agent: Agent) =>
     agent.state === "running" && agent.lastAt !== undefined && now - agent.lastAt > QUIET_MS;
 </script>
 
-<div class="page" bind:this={page}>
+<div class="page">
   {#if context}
     <section>
       <div class="head">context</div>
@@ -96,11 +86,13 @@
         <span>subagents</span>
         <span>{[info.running && `${info.running} running`, finished && `${finished} finished`].filter(Boolean).join(" · ")}</span>
       </div>
+      <!-- By batch, newest first, each under the message it answers; the
+           same grouping as the top bar's ▾ menu. -->
+      {#each info.batches as batch (batch.batch)}
       <div class="agents">
-        {#each info.agents as agent (agent.toolId)}
-          {@const open = info.isOpen(agent.toolId)}
-          <div class="unit" data-agent={agent.toolId}>
-          <button class="agent" aria-expanded={open} onclick={() => info.toggle(agent.toolId)}>
+        <div class="ask faint">{askLine(batch.ask)}{batch.followUp ? " · follow-up" : ""}</div>
+        {#each batch.agents as agent (agent.toolId)}
+          <button class="agent" onclick={() => info.show(agent.toolId)}>
             <span class="mark {agent.state}">{MARKS[agent.state]}</span>
             <span class="lines">
               <span class="pair">
@@ -113,14 +105,9 @@
               </span>
             </span>
           </button>
-          {#if open}
-            <div class="box">
-              <AgentView {chat} {agent} boxed />
-            </div>
-          {/if}
-          </div>
         {/each}
       </div>
+      {/each}
     </section>
   {/if}
 
@@ -228,20 +215,15 @@
     flex-direction: column;
     gap: calc(var(--gap) * 0.7);
   }
-  .unit {
-    display: flex;
-    flex-direction: column;
-    gap: calc(var(--gap) * 0.5);
+  .agents + .agents {
+    margin-top: calc(var(--gap) * 0.8);
   }
-  /* A subagent's steps: a box of fixed height under its row, with a line on
-     its left, that scrolls on its own. */
-  .box {
-    height: 16em;
-    margin-left: 2.5ch;
-    padding-left: 1.5ch;
-    border-left: 1px solid var(--line);
-    display: flex;
-    flex-direction: column;
+  /* What a batch was for: one faint line, cut short. */
+  .ask {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .agent {
     display: flex;

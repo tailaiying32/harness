@@ -22,6 +22,7 @@
     checkSetup,
     closeSession,
     listModels,
+    sideEndAll,
     subscribe,
     terminalText,
     terminalWrite,
@@ -44,6 +45,7 @@
   } from "./lib/models";
   import { AppState } from "./lib/state/app.svelte";
   import { terminals } from "./lib/state/terminals.svelte";
+  import { tabKeyFrom } from "./lib/state/tabKeys";
   import type { Chat } from "./lib/state/chat.svelte";
   import {
     applyFontSize,
@@ -131,7 +133,7 @@
   function onKey(e: KeyboardEvent) {
     // In a terminal, Ctrl keys belong to the shell (Ctrl+C, Ctrl+N, Ctrl+R...).
     if (terminals.focused() && e.ctrlKey && !e.metaKey) return;
-    if (terminalKey(e)) {
+    if (tabKeyFrom(app.current, e)) {
       e.preventDefault();
       return;
     }
@@ -152,25 +154,8 @@
       chat.panelWide = false;
     }
   }
-  /**
-   * The terminal's own shortcuts, only while it has the keys: Cmd+T for a new
-   * tab in the project's main folder, Cmd+Shift+[ and ] for the tab before
-   * and after. Cmd+W comes from the Mac menu (see `closeKey`).
-   */
-  function terminalKey(e: KeyboardEvent): boolean {
-    if (!terminals.focused() || !e.metaKey || e.altKey || e.ctrlKey) return false;
-    const project = app.current.projectPath.trim();
-    if (!e.shiftKey && e.key.toLowerCase() === "t") {
-      void terminals.open(project).catch((err) => app.current.showError(String(err)));
-      return true;
-    }
-    if (e.shiftKey && (e.code === "BracketLeft" || e.code === "BracketRight")) {
-      terminals.step(project, e.code === "BracketLeft" ? -1 : 1);
-      return true;
-    }
-    return false;
-  }
-  // Keys the terminal leaves to the window: the app's own Cmd shortcuts.
+  // Keys the terminal leaves to the window: the app's own Cmd shortcuts,
+  // the tab keys among them (see tabKeys.ts).
   terminals.keys = (e) =>
     e.metaKey &&
     !e.ctrlKey &&
@@ -196,6 +181,8 @@
 
   onMount(async () => {
     await subscribe((envelope) => app.route(envelope));
+    // Side chats aren't kept across a reload: end any the last window left running.
+    void sideEndAll().catch(() => {});
     app.home = await homeDir();
     await app.refresh();
     // A first chat starts where the last one was, or at home.
@@ -343,7 +330,8 @@
       //   @delete <n>    delete the nth chat in the sidebar
       //   @close         shut the open chat's process down, as going idle does
       //   @exited        wait until the open chat's process has exited (idle shutdown)
-      //   @endside       end the open chat's side chat
+      //   @endside       end the open chat's side chat on show
+      //   @newside       start another side chat tab (the next /btw goes to it)
       //   A message starting with /btw goes to the side chat; the test waits for its answer.
       //   @image <word>  attach a picture of <word>, as a paste would, to the next message
       //   @file <path>   add the file at <path>, as a drop would, to the next message
@@ -357,7 +345,7 @@
       //   @termclose     close the tab on show, answering "close" if it asks
       //   @docs          show the docs view (the terminal goes off screen)
       //   @info          show chat info's page
-      //   @agent <n>     unfold the nth subagent in chat info (from 0)
+      //   @agent <n>     show the nth subagent full size in chat info (from 0)
       //   @agents        wait (up to 5 min) until no subagent is running
       //   @notes <text>  write the open chat's notes (the rest of the line, spaces and all)
       //   @docedit <text>  save <text> as the open chat's first document, as typing in its tab does
@@ -366,7 +354,7 @@
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
-        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|image|file|browser|settings|termtab|termclose|docs|info|agent|agents)(?:\s+(\S+))?$/) ??
+        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|newside|image|file|browser|settings|termtab|termclose|docs|info|agent|agents)(?:\s+(\S+))?$/) ??
         message.match(/^@(notes|docedit|planedit|terminal|termwait)\s+(.+)$/s) ??
         [];
       const current = app.current;
@@ -402,18 +390,22 @@
       if (directive === "delete") await app.remove(nth(value) ?? "");
       if (directive === "wait") await pause(Number(value));
       if (directive === "endside") await current.endSide();
+      if (directive === "newside") current.newSide();
       if (directive === "image") imageWords.push(await attach(current, await pictureOf(value)));
       if (directive === "file") imageWords.push(await current.addDraftFile(value));
       if (directive === "browser") {
         current.openBrowser();
         if (value) {
-          await browserNavigate(current.sessionId, value);
+          await browserNavigate(current.sessionId, null, value);
           await pause(300);
           for (let i = 0; i < 100 && (!current.browser || current.browser.loading); i++) await pause(100);
         }
       }
       if (directive === "settings") showSettings = !showSettings;
-      if (directive === "info") current.openInfo();
+      if (directive === "info") {
+        current.openInfo();
+        current.info.show(null);
+      }
       if (directive === "agent") {
         const agent = current.info.agents[Number(value)];
         if (agent) current.openInfo(agent.toolId);
@@ -529,7 +521,7 @@
               durationMs: a.durationMs ?? null,
             })),
             background: current.info.background.map((b) => ({ ...b })),
-            unfolded: [...current.info.unfolded],
+            shownAgent: current.info.shown,
             // What the page shows, as text.
             shown: document.querySelector<HTMLElement>(".panel")?.innerText.slice(0, 1500) ?? null,
           },
@@ -539,6 +531,7 @@
           browser: {
             on: current.browserOn,
             page: current.browser,
+            tabs: current.browserTabs.map((t) => t.url),
             pageLines: current.items.filter((item) => item.type === "page").length,
             slot: (() => {
               const r = document.querySelector<HTMLElement>(".slot")?.getBoundingClientRect();
@@ -554,6 +547,7 @@
           planPending: current.planPending,
           side: current.side ? current.side.items.map((item) => ({ ...item })) : null,
           sideTitle: current.side?.title ?? null,
+          sides: current.sides.map((s) => s.title),
           // `shown` leaves out blocks the browser hasn't laid out (off screen, or
           // everything while the window is hidden); `text` has them all.
           shown: document.querySelector<HTMLElement>(".content")?.innerText ?? "",

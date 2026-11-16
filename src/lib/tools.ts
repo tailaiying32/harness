@@ -45,7 +45,14 @@ function browserWording(tool: string, input: unknown): [string, string, string] 
   switch (tool) {
     case "open": {
       const url = field(input, "url").replace(/^https?:\/\//, "");
-      return [`opened ${url}`, `Opening ${url}`, `open ${url}`];
+      const where = input && typeof input === "object" && (input as Record<string, unknown>).new_tab === true ? " in a new tab" : "";
+      return [`opened ${url}${where}`, `Opening ${url}${where}`, `open ${url}${where}`];
+    }
+    case "tabs":
+      return [`listed the browser's tabs`, `Listing the browser's tabs`, `list the browser's tabs`];
+    case "close": {
+      const tab = field(input, "tab");
+      return [`closed browser tab ${tab}`, `Closing browser tab ${tab}`, `close browser tab ${tab}`];
     }
     case "read":
       return [`read the page`, `Reading the page`, `read the page`];

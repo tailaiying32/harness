@@ -2,6 +2,7 @@
 // open, and what each chat's process is doing.
 
 import { terminals } from "./terminals.svelte";
+import { tabKey } from "./tabKeys";
 import {
   deleteSession,
   emptyTrash,
@@ -122,13 +123,17 @@ export class AppState {
       terminals.set(event.project, event.tabs);
       return;
     }
-    if (event.kind === "close_key") {
-      terminals.closeKey(this.current.projectPath.trim());
+    if (event.kind === "tab_key") {
+      tabKey(this.current, event.action);
       return;
     }
     // A side chat's events belong to it alone: no sidebar mark, no usage reading.
-    if (id.endsWith("#side")) {
-      this.chats.get(id.slice(0, -"#side".length))?.side?.handle(event);
+    const side = id.indexOf("#side-");
+    if (side > 0) {
+      this.chats
+        .get(id.slice(0, side))
+        ?.sides.find((s) => s.sessionId === id)
+        ?.handle(event);
       return;
     }
     if (event.kind === "status") this.statuses[id] = event.state;
@@ -214,9 +219,11 @@ export class AppState {
     return chat;
   }
 
-  /** Forgets a chat just switched away from if it holds nothing: never sent, nothing typed. */
+  /** Forgets a chat just switched away from if it holds nothing: never sent, nothing typed. Its side chats end with it. */
   private leave(chat: Chat): void {
-    if (!chat.started && !chat.hasDraft) this.chats.delete(chat.sessionId);
+    if (chat.started || chat.hasDraft) return;
+    chat.endAllSides();
+    this.chats.delete(chat.sessionId);
   }
 
   async open(sessionId: string): Promise<void> {

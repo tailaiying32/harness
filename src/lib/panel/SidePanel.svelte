@@ -9,7 +9,7 @@
   // of its tab while Claude waits (mouse only, like every approval: no key
   // approves a plan). Side chat: one tab for the side conversation, its own
   // message box at the foot. Chat info: the chat's context, tasks and
-  // subagents, each unfolding to its steps (see InfoView, AgentView).
+  // subagents (see InfoView), or one subagent full size (see AgentView).
   // Showing and hiding the panel is the top bar's.
   import { contentClick } from "../clicks";
   import ChatView from "../chat/ChatView.svelte";
@@ -17,6 +17,7 @@
   import BrowserView from "./BrowserView.svelte";
   import TerminalView from "./TerminalView.svelte";
   import InfoView from "./InfoView.svelte";
+  import AgentView from "./AgentView.svelte";
   import Markdown from "../chat/Markdown.svelte";
   import { onDestroy, untrack } from "svelte";
   import { NOTES_TAB, PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
@@ -165,7 +166,7 @@
   }
 
   // The panel is rebuilt for each chat, so what is typed in its boxes lives on
-  // the chat (planNote, sideDraft), like the main message box's draft.
+  // the chat (planNote; a side chat's own draft), like the main message box's draft.
   let box = $state<HTMLTextAreaElement>();
 
   function grow() {
@@ -195,9 +196,9 @@
   function askKey(e: KeyboardEvent) {
     if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
     e.preventDefault();
-    if (!side || !chat.sideDraft.trim()) return;
-    void side.send(chat.sideDraft);
-    chat.sideDraft = "";
+    if (!side || !side.draft.trim()) return;
+    void side.send(side.draft);
+    side.draft = "";
     queueMicrotask(growAsk);
   }
 
@@ -220,26 +221,42 @@
   {:else if chat.panelView === "browser"}
     <BrowserView {chat} {covered} />
   {:else if chat.panelView === "info"}
-    <InfoView {chat} />
+    <!-- Marked so the tab keys know chat info has the keys (see tabKeys.ts). -->
+    <div class="tabbed" data-tabs="info">
+      {#if chat.info.shownAgent}
+        <!-- Keyed, so each agent opens at its newest step. -->
+        {#key chat.info.shownAgent.toolId}
+          <AgentView {chat} agent={chat.info.shownAgent} />
+        {/key}
+      {:else}
+        <InfoView {chat} />
+      {/if}
+    </div>
   {:else if side}
-    <div class="side">
-      <ChatView chat={side} problem={null} />
-    </div>
-    <div class="foot">
-      <div class="feedback">
-        <span class="marker">&gt;</span>
-        <!-- svelte-ignore a11y_autofocus -->
-        <textarea
-          bind:this={askBox}
-          bind:value={chat.sideDraft}
-          oninput={growAsk}
-          onkeydown={askKey}
-          rows="1"
-          autofocus
-          placeholder="ask on the side"
-        ></textarea>
+    <!-- Marked so the tab keys know a side chat has the keys (see tabKeys.ts).
+         Keyed, so switching tabs swaps the whole view, box and all. -->
+    {#key side.sessionId}
+      <div class="tabbed" data-tabs="side">
+        <div class="side">
+          <ChatView chat={side} problem={null} />
+        </div>
+        <div class="foot">
+          <div class="feedback">
+            <span class="marker">&gt;</span>
+            <!-- svelte-ignore a11y_autofocus -->
+            <textarea
+              bind:this={askBox}
+              bind:value={side.draft}
+              oninput={growAsk}
+              onkeydown={askKey}
+              rows="1"
+              autofocus
+              placeholder="ask on the side"
+            ></textarea>
+          </div>
+        </div>
       </div>
-    </div>
+    {/key}
   {:else}
 
   <!-- Each tab starts at its top. -->
@@ -339,6 +356,10 @@
     }
   }
   /* The side chat: the same view as the main chat, in the panel's space. */
+  /* Lays out as if it weren't there. */
+  .tabbed {
+    display: contents;
+  }
   .side {
     flex: 1;
     min-height: 0;

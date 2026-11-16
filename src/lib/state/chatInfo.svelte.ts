@@ -40,7 +40,16 @@ export type Agent = {
   lastAt?: number;
   /** How long it ran, as the agent reported at the end (survives a restart). */
   durationMs?: number;
+  /** The turn that started it: agents started in one turn are one batch. */
+  batch: number;
+  /** The user's message its batch answers. */
+  ask: string;
+  /** Started in a turn Claude Code began on its own (after a background agent ended), not by a message. */
+  followUp: boolean;
 };
+
+/** Subagents started in one turn, and what they were for. */
+export type Batch = { batch: number; ask: string; followUp: boolean; agents: Agent[] };
 
 export type Task = { id: string; text: string; status: "pending" | "in_progress" | "completed" };
 
@@ -75,10 +84,16 @@ export class ChatInfo {
   background = $state<Background[]>([]);
   context = $state<ContextReading | null>(null);
 
-  /** Subagents unfolded on the page, by tool ID. */
-  unfolded = $state<string[]>([]);
-  /** An agent just opened from the chat: the page scrolls it into view once. */
-  reveal = $state<string | null>(null);
+  /** The subagent on show, full size, by tool ID; null shows the overview page. */
+  shown = $state<string | null>(null);
+  /** The subagent picked last, kept while the overview shows. */
+  picked = $state<string | null>(null);
+
+  /** Counts turns ended, so each agent knows its batch. */
+  private turn = 0;
+  /** The user's latest message, and how many turns ended since it. */
+  private ask = "";
+  private turnsSinceAsk = 0;
 
   /** The user pressed stop in this turn: agents cut short are "stopped", not "failed". */
   private stopped = false;
@@ -94,20 +109,38 @@ export class ChatInfo {
     return this.agents.filter((a) => a.state === "running").length;
   }
 
-  isOpen(toolId: string): boolean {
-    return this.unfolded.includes(toolId);
+  /** The subagent on show, if it is one this chat has. */
+  get shownAgent(): Agent | undefined {
+    return this.shown ? this.agent(this.shown) : undefined;
   }
 
-  /** Unfolds a subagent's steps under its row, or folds them away again. */
-  toggle(toolId: string): void {
-    if (this.isOpen(toolId)) this.unfolded = this.unfolded.filter((id) => id !== toolId);
-    else this.unfolded.push(toolId);
+  /** The subagent picked last, on show or not: the top bar's name for it, one click away. */
+  get pickedAgent(): Agent | undefined {
+    return this.picked ? this.agent(this.picked) : undefined;
   }
 
-  /** Unfolds a subagent and brings it into view (from the chat). */
-  open(toolId: string): void {
-    if (!this.isOpen(toolId)) this.unfolded.push(toolId);
-    this.reveal = toolId;
+  /** The subagents by batch, newest batch first; each in the order started. */
+  get batches(): Batch[] {
+    const out: Batch[] = [];
+    for (const agent of this.agents) {
+      const last = out[out.length - 1];
+      if (last?.batch === agent.batch) last.agents.push(agent);
+      else out.push({ batch: agent.batch, ask: agent.ask, followUp: agent.followUp, agents: [agent] });
+    }
+    return out.reverse();
+  }
+
+  /** Shows a subagent full size, or the overview (null). */
+  show(toolId: string | null): void {
+    this.shown = toolId;
+    if (toolId) this.picked = toolId;
+  }
+
+  /** The overview, then each subagent in the overview's order: the one before or after, wrapping round. */
+  step(by: number): void {
+    const stops = [null, ...this.batches.flatMap((b) => b.agents.map((a) => a.toolId))];
+    const at = Math.max(0, stops.indexOf(this.shownAgent ? this.shown : null));
+    this.show(stops[(at + by + stops.length) % stops.length]);
   }
 
   /**
@@ -148,6 +181,9 @@ export class ChatInfo {
             live: "",
             startedAt: now,
             lastAt: now,
+            batch: this.turn,
+            ask: this.ask,
+            followUp: this.turnsSinceAsk > 0,
           });
         } else if (block.name === "TodoWrite") {
           // Claude Code before 2.1.3xx sends the whole list each time. Cursor
@@ -289,6 +325,13 @@ export class ChatInfo {
           if (agent.state === "running" && !agent.background) this.end(agent, "stopped", now);
         }
         this.stopped = false;
+        this.turn++;
+        this.turnsSinceAsk++;
+        return false;
+
+      case "user_message":
+        this.ask = event.text;
+        this.turnsSinceAsk = 0;
         return false;
 
       // The process is gone: nothing of it runs any more.

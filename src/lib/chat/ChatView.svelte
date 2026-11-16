@@ -39,7 +39,7 @@
 
   const lastGroup = $derived(groups[groups.length - 1]);
 
-  /** Only the latest page line offers to open the browser: it shows one page at a time. */
+  /** Only the latest page line offers to open the browser, so older lines stay quiet. */
   const latestPage = $derived.by(() => {
     for (let i = chat.items.length - 1; i >= 0; i--) if (chat.items[i].type === "page") return chat.items[i].id;
     return undefined;
