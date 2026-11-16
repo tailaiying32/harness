@@ -522,6 +522,10 @@ export class Chat {
 
   /** The waiting plan as the user edited it; null while unedited. Sent with Approve. */
   planDraft = $state<string | null>(null);
+  /** What is typed under the plan ("what should change?"), not sent yet. Kept here so switching chats keeps it. */
+  planNote = $state("");
+  /** What is typed in the side chat's box, not sent yet. */
+  sideDraft = $state("");
 
   /** Opens the panel on docs; on `tab` if given, bringing it back if it was closed. */
   openPanel(tab?: string): void {
@@ -801,6 +805,7 @@ export class Chat {
           this.plan = item;
           this.planClosed = false;
           this.planDraft = null;
+          this.planNote = "";
           // Claude Code drafts the plan in a file of its own; that file is this tab.
           this.planPath = planOf(event.input).path;
           this.docs = this.docs.filter((doc) => doc.path !== this.planPath);
