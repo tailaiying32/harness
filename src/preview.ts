@@ -168,7 +168,7 @@ const movedChat: AgentEvent[] = [
 const imagesChat: AgentEvent[] = [
   {
     kind: "user_message",
-    text: "The theme list on the settings page gets cut off at the bottom. [image 1]",
+    text: "The theme list on the settings page gets cut off at the bottom (reported in https://github.com/you/harness/issues/12). [image 1]",
     images: [{ n: 1, media_type: "image/png" }],
   },
   { kind: "session_started", agent_session_id: "agent-images", model: "claude-opus-5-5", mode: "default" },

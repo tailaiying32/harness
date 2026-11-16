@@ -114,10 +114,31 @@ export const NOTES_TAB = "notes";
 /** The `[image n]` words in a text, in order. */
 export const IMAGE_WORD = /\[image (\d+)\]/g;
 
-/** One piece of a message's text: plain text, an image's word, or a file's word (with its path). */
-export type Piece = { text: string; image?: ImageRef; file?: string };
+/**
+ * The web addresses in a text, in order. Punctuation that ends a sentence is
+ * left off, and so is a closing bracket the address didn't open, so
+ * "(see https://a.com)." gives "https://a.com".
+ */
+export function webLinks(text: string): { at: number; text: string }[] {
+  const out: { at: number; text: string }[] = [];
+  for (const match of text.matchAll(/https?:\/\/[^\s<>"'`]+/g)) {
+    let url = match[0];
+    for (let before = ""; before !== url; ) {
+      before = url;
+      url = url.replace(/[.,;:!?*]+$/, "");
+      for (const [open, close] of ["()", "[]", "{}"]) {
+        if (url.endsWith(close) && url.split(open).length < url.split(close).length) url = url.slice(0, -1);
+      }
+    }
+    if (/^https?:\/\/[^/?#]/.test(url)) out.push({ at: match.index, text: url });
+  }
+  return out;
+}
 
-/** A sent text in pieces: plain text, the words of the given images, and the files it links. */
+/** One piece of a message's text: plain text, an image's word, a file's word (with its path), or a web address. */
+export type Piece = { text: string; image?: ImageRef; file?: string; url?: string };
+
+/** A sent text in pieces: plain text, the words of the given images, the files it links, and web addresses. */
 export function withWords(text: string, images: ImageRef[] = []): Piece[] {
   const found: { at: number; length: number; piece: Piece }[] = [];
   for (const match of text.matchAll(IMAGE_WORD)) {
@@ -126,6 +147,9 @@ export function withWords(text: string, images: ImageRef[] = []): Piece[] {
   }
   for (const match of text.matchAll(FILE_LINK)) {
     found.push({ at: match.index, length: match[0].length, piece: { text: `[${match[1]}]`, file: match[2] } });
+  }
+  for (const link of webLinks(text)) {
+    found.push({ at: link.at, length: link.text.length, piece: { text: link.text, url: link.text } });
   }
   if (!found.length) return [{ text }];
   found.sort((a, b) => a.at - b.at);
