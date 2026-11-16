@@ -220,14 +220,14 @@
         {@const page = group.item}
         <div class="row block">
           <span class="marker"></span>
-          <div class="body faint">
-            Page · <button
+          <div class="body faint page">
+            <span>Page ·&nbsp;</span><button
               class="address"
               class:copied={copiedPage === page.id}
               title="Click to copy"
               onclick={() => copyPage(page.id, page.url)}>{page.url.replace(/^https?:\/\//, "")}</button>
             {#if page.id === latestPage}
-              · <button class="open" onclick={() => chat.showPage(page.url)}>open browser</button>
+              <span>&nbsp;·&nbsp;</span><button class="open" onclick={() => chat.showPage(page.url)}>open browser</button>
             {/if}
           </div>
         </div>
@@ -367,6 +367,21 @@
   .open {
     text-decoration: underline;
     text-underline-offset: 0.2em;
+  }
+  /* A page line stays on one line: a long address is cut short with "…"
+     (a click still copies all of it) and "open browser" stays in view. */
+  .page {
+    display: flex;
+    white-space: nowrap;
+  }
+  .page > * {
+    flex-shrink: 0;
+  }
+  .page .address {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   /* A page line's address: plain text that copies on click. */
   .address:hover {

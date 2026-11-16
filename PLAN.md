@@ -1368,7 +1368,9 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   plan's: "Page · localhost:5173 · open browser" (a `page` item, rebuilt from
   history on replay; only the latest line has the button, which loads the
   address again if the browser was closed since). The address copies on one
-  click, like the panel's (accent for a moment, no underline). No marks in the bars: the
+  click, like the panel's (accent for a moment, no underline). The line never
+  wraps: a long address is cut short with "…" where it stops fitting, and
+  "open browser" stays in view (2026-11-16). No marks in the bars: the
   user disliked a ● beside ◂ (2026-11-14). The globe icon in the top bar
   opens the view at any time; with no page yet it shows an empty address line
   in the bar, and typing there makes the browser. A chat loaded after its page was opened asks `browser_current`.
