@@ -136,6 +136,8 @@ pub enum AgentEvent {
     /// whenever that changes. A chat with any running is not closed when idle.
     BackgroundWork {
         running: u32,
+        /// How many of those are agents. A chat with any shows as working.
+        agents: u32,
     },
     Error {
         message: String,
@@ -340,7 +342,7 @@ mod tests {
             AgentEvent::UserMessage { text: "hi".into(), id: None, images: vec![] }
         );
         assert!(!AgentEvent::Status { state: SessionState::Idle }.is_saved());
-        assert!(!AgentEvent::BackgroundWork { running: 1 }.is_saved());
+        assert!(!AgentEvent::BackgroundWork { running: 1, agents: 0 }.is_saved());
         assert!(!AgentEvent::Compacting { active: true }.is_saved());
         assert!(AgentEvent::Compacted { auto: false }.is_saved());
         assert!(AgentEvent::SignInNeeded { message: "x".into() }.is_saved());

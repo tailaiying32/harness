@@ -1074,8 +1074,15 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
         // The full list of background commands and agents, sent whenever it
         // changes; empty once all are done (tested on CLI 2.1.322).
         "system" if v["subtype"] == "background_tasks_changed" => {
-            let running = v["tasks"].as_array().map_or(0, |tasks| tasks.len() as u32);
-            out.events.push(AgentEvent::BackgroundWork { running });
+            let tasks = v["tasks"].as_array().map(Vec::as_slice).unwrap_or_default();
+            let agents = tasks
+                .iter()
+                .filter(|t| t["task_type"].as_str().is_some_and(|k| k.contains("agent")))
+                .count() as u32;
+            out.events.push(AgentEvent::BackgroundWork {
+                running: tasks.len() as u32,
+                agents,
+            });
         }
 
         // Claude Code withdrew a request, e.g. the turn was stopped while it waited.
@@ -1589,12 +1596,12 @@ mod tests {
         let two = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a","task_type":"local_bash"},{"task_id":"b","task_type":"local_agent"}]}"#;
         assert_eq!(
             events(two, &Pending::default()),
-            vec![AgentEvent::BackgroundWork { running: 2 }]
+            vec![AgentEvent::BackgroundWork { running: 2, agents: 1 }]
         );
         let none = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#;
         assert_eq!(
             events(none, &Pending::default()),
-            vec![AgentEvent::BackgroundWork { running: 0 }]
+            vec![AgentEvent::BackgroundWork { running: 0, agents: 0 }]
         );
     }
 

@@ -42,6 +42,8 @@ export class AppState {
   current = $state<Chat>(fresh());
   /** What each chat's process is doing, for chats used since the app started. */
   statuses = $state<Record<string, SessionState>>({});
+  /** Chats with agents running in the background, which count as working. */
+  helpers = $state<Record<string, boolean>>({});
   /** Chats that finished a turn, or need an answer, while another was on screen. */
   unseen = $state<Record<string, boolean>>({});
   /** The newest reading of each usage limit, by agent and then limit name.
@@ -130,6 +132,9 @@ export class AppState {
       return;
     }
     if (event.kind === "status") this.statuses[id] = event.state;
+    if (event.kind === "background_work") this.helpers[id] = event.agents > 0;
+    // A process that ended took its background agents with it.
+    if (event.kind === "status" && event.state === "exited") delete this.helpers[id];
     if (event.kind === "usage_update" && event.window) {
       const agent = this.chats.get(id)?.agent ?? CLAUDE;
       const reading = { utilization: event.utilization, resetsAt: event.resets_at };
@@ -155,7 +160,7 @@ export class AppState {
   dot(sessionId: string): Dot {
     const status = this.statuses[sessionId];
     if (status === "waiting_approval") return "waiting";
-    if (status === "starting" || status === "working") return "working";
+    if (status === "starting" || status === "working" || this.helpers[sessionId]) return "working";
     return this.unseen[sessionId] ? "unseen" : "idle";
   }
 
@@ -261,6 +266,7 @@ export class AppState {
     const folder = this.chats.get(sessionId)?.projectPath;
     this.chats.delete(sessionId);
     delete this.statuses[sessionId];
+    delete this.helpers[sessionId];
     delete this.unseen[sessionId];
     if (this.current.sessionId === sessionId) {
       const chat = fresh();
