@@ -4,7 +4,8 @@
   // chat's name, the browser's address, the terminal's tabs (see PanelBar). Terminal:
   // the project's shells (see TerminalView). Browser: a localhost
   // page Claude can drive too (see BrowserView). Docs: one tab for the plan and one for each markdown file
-  // the chat wrote or a link opened; the plan's answer buttons live at the foot
+  // the chat wrote or a link opened, edited in place and saved as the user
+  // types, like the notes; the plan's answer buttons live at the foot
   // of its tab while Claude waits (mouse only, like every approval: no key
   // approves a plan). Side chat: one tab for the side conversation, its own
   // message box at the foot. Showing and hiding the panel is the top bar's.
@@ -14,7 +15,7 @@
   import BrowserView from "./BrowserView.svelte";
   import TerminalView from "./TerminalView.svelte";
   import Markdown from "../chat/Markdown.svelte";
-  import { onDestroy } from "svelte";
+  import { onDestroy, untrack } from "svelte";
   import { NOTES_TAB, PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
   import { folderOf } from "../paths";
   import { applyPanelWidth, DEFAULT_PANEL_WIDTH, savePrefs } from "../themes";
@@ -34,32 +35,49 @@
   const active = $derived(chat.activeTab);
   const plan = $derived(chat.planTab ? chat.plan : null);
 
-  // ---- Notes: saved a moment after typing stops, and when editing ends ----
-  let notesTimer: ReturnType<typeof setTimeout> | undefined;
-  let notesUnsaved: string | null = null;
+  // ---- Notes and documents: saved a moment after typing stops, when
+  // editing ends, and before typing starts in another tab ----
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  let unsaved: { tab: string; text: string } | null = null;
 
+  // A tab on show is read from disk, so it is the file as it is now before
+  // the user edits it.
   $effect(() => {
-    if (active === NOTES_TAB) void chat.loadNotes();
+    const tab = active;
+    untrack(() => {
+      if (tab === NOTES_TAB) void chat.loadNotes();
+      else if (tab !== PLAN_TAB) void chat.refreshDoc(tab);
+    });
   });
 
-  function typeNotes(text: string) {
-    chat.notes = text;
-    notesUnsaved = text;
-    clearTimeout(notesTimer);
-    notesTimer = setTimeout(flushNotes, 400);
+  /** What a tab shows now; null if it is gone. */
+  function shownText(tab: string): string | null {
+    return tab === NOTES_TAB ? chat.notes : (chat.docs.find((doc) => doc.path === tab)?.text ?? null);
   }
 
-  function flushNotes() {
-    clearTimeout(notesTimer);
-    const text = notesUnsaved;
-    notesUnsaved = null;
-    // Claude wrote the notes since this was typed: its text is on disk and in
+  function typeIn(tab: string, text: string) {
+    if (unsaved && unsaved.tab !== tab) flush();
+    if (tab === NOTES_TAB) chat.notes = text;
+    else {
+      const doc = chat.docs.find((d) => d.path === tab);
+      if (doc) doc.text = text;
+    }
+    unsaved = { tab, text };
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flush, 400);
+  }
+
+  function flush() {
+    clearTimeout(saveTimer);
+    const edit = unsaved;
+    unsaved = null;
+    // Claude wrote the file since this was typed: its text is on disk and in
     // the editor now, so saving this would quietly undo it.
-    if (text === null || text !== chat.notes) return;
-    void chat.saveNotes(text);
+    if (!edit || edit.text !== shownText(edit.tab)) return;
+    void (edit.tab === NOTES_TAB ? chat.saveNotes(edit.text) : chat.saveDoc(edit.tab, edit.text));
   }
 
-  onDestroy(flushNotes);
+  onDestroy(flush);
 
   /** The waiting plan as it stands: the user's edit, or Claude's text. */
   const planText = $derived(plan ? (chat.planDraft ?? planOf(plan.input).text) : "");
@@ -217,13 +235,17 @@
     <div class="body" onclick={onClick}>
       {#if active === NOTES_TAB}
         {#if chat.notes !== null}
-          <LiveMarkdown text={chat.notes} onchange={typeNotes} ondone={flushNotes} placeholder="notes" autofocus={chat.notes === ""} />
+          <LiveMarkdown text={chat.notes} onchange={(t) => typeIn(NOTES_TAB, t)} ondone={flush} placeholder="notes" autofocus={chat.notes === ""} />
         {/if}
       {:else if active === PLAN_TAB && plan && chat.planPending}
         <!-- A waiting plan can be edited; Approve sends the edit. -->
         <LiveMarkdown text={planText} onchange={(t) => (chat.planDraft = t)} />
-      {:else}
+      {:else if active === PLAN_TAB}
         <Markdown {text} />
+      {:else}
+        <!-- A document: the file itself, saved as the user types. -->
+        {@const tab = active}
+        <LiveMarkdown {text} onchange={(t) => typeIn(tab, t)} ondone={flush} />
       {/if}
     </div>
   {/key}
