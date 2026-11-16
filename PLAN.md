@@ -4,6 +4,9 @@ Added 2026-11-15 (branch `harness/cursor-acp-217ae2`): chats can run on
 Cursor's agent as well as Claude Code, picked from the model menu before the
 first message. See "Cursor over ACP".
 
+Added 2026-11-16: Harness's own skills, imported in Settings and offered to
+every chat whatever its agent. See "Skills".
+
 Status, 2026-11-13: steps 1 to 5 of "Order of work" are built. Images
 (paste, drop, tool images, a full-space image view) were added 2026-11-14;
 see "Images". The app has a
@@ -226,8 +229,9 @@ the login itself.
 
 ## What it doesn't cover
 
-- A skills editor and a screen for managing app connections. Skills, instructions and connections you already have still
-  work; there is just no UI for editing them yet.
+- Editing skills in the app, and a screen for managing app connections.
+  Skills can be imported and removed (see "Skills"); instructions and
+  connections you already have still work, with no UI for editing them.
 - Agents other than Claude Code and Cursor (Codex, Gemini). Most ACP agents
   would reuse `agent/acp.rs`.
 - In Cursor chats: side chat, worktrees (loading a session in another folder
@@ -543,9 +547,24 @@ ModeChanged    { mode }               by the user, or as a side effect of an app
 UserMessage    { text, id? }          id: made by the window; absent in older history
 MessageSeen    { id }                 the agent took that message in
 TurnEnded      { ok, summary?, duration_ms, usage? }
-UsageUpdate    { window, utilization, resets_at }             not saved
+UsageUpdate    { window, utilization, resets_at }             not saved; one per limit
 Error          { message }
 ```
+
+Usage limits (2026-11-16): Claude Code's `rate_limit_event` lists every
+limit that applies to the model that answered in `unifiedWindows`, so one
+`UsageUpdate` goes out per limit. Seen on CLI 2.1.322: `seven_day` (all
+models) every time, and `seven_day_overage_included` after a Fable reply,
+which matched the Fable line of `/usage`. The window keeps the newest reading
+of each limit by agent (localStorage `harness.limits`), because a limit is
+only reported after a reply from a model it applies to. Settings → Usage
+shows a heading per agent ("Claude Code") with "all models" and "fable"
+lines, each "64% · resets Mon 4:37 PM", "unknown" before any reading, and
+"0%" once its reset time has passed (until the next reading; use on other
+devices since the reset isn't known). Cursor's usage (Auto and picked models are
+counted apart) is on Cursor's servers but not sent over ACP or printed by
+any command; reaching it would mean using the user's Cursor login, so it is
+left out.
 
 `AgentAdapter` trait (one implementation in v1, `ClaudeCodeAdapter`):
 
@@ -1639,6 +1658,43 @@ conversation, and the model list loaded. Not tested live: the sign-in card
   required" (`data.message` says to run `agent login`).
 - **Errors in a turn** show up as message text ("Error: RetriableError: …")
   with `stopReason: "end_turn"`.
+
+### Skills (`skills.rs`, built 2026-11-16)
+
+Harness's own skills, which every chat can use whatever its agent. Claude Code's
+and Cursor's own skills keep working beside them; the user deletes doubles
+from those by hand.
+
+- **Storage**: `<data dir>/skills/<name>/SKILL.md` plus the skill's other
+  files. Imports are copies; nothing in an agent's own folders is touched.
+- **Import** (Settings → Skills, "import folder" / "import file"): a folder
+  with SKILL.md at its top, a `.zip` (the shallowest SKILL.md's folder is the
+  skill; two at that depth is an error), or a lone `.md` (becomes SKILL.md).
+  Skipped: symlinks, `.DS_Store`, `.git`, `__MACOSX`, zip paths leaving the
+  folder. 50 MB cap, counted as written. Unpacked into
+  `skills/.importing-<id>` and moved into place, so a failed import leaves
+  nothing. Name: the header's `name`, else the folder, zip or file name;
+  made lowercase `[a-z0-9-]`, up to 64 chars. A description is required. Same
+  name replaces the old copy (how a skill is updated). Remove asks yes/no.
+- **Header**: read by a small parser (`parse_header`), not a YAML library:
+  plain, quoted and block (`>`, `>-`, `|`) values for `name` and `description`.
+- **The tool**: an app tool group `harness_skills` with one tool, `skill`
+  (`name`, optional `file`). Without `file` it returns the skill's folder, its
+  other files and SKILL.md; with `file`, that file as text (256 KB cap, must
+  stay inside the skill). So no agent needs access to the folder. The group is
+  left out when there are no skills.
+- **The list**: each skill's name and description (cut at 300 chars) goes in
+  the tool's description and in the instructions. The instructions matter for
+  Claude Code, whose app tools are deferred (it only sees descriptions after
+  ToolSearch); Cursor gets instructions only in a fresh session, but sees the
+  tool description. Both are read when a chat's process starts, so a running
+  chat sees new skills after its next start.
+- **Typed `/name`**: `send_inner` swaps a shown message `/name request` for the
+  skill's text plus the request before it goes to the agent, when `name` is an
+  imported skill. The chat and history keep what was typed. Anything else
+  (`/compact`, Claude's own skills) goes through as before.
+- Not covered: editing skills in the app, turning them on or off per project
+  or agent, side chats (they get no tools).
 
 ### If the approval channel breaks
 

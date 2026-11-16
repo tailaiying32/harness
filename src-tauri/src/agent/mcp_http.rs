@@ -184,7 +184,7 @@ mod tests {
     fn echo() -> AppTools {
         AppTools {
             server: "harness_echo",
-            instruction: "",
+            instruction: String::new(),
             list: json!([{ "name": "echo", "inputSchema": { "type": "object" } }]),
             call: Arc::new(|_, args| Box::pin(async move { Ok(vec![json!({ "type": "text", "text": args["say"] })]) })),
         }

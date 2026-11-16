@@ -14,6 +14,7 @@ use crate::agent::{AgentAdapter, Agents, AppTools, EventSink, ImagePayload, Runn
 use crate::events::{AgentEvent, Block, Decision, Envelope, SessionState};
 use crate::images::{self, ImageRef, Images};
 use crate::notes::Notes;
+use crate::skills::Skills;
 use crate::store::Store;
 use crate::worktree;
 
@@ -135,6 +136,8 @@ struct Inner {
     images: Images,
     /// Each chat's notes.
     notes: Notes,
+    /// The app's own skills, offered to every chat's agent.
+    skills: Skills,
     /// Finds a branch's pull request (GitHub in the app, a stand-in in tests).
     pr_lookup: PrLookup,
     /// One cleanup sweep at a time.
@@ -182,6 +185,7 @@ impl SessionManager {
             timings,
             images: Images::new(data_dir.join("images")),
             notes: Notes::new(data_dir.join("notes")),
+            skills: Skills::new(data_dir.join("skills")),
             data_dir,
             pr_lookup,
             sweep_lock: tokio::sync::Mutex::default(),
@@ -223,6 +227,11 @@ impl SessionManager {
     /// Chats' notes.
     pub fn notes(&self) -> &Notes {
         &self.0.notes
+    }
+
+    /// The app's own skills.
+    pub fn skills(&self) -> &Skills {
+        &self.0.skills
     }
 
     /// Removes images and notes left by chats that don't exist. Run once at start.
@@ -434,7 +443,10 @@ impl SessionManager {
         if show {
             self.answer_by_message(session_id, agent.as_ref());
         }
-        agent.send_user_message(text, &payloads, message_id)
+        // A typed `/name` for one of the app's skills goes to the agent with
+        // the skill attached; the chat keeps what the user typed.
+        let expanded = if show { inner.skills.expand(text) } else { None };
+        agent.send_user_message(expanded.as_deref().unwrap_or(text), &payloads, message_id)
     }
 
     /// The user wrote while Claude waited on a question (a plan, a tool, the

@@ -123,11 +123,14 @@ pub enum AgentEvent {
         ok: bool,
         duration_ms: Option<u64>,
     },
-    /// How much of a usage limit is spent. `window` names the limit, e.g. "seven_day".
+    /// How much of a usage limit is spent. `window` names the limit, e.g.
+    /// "seven_day". One event per limit the agent reported.
     UsageUpdate {
         window: Option<String>,
         /// 0.0 to 1.0.
         utilization: f64,
+        /// When the limit starts over, in seconds since 1970.
+        resets_at: Option<u64>,
     },
     /// How many background commands and agents the agent has running. Sent
     /// whenever that changes. A chat with any running is not closed when idle.

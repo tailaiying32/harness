@@ -58,6 +58,16 @@ const split = [
   part(63, "open", "harness/split-task-part-3"),
 ];
 
+/** The app's own skills, for Settings. */
+let skills = [
+  {
+    name: "update-kb",
+    description:
+      "Assess and draft updates to the public knowledge base for customer-visible product changes. Use while implementing, reviewing, or finishing a ticket, pull request, or code change.",
+  },
+  { name: "local-qa", description: "Click through the app locally before a review." },
+];
+
 /** Chats in the trash, for the sidebar's trash list. */
 let trash: SessionRow[] = [
   { ...row("trashed1", `${home}/code/harness`, "Try a blur on the side panel", 4000), trashed_at: now - 3 * 86_400_000 },
@@ -461,6 +471,17 @@ const commands: Record<string, (args: Args) => unknown> = {
   empty_trash: () => {
     trash = [];
   },
+  list_skills: () => skills,
+  import_skill: (args) => {
+    const name = String(args.path).split("/").pop()!.replace(/\.(zip|md)$/i, "").toLowerCase();
+    if (name.startsWith("bad")) throw "SKILL.md has no description";
+    const skill = { name, description: "Turn a pull request into a short demo video." };
+    skills = [...skills.filter((s) => s.name !== name), skill].sort((a, b) => a.name.localeCompare(b.name));
+    return skill;
+  },
+  remove_skill: (args) => {
+    skills = skills.filter((s) => s.name !== args.name);
+  },
   choose_worktree: (args) => {
     emit(args.sessionId, { kind: "worktree_chosen", choice: args.choice });
     if (args.choice === "worktree") {
@@ -534,7 +555,8 @@ const commands: Record<string, (args: Args) => unknown> = {
   close_session: () => undefined,
   autotest: () => null,
   "plugin:path|resolve_directory": () => home,
-  "plugin:dialog|open": () => null,
+  // Only the skill file picker answers, so the folder picker stays a cancel.
+  "plugin:dialog|open": (args) => (args.options?.filters ? "/Users/you/Downloads/pr-to-video.zip" : null),
   "plugin:opener|open_url": () => undefined,
   "plugin:opener|reveal_item_in_dir": () => undefined,
   // Dropped files. `__drop([...paths])` in the console stands in for a drop.

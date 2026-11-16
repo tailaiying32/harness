@@ -8,6 +8,7 @@ mod locate;
 mod notes;
 mod sessions;
 mod side_chat;
+mod skills;
 mod store;
 mod terminal;
 mod worktree;
@@ -238,6 +239,30 @@ async fn read_notes(state: State<'_, AppState>, chat_id: String) -> Result<Strin
 async fn write_notes(state: State<'_, AppState>, chat_id: String, text: String) -> Result<(), String> {
     let sessions = state.sessions.clone();
     tauri::async_runtime::spawn_blocking(move || sessions.notes().write(&chat_id, &text))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The app's own skills, for Settings.
+#[tauri::command]
+async fn list_skills(state: State<'_, AppState>) -> Result<Vec<skills::SkillInfo>, String> {
+    let skills = state.sessions.skills().clone();
+    tauri::async_runtime::spawn_blocking(move || skills.list()).await.map_err(|e| e.to_string())
+}
+
+/// Copies a skill in from a folder, a .zip or a .md file.
+#[tauri::command]
+async fn import_skill(state: State<'_, AppState>, path: String) -> Result<skills::SkillInfo, String> {
+    let skills = state.sessions.skills().clone();
+    tauri::async_runtime::spawn_blocking(move || skills.import(Path::new(&path)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn remove_skill(state: State<'_, AppState>, name: String) -> Result<(), String> {
+    let skills = state.sessions.skills().clone();
+    tauri::async_runtime::spawn_blocking(move || skills.remove(&name))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -723,13 +748,14 @@ pub fn run() {
             {
                 let browsers = browsers.clone();
                 let terminals = terminals.clone();
+                let skills = sessions.skills().clone();
                 sessions.set_app_tools(Arc::new(move |chat_id: &str, project: &str| {
                     let browser_tools = {
                         let browsers = browsers.clone();
                         let chat_id = chat_id.to_string();
                         AppTools {
                             server: browser::SERVER,
-                            instruction: browser::INSTRUCTION,
+                            instruction: browser::INSTRUCTION.into(),
                             list: browser::tools(),
                             call: Arc::new(move |tool, args| {
                                 let browsers = browsers.clone();
@@ -743,7 +769,7 @@ pub fn run() {
                         let project = project.to_string();
                         AppTools {
                             server: terminal::SERVER,
-                            instruction: terminal::INSTRUCTION,
+                            instruction: terminal::INSTRUCTION.into(),
                             list: terminal::tools(),
                             call: Arc::new(move |tool, args| {
                                 let terminals = terminals.clone();
@@ -752,7 +778,23 @@ pub fn run() {
                             }),
                         }
                     };
-                    vec![browser_tools, terminal_tools]
+                    let mut tools = vec![browser_tools, terminal_tools];
+                    // Read on every start, so a new chat sees the skills
+                    // imported since; none means no skills tool at all.
+                    let list = skills.list();
+                    if !list.is_empty() {
+                        let skills = skills.clone();
+                        tools.push(AppTools {
+                            server: skills::SERVER,
+                            instruction: skills::instruction(&list),
+                            list: skills::tools(&list),
+                            call: Arc::new(move |tool, args| {
+                                let skills = skills.clone();
+                                Box::pin(async move { skills.call(&tool, &args).await })
+                            }),
+                        });
+                    }
+                    tools
                 }));
             }
             // Worktree cleanup checks for and tells the terminal.
@@ -791,6 +833,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            list_skills,
+            import_skill,
+            remove_skill,
             subscribe,
             check_setup,
             sidebar,
