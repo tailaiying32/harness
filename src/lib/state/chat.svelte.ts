@@ -712,6 +712,11 @@ export class Chat {
     return this.items.length > 0;
   }
 
+  /** Something is typed, pasted or dropped in the message box. */
+  get hasDraft(): boolean {
+    return this.draft.trim() !== "" || this.draftImages.length > 0 || this.draftFiles.length > 0;
+  }
+
   private push<T extends Item>(item: NewItem): T {
     this.items.push({ ...item, id: this.nextId++ } as Item);
     // Read it back so the caller holds the reactive version.
