@@ -29,6 +29,7 @@
     docs = [],
     onopen,
     onimage,
+    onagent,
   }: {
     tools: ToolCall[];
     root?: string;
@@ -41,7 +42,11 @@
     onopen?: (path: string) => void;
     /** Opens an image's tab. */
     onimage?: (image: ImageRef) => void;
+    /** Opens a subagent's tab in chat info, by the tool call that started it. */
+    onagent?: (toolId: string) => void;
   } = $props();
+
+  const isAgent = (tool: ToolCall) => tool.name === "Agent" || tool.name === "Task";
 
   // Pictures the run's tools handed Claude. Their words sit after the summary,
   // outside its cut-off, so they always show while the run is folded.
@@ -115,7 +120,11 @@
         <div>
           <div class="call">
             <span class="verb">{name.verb}</span>
-            {#if docs.includes(docPath(tool)) && !tool.declined}
+            {#if onagent && isAgent(tool) && !tool.declined}
+              <button class="target doc" title="Follow this subagent in chat info" onclick={(e) => { e.stopPropagation(); onagent(tool.toolId); }}>
+                {name.target}
+              </button>
+            {:else if docs.includes(docPath(tool)) && !tool.declined}
               <button class="target doc" title="Open in the side panel" onclick={(e) => openDoc(e, docPath(tool))}>
                 {name.target}
               </button>

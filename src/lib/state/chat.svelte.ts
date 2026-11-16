@@ -40,9 +40,10 @@ import {
 import { modeFor } from "../models";
 import { FILE_LINK, fileWord, linkable, toLinks, type FileRef } from "../chat/files";
 import { docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
+import { ChatInfo } from "./chatInfo.svelte";
 
 /** What the side panel shows. */
-export type PanelView = "docs" | "side" | "browser" | "terminal";
+export type PanelView = "docs" | "side" | "browser" | "terminal" | "info";
 
 /** The browser tool that opens a page (see browser.rs). */
 const BROWSER_OPEN = "mcp__harness_browser__open";
@@ -254,6 +255,7 @@ export class Chat {
     chat.stopping = false;
     if (!live) {
       chat.settle();
+      chat.info.processGone();
       // Nothing is running, so nothing is waiting to be read.
       for (const item of chat.items) if (item.type === "user") item.queued = false;
     }
@@ -338,6 +340,18 @@ export class Chat {
   /** The panel has something to show. */
   get panelHasContent(): boolean {
     return this.tabCount > 0 || this.side !== null || this.browserOn || this.terminalOn;
+  }
+
+  // ---- Chat info: context, tasks, subagents, background work ----
+  /** What the chat knows about itself; its subagents' steps live here, not in `items`. */
+  readonly info = new ChatInfo();
+
+  /** Shows chat info; given a subagent's tool call, unfolds that one and brings it into view. */
+  openInfo(toolId?: string): void {
+    if (this.owner) return this.owner.openInfo(toolId);
+    if (toolId) this.info.open(toolId);
+    this.panelView = "info";
+    this.panelOpen = true;
   }
 
   // ---- The terminal (its tabs belong to the project; see terminals.svelte.ts) ----
@@ -718,6 +732,8 @@ export class Chat {
   };
 
   handle(event: AgentEvent): void {
+    // A subagent's steps go to chat info only.
+    if (this.info.handle(event, this.replaying)) return;
     switch (event.kind) {
       case "session_started":
         this.model = event.model;
@@ -1146,6 +1162,7 @@ export class Chat {
     if (view === "side") this.openSide();
     else if (view === "browser") this.openBrowser();
     else if (view === "terminal") this.openTerminal();
+    else if (view === "info") this.openInfo();
     else this.openPanel();
   }
 

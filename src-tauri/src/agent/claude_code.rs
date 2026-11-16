@@ -18,12 +18,26 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SideOptions, SpawnOptions, notes_instruction};
-use crate::events::{AgentEvent, ApprovalKind, Block, Decision, ModelInfo, SessionState};
+use crate::events::{AgentEvent, ApprovalKind, BackgroundTask, Block, ContextPart, Decision, ModelInfo, SessionState};
 
 /// How many stderr lines to keep for an error message when the process dies.
 const STDERR_TAIL_LINES: usize = 30;
 /// How long a stopped process gets to end its background commands before it is killed.
 const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// The request ID of the context-usage question asked after each turn.
+const CONTEXT_REQUEST: &str = "harness-context-usage";
+
+/// Asks how full the context window is. "summary" answers from the last
+/// reply's usage without extra counting calls (about 20 ms on CLI 2.1.325).
+fn context_request() -> String {
+    json!({
+        "type": "control_request",
+        "request_id": CONTEXT_REQUEST,
+        "request": { "subtype": "get_context_usage", "detail": "summary" },
+    })
+    .to_string()
+}
 
 pub struct ClaudeCodeAdapter;
 
@@ -128,6 +142,8 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
         "stream-json",
         "--verbose",
         "--include-partial-messages",
+        // Subagents' own text, as finished blocks tagged with their tool call.
+        "--forward-subagent-text",
         // Echo each user message back when it is taken in (see `MessageSeen`).
         "--replay-user-messages",
         "--permission-prompt-tool",
@@ -334,6 +350,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             let sent = sent.clone();
             let sink = sink.clone();
             let tools = opts.tools.clone();
+            let is_side = opts.side.is_some();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
                 // After a stop: when to kill if it hasn't exited.
@@ -396,6 +413,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
                     if let Some(reply) = translated.reply {
                         if let Some(tx) = weak_tx.upgrade() {
                             let _ = tx.send(Out::Line(reply));
+                        }
+                    }
+                    // After each turn, ask how full the context is (main chats only).
+                    if value["type"] == "result" && !is_side {
+                        if let Some(tx) = weak_tx.upgrade() {
+                            let _ = tx.send(Out::Line(context_request()));
                         }
                     }
                     for event in acknowledge(translated.events, &sent) {
@@ -1082,7 +1105,88 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
             out.events.push(AgentEvent::BackgroundWork {
                 running: tasks.len() as u32,
                 agents,
+                tasks: tasks
+                    .iter()
+                    .map(|t| BackgroundTask {
+                        id: text_of(&t["task_id"]),
+                        kind: text_of(&t["task_type"]),
+                        description: text_of(&t["description"]),
+                    })
+                    .collect(),
             });
+        }
+
+        // A subagent started. Since CLI 2.1.325 most run in the background:
+        // their tool call returns at once ("Async agent launched"), and only
+        // the task messages say when they're done. Their steps still carry the
+        // tool call's ID as `parent_tool_use_id`.
+        "system" if v["subtype"] == "task_started" => {
+            out.events.push(AgentEvent::TaskStarted {
+                task_id: text_of(&v["task_id"]),
+                tool_id: v["tool_use_id"].as_str().map(str::to_owned),
+                description: text_of(&v["description"]),
+                agent_type: v["subagent_type"].as_str().map(str::to_owned),
+                background: v["is_backgrounded"].as_bool().unwrap_or(false),
+            });
+        }
+
+        // After each step of a task: a live line ("Reading src/one.txt") and counts.
+        "system" if v["subtype"] == "task_progress" => {
+            out.events.push(AgentEvent::TaskProgress {
+                task_id: text_of(&v["task_id"]),
+                tool_id: v["tool_use_id"].as_str().map(str::to_owned),
+                description: v["description"].as_str().map(str::to_owned),
+                tool_uses: v["usage"]["tool_uses"].as_u64().map(|n| n as u32),
+                last_tool: v["last_tool_name"].as_str().map(str::to_owned),
+            });
+        }
+
+        // A task ended, with its answer as `summary`. A `task_updated` with a
+        // final status comes just before it; only a kill is taken from that,
+        // in case no notification follows.
+        "system" if v["subtype"] == "task_notification" => {
+            out.events.push(AgentEvent::TaskEnded {
+                task_id: text_of(&v["task_id"]),
+                tool_id: v["tool_use_id"].as_str().map(str::to_owned),
+                status: match v["status"].as_str() {
+                    Some("completed") => "completed",
+                    Some("failed") => "failed",
+                    _ => "stopped",
+                }
+                .to_string(),
+                summary: v["summary"].as_str().filter(|s| !s.is_empty()).map(str::to_owned),
+                duration_ms: v["usage"]["duration_ms"].as_u64(),
+            });
+        }
+        "system" if v["subtype"] == "task_updated" && v["patch"]["status"] == "killed" => {
+            out.events.push(AgentEvent::TaskEnded {
+                task_id: text_of(&v["task_id"]),
+                tool_id: None,
+                status: "stopped".to_string(),
+                summary: None,
+                duration_ms: None,
+            });
+        }
+
+        // The answer to the context question asked after each turn. Parts that
+        // take no room now (deferred tools, the compacting buffer, free space)
+        // are left out.
+        "control_response" if v["response"]["request_id"] == CONTEXT_REQUEST => {
+            let reply = &v["response"]["response"];
+            if let (Some(used), Some(max)) = (reply["totalTokens"].as_u64(), reply["maxTokens"].as_u64()) {
+                let mut parts: Vec<ContextPart> = reply["categories"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|c| c["kind"] == "used")
+                    .filter_map(|c| {
+                        let tokens = c["tokens"].as_u64().filter(|t| *t > 0)?;
+                        Some(ContextPart { name: text_of(&c["name"]), tokens })
+                    })
+                    .collect();
+                parts.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+                out.events.push(AgentEvent::ContextUsage { used, max, parts });
+            }
         }
 
         // Claude Code withdrew a request, e.g. the turn was stopped while it waited.
@@ -1127,7 +1231,8 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
                         text: text_of(&b["text"]),
                     },
                     // Thinking often arrives with empty text (only a signature).
-                    "thinking" if !text_of(&b["thinking"]).is_empty() => Block::Thinking {
+                    // A subagent's thinking is not kept.
+                    "thinking" if !text_of(&b["thinking"]).is_empty() && parent_tool_id.is_none() => Block::Thinking {
                         text: text_of(&b["thinking"]),
                     },
                     "tool_use" => Block::ToolCall {
@@ -1596,13 +1701,109 @@ mod tests {
         let two = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a","task_type":"local_bash"},{"task_id":"b","task_type":"local_agent"}]}"#;
         assert_eq!(
             events(two, &Pending::default()),
-            vec![AgentEvent::BackgroundWork { running: 2, agents: 1 }]
+            vec![AgentEvent::BackgroundWork {
+                running: 2,
+                agents: 1,
+                tasks: vec![
+                    BackgroundTask { id: "a".into(), kind: "local_bash".into(), description: String::new() },
+                    BackgroundTask { id: "b".into(), kind: "local_agent".into(), description: String::new() },
+                ]
+            }]
         );
         let none = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#;
         assert_eq!(
             events(none, &Pending::default()),
-            vec![AgentEvent::BackgroundWork { running: 0, agents: 0 }]
+            vec![AgentEvent::BackgroundWork { running: 0, agents: 0, tasks: vec![] }]
         );
+    }
+
+    // Lines below are from a live run on CLI 2.1.325 (trimmed).
+    #[test]
+    fn a_subagent_is_followed_from_start_to_end() {
+        let p = Pending::default();
+        let started = r#"{"type":"system","subtype":"task_started","task_id":"a09","run_id":"r","tool_use_id":"toolu_1","description":"List and read src files","subagent_type":"general-purpose","is_backgrounded":true,"spawn_depth":1,"task_type":"local_agent","prompt":"In the working directory"}"#;
+        assert_eq!(
+            events(started, &p),
+            vec![AgentEvent::TaskStarted {
+                task_id: "a09".into(),
+                tool_id: Some("toolu_1".into()),
+                description: "List and read src files".into(),
+                agent_type: Some("general-purpose".into()),
+                background: true,
+            }]
+        );
+        let progress = r#"{"type":"system","subtype":"task_progress","task_id":"a09","tool_use_id":"toolu_1","description":"Reading src/one.txt","subagent_type":"general-purpose","usage":{"total_tokens":21799,"tool_uses":2,"duration_ms":1441},"last_tool_name":"Read"}"#;
+        assert_eq!(
+            events(progress, &p),
+            vec![AgentEvent::TaskProgress {
+                task_id: "a09".into(),
+                tool_id: Some("toolu_1".into()),
+                description: Some("Reading src/one.txt".into()),
+                tool_uses: Some(2),
+                last_tool: Some("Read".into()),
+            }]
+        );
+        // A finished task's `task_updated` is left to the notification after it.
+        let updated = r#"{"type":"system","subtype":"task_updated","task_id":"a09","patch":{"status":"completed","end_time":1794858155204}}"#;
+        assert!(events(updated, &p).is_empty());
+        let done = r#"{"type":"system","subtype":"task_notification","task_id":"a09","tool_use_id":"toolu_1","status":"completed","output_file":"/tmp/x.output","summary":"Found two files.","usage":{"total_tokens":26128,"tool_uses":2,"duration_ms":4293}}"#;
+        assert_eq!(
+            events(done, &p),
+            vec![AgentEvent::TaskEnded {
+                task_id: "a09".into(),
+                tool_id: Some("toolu_1".into()),
+                status: "completed".into(),
+                summary: Some("Found two files.".into()),
+                duration_ms: Some(4293),
+            }]
+        );
+        let killed = r#"{"type":"system","subtype":"task_updated","task_id":"a09","patch":{"status":"killed"}}"#;
+        assert!(matches!(&events(killed, &p)[..], [AgentEvent::TaskEnded { status, .. }] if status == "stopped"));
+    }
+
+    #[test]
+    fn a_subagents_steps_are_kept_but_not_its_thinking() {
+        let p = Pending::default();
+        let line = r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"thinking","thinking":"hmm","signature":"x"},{"type":"tool_use","id":"toolu_9","name":"Read","input":{"file_path":"a"}},{"type":"text","text":"done"}]},"parent_tool_use_id":"toolu_1"}"#;
+        let got = events(line, &p);
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|e| matches!(e, AgentEvent::AssistantBlock { parent_tool_id: Some(id), .. } if id == "toolu_1")));
+        assert!(!got.iter().any(|e| matches!(e, AgentEvent::AssistantBlock { block: Block::Thinking { .. }, .. })));
+    }
+
+    #[test]
+    fn the_context_answer_keeps_only_what_takes_room() {
+        let reply = r#"{"type":"control_response","response":{"subtype":"success","request_id":"harness-context-usage","response":{"categories":[{"id":"system_prompt","name":"System prompt","tokens":3503,"kind":"used"},{"id":"mcp_tools_deferred","name":"MCP tools (deferred)","tokens":92263,"isDeferred":true,"kind":"deferred"},{"id":"messages","name":"Messages","tokens":18068,"kind":"used"},{"id":"skills","name":"Skills","tokens":0,"kind":"used"},{"id":"autocompact_buffer","name":"Autocompact buffer","tokens":33000,"kind":"buffer"},{"id":"free_space","name":"Free space","tokens":928620,"kind":"free"}],"totalTokens":38380,"maxTokens":1000000,"percentage":4}}}"#;
+        assert_eq!(
+            events(reply, &Pending::default()),
+            vec![AgentEvent::ContextUsage {
+                used: 38380,
+                max: 1_000_000,
+                parts: vec![
+                    ContextPart { name: "Messages".into(), tokens: 18068 },
+                    ContextPart { name: "System prompt".into(), tokens: 3503 },
+                ],
+            }]
+        );
+        // An older CLI without the question: no error shown to the user.
+        let refused = r#"{"type":"control_response","response":{"subtype":"error","request_id":"harness-context-usage","error":"Unsupported"}}"#;
+        assert!(events(refused, &Pending::default()).is_empty());
+    }
+
+    #[test]
+    fn main_chats_forward_subagent_text() {
+        let args = launch_args(&SpawnOptions {
+            binary: "claude".into(),
+            project_path: "/work".into(),
+            resume_id: None,
+            mode: None,
+            model: None,
+            effort: None,
+            side: None,
+            tools: Vec::new(),
+            notes: None,
+        });
+        assert!(args.contains(&"--forward-subagent-text".to_string()));
     }
 
     #[test]

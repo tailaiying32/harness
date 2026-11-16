@@ -53,7 +53,33 @@ export type AgentEvent =
   | { kind: "message_seen"; id: string }
   | { kind: "turn_ended"; ok: boolean; duration_ms: number | null }
   | { kind: "usage_update"; window: string | null; utilization: number; resets_at: number | null }
-  | { kind: "background_work"; running: number; agents: number }
+  | { kind: "background_work"; running: number; agents: number; tasks?: BackgroundTask[] }
+  | {
+      kind: "task_started";
+      task_id: string;
+      /** The main chat's tool call that started it; its steps carry this as `parent_tool_id`. */
+      tool_id: string | null;
+      description: string;
+      agent_type: string | null;
+      background: boolean;
+    }
+  | {
+      kind: "task_progress";
+      task_id: string;
+      tool_id: string | null;
+      description: string | null;
+      tool_uses: number | null;
+      last_tool: string | null;
+    }
+  | {
+      kind: "task_ended";
+      task_id: string;
+      tool_id: string | null;
+      status: "completed" | "failed" | "stopped";
+      summary: string | null;
+      duration_ms?: number | null;
+    }
+  | { kind: "context_usage"; used: number; max: number; parts?: { name: string; tokens: number }[] }
   | { kind: "error"; message: string }
   | { kind: "compacting"; active: boolean }
   | { kind: "compacted"; auto: boolean }
@@ -68,6 +94,9 @@ export type AgentEvent =
   | { kind: "browser_closed" }
   | { kind: "terminal_tabs"; project: string; tabs: TerminalTab[] }
   | { kind: "close_key" };
+
+/** One command or agent running in the background. `kind` is the agent's own word, e.g. "local_bash". */
+export type BackgroundTask = { id: string; kind: string; description: string };
 
 /** One saved image of a chat: what its `[image n]` word points at. */
 export type ImageRef = { n: number; media_type: string };

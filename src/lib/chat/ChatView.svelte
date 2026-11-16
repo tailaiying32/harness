@@ -169,6 +169,7 @@
             docs={docPaths}
             onopen={(path) => chat.openPanel(path)}
             onimage={(image) => chat.openImage(image)}
+            onagent={(id) => chat.openInfo(id)}
           />
         </div>
       {:else if group.item.type === "user"}

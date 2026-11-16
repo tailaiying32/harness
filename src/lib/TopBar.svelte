@@ -1,7 +1,7 @@
 <script lang="ts">
   // The bar along the top of the chat and panel. On a Mac it sits in the window's
   // title bar, beside the window buttons, so it costs no room. Over the chat:
-  // its title, and the panel's four views as icons, pushed against the panel's
+  // its title, and the panel's five views as icons, pushed against the panel's
   // line. Clicking a view opens the panel on it; clicking the one on show hides
   // the panel. Over the open panel: that view's own row (see PanelBar), so the
   // panel has none of its own. Empty space drags the window.
@@ -23,10 +23,12 @@
   const views = $derived(
     (
       [
+        // This chat's own things first, then the project's tools.
+        { view: "info", name: "chat info" },
         { view: "docs", name: "docs" },
         { view: "side", name: "side chat" },
-        { view: "browser", name: "browser" },
         { view: "terminal", name: "terminal" },
+        { view: "browser", name: "browser" },
       ] as { view: PanelView; name: string }[]
     ).filter((v) => v.view !== "side" || chat.agent !== "cursor"),
   );

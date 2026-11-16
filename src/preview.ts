@@ -80,6 +80,7 @@ let projects: ProjectRow[] = [
     path: `${home}/code/harness`,
     sessions: [
       row("planning", `${home}/code/harness`, "Idle timeout for chat processes", 1),
+      row("agents", `${home}/code/harness`, "Find where idle chats get closed", 1.2),
       row("images", `${home}/code/harness`, "Settings list cut off", 1.5),
       row("saved", `${home}/code/harness`, "Add a sidebar with saved chats", 2, "harness/add-a-sidebar-9f2c1e", "open"),
       row("working", `${home}/code/harness`, "Why is the idle timer late when hidden?", 9, "harness/idle-timer-late-4be0a1"),
@@ -145,6 +146,95 @@ const result = (tool_id: string, content: string, is_error = false): AgentEvent 
   parent_tool_id: null,
 });
 const ended: AgentEvent = { kind: "turn_ended", ok: true, duration_ms: 4200 };
+
+/** A subagent's step: a tool call or text under the main chat's tool call `parent`. */
+const sub = (parent: string, tool_id: string, name: string, input: unknown): AgentEvent => ({
+  kind: "assistant_block",
+  message_id: "m-" + tool_id,
+  block: { type: "tool_call", tool_id, name, input },
+  parent_tool_id: parent,
+});
+const subSaid = (parent: string, body: string): AgentEvent => ({
+  kind: "assistant_block",
+  message_id: "t-" + parent + body.length,
+  block: { type: "text", text: body },
+  parent_tool_id: parent,
+});
+const subResult = (parent: string, tool_id: string, content: string): AgentEvent => ({
+  kind: "tool_result",
+  tool_id,
+  content,
+  is_error: false,
+  parent_tool_id: parent,
+});
+
+/** A long turn with subagents, for chat info: one finished, one failed, one
+    still running (played live after the chat opens, see load_session). */
+const agentsChat: AgentEvent[] = [
+  { kind: "user_message", text: "Chats I've walked away from should stop using memory. Find every place a chat's process is closed, and measure an idle chat." },
+  { kind: "session_started", agent_session_id: "agent-agents", model: "claude-fable-5-2", mode: "auto" },
+  tool("k1", "TaskCreate", { subject: "Find where chats close", description: "" }),
+  result("k1", "Task #1 created successfully: Find where chats close"),
+  tool("k2", "TaskCreate", { subject: "Measure an idle chat", description: "" }),
+  result("k2", "Task #2 created successfully: Measure an idle chat"),
+  tool("k3", "TaskCreate", { subject: "Write the plan", description: "" }),
+  result("k3", "Task #3 created successfully: Write the plan"),
+  tool("k4", "TaskUpdate", { taskId: "1", status: "completed" }),
+  result("k4", "Updated task #1 status"),
+  tool("k5", "TaskUpdate", { taskId: "2", status: "in_progress" }),
+  result("k5", "Updated task #2 status"),
+  text("a1", "Two things can run at once here, so I'll hand them to subagents."),
+  tool("ag1", "Agent", {
+    description: "find where chats close",
+    prompt: "Find every place a chat's Claude Code process is closed or killed in src-tauri, and what triggers each. Report file and line for each.",
+    subagent_type: "Explore",
+  }),
+  { kind: "task_started", task_id: "t1", tool_id: "ag1", description: "find where chats close", agent_type: "Explore", background: true },
+  result("ag1", "Async agent launched successfully."),
+  sub("ag1", "s1", "Grep", { pattern: "kill|close_idle|shutdown", path: "src-tauri" }),
+  subResult("ag1", "s1", "sessions.rs:512   fn close_idle(&self, id: &SessionId)\nsessions.rs:688   child.kill().await\nterminal.rs:97    fn shutdown_all(&mut self)"),
+  sub("ag1", "s2", "Read", { file_path: `${home}/code/harness/src-tauri/src/sessions.rs` }),
+  subResult("ag1", "s2", ""),
+  subSaid("ag1", "`close_idle` is the only timer path. The kill at 688 is for quit."),
+  sub("ag1", "s3", "Read", { file_path: `${home}/code/harness/src-tauri/src/terminal.rs` }),
+  subResult("ag1", "s3", ""),
+  subSaid("ag1", "Chats close in two places: `close_idle` (sessions.rs:512) after the idle timer, and `child.kill()` (sessions.rs:688) on quit. Terminals close their own shells separately."),
+  { kind: "task_ended", task_id: "t1", tool_id: "ag1", status: "completed", summary: "Chats close in two places: `close_idle` (sessions.rs:512) after the idle timer, and `child.kill()` (sessions.rs:688) on quit. Terminals close their own shells separately.", duration_ms: 108000 },
+  tool("ag3", "Agent", { description: "run session tests", prompt: "Run the session black-box tests and report failures." }),
+  sub("ag3", "s9", "Bash", { command: "cargo test sessions::tests" }),
+  subResult("ag3", "s9", "test black_box::idle_closes ... FAILED\nerror: test failed"),
+  result("ag3", "cargo test exited 101", true),
+  { kind: "context_usage", used: 92_400, max: 200_000, parts: [
+    { name: "Messages", tokens: 61_200 },
+    { name: "System tools", tokens: 14_800 },
+    { name: "Skills", tokens: 7_300 },
+    { name: "System prompt", tokens: 3_500 },
+    { name: "Memory files", tokens: 900 },
+  ] },
+];
+
+/** The running subagent and a background command, sent live once the chat is open. */
+function playAgents() {
+  const say = (event: AgentEvent, after: number) => setTimeout(() => emit("agents", event), after);
+  say({ kind: "status", state: "working" }, 50);
+  say(tool("ag2", "Agent", {
+    description: "measure an idle chat",
+    prompt: "Build in release mode, open three chats, leave them idle, and measure each process's memory every minute for five minutes.",
+  }), 100);
+  say({ kind: "task_started", task_id: "t2", tool_id: "ag2", description: "measure an idle chat", agent_type: "general-purpose", background: true }, 120);
+  say(result("ag2", "Async agent launched successfully."), 140);
+  say({ kind: "background_work", running: 2, agents: 1, tasks: [
+    { id: "b1", kind: "local_bash", description: "npm run dev" },
+    { id: "t2", kind: "local_agent", description: "measure an idle chat" },
+  ] }, 160);
+  say(sub("ag2", "s5", "Bash", { command: "cargo build --release" }), 300);
+  say(subResult("ag2", "s5", "   Compiling harness v0.4.0\n    Finished `release` profile [optimized] target(s) in 1m 48s"), 600);
+  say(sub("ag2", "s6", "Bash", { command: "ps -o pid,rss,command | grep claude" }), 800);
+  say(subResult("ag2", "s6", "4412  268144  claude --output-format stream-json\n4419  259872  claude --output-format stream-json"), 1000);
+  say(subSaid("ag2", "About 260 MB each at rest. Sampling once a minute to see whether it grows."), 1200);
+  say(sub("ag2", "s7", "Bash", { command: "sleep 60 && ps -o rss -p 4412" }), 1400);
+  say({ kind: "task_progress", task_id: "t2", tool_id: "ag2", description: "Running sleep 60 && ps -o rss -p 4412", tool_uses: 3, last_tool: "Bash" }, 1450);
+}
 
 /** A chat where Claude asked for a worktree, waiting for the answer. */
 const askingChat: AgentEvent[] = [
@@ -499,8 +589,8 @@ const commands: Record<string, (args: Args) => unknown> = {
   },
   load_session: (args) => ({
     session: [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === args.sessionId),
-    events: args.sessionId === "images" ? imagesChat : args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : args.sessionId === "looks" ? looksChat : args.sessionId === "waiting" ? askingChat : args.sessionId === "working" ? movedChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
-    live: args.sessionId === "planning" || args.sessionId === "waiting",
+    events: args.sessionId === "agents" ? (setTimeout(playAgents, 300), agentsChat) : args.sessionId === "images" ? imagesChat : args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : args.sessionId === "looks" ? looksChat : args.sessionId === "waiting" ? askingChat : args.sessionId === "working" ? movedChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
+    live: args.sessionId === "planning" || args.sessionId === "waiting" || args.sessionId === "agents",
   }),
   rename_session: (args) => {
     for (const p of projects) for (const s of p.sessions) if (s.id === args.sessionId) s.title = args.title.trim();
@@ -763,8 +853,8 @@ mount(App, { target: document.getElementById("app")! });
 (window as any).__drop = dropFiles;
 
 // For screenshots: `#open=<chat id>` opens that chat, `&trash` opens the
-// sidebar's trash list, `&browser` the panel's browser view and `&terminal`
-// its terminal.
+// sidebar's trash list, `&browser` the panel's browser view, `&terminal`
+// its terminal and `&info` chat info (`&agent` also opens the first subagent).
 const wanted = new URLSearchParams(location.hash.slice(1));
 setTimeout(() => {
   const title = [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === wanted.get("open"))?.title;
@@ -777,6 +867,12 @@ setTimeout(() => {
       setTimeout(() => {
         document.querySelector<HTMLButtonElement>('header.bar button[title="browser"]')?.click();
       }, 200);
+    }
+    if (wanted.has("info")) {
+      setTimeout(() => {
+        document.querySelector<HTMLButtonElement>('header.bar button[title="chat info"]')?.click();
+        if (wanted.has("agent")) setTimeout(() => document.querySelector<HTMLButtonElement>(".page .agent")?.click(), 200);
+      }, 600);
     }
     if (wanted.has("terminal")) {
       setTimeout(() => {

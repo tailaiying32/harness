@@ -1,5 +1,5 @@
 <script lang="ts">
-  // The side panel: a space beside the chat, in one of four views picked in
+  // The side panel: a space beside the chat, in one of five views picked in
   // the top bar, which also holds the view's own row: docs' tabs, the side
   // chat's name, the browser's address, the terminal's tabs (see PanelBar). Terminal:
   // the project's shells (see TerminalView). Browser: a localhost
@@ -8,12 +8,15 @@
   // types, like the notes; the plan's answer buttons live at the foot
   // of its tab while Claude waits (mouse only, like every approval: no key
   // approves a plan). Side chat: one tab for the side conversation, its own
-  // message box at the foot. Showing and hiding the panel is the top bar's.
+  // message box at the foot. Chat info: the chat's context, tasks and
+  // subagents, each unfolding to its steps (see InfoView, AgentView).
+  // Showing and hiding the panel is the top bar's.
   import { contentClick } from "../clicks";
   import ChatView from "../chat/ChatView.svelte";
   import LiveMarkdown from "../chat/LiveMarkdown.svelte";
   import BrowserView from "./BrowserView.svelte";
   import TerminalView from "./TerminalView.svelte";
+  import InfoView from "./InfoView.svelte";
   import Markdown from "../chat/Markdown.svelte";
   import { onDestroy, untrack } from "svelte";
   import { NOTES_TAB, PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
@@ -216,6 +219,8 @@
     <TerminalView {chat} {covered} />
   {:else if chat.panelView === "browser"}
     <BrowserView {chat} {covered} />
+  {:else if chat.panelView === "info"}
+    <InfoView {chat} />
   {:else if side}
     <div class="side">
       <ChatView chat={side} problem={null} />

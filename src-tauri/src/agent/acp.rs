@@ -181,6 +181,15 @@ struct Tool {
     done: bool,
 }
 
+/// A subagent's own session: its steps, shown under the chat's tool call
+/// that started it.
+struct Child {
+    parent_tool: String,
+    /// Its text so far; thinking is not kept.
+    text: String,
+    tools: HashMap<String, Tool>,
+}
+
 /// The text or thinking being written right now.
 struct Run {
     thinking: bool,
@@ -234,6 +243,8 @@ struct State {
     loading: bool,
     run: Option<Run>,
     tools: HashMap<String, Tool>,
+    /// Running subagents, by their session ID.
+    children: HashMap<String, Child>,
     /// The agent's requests waiting for the user, by the app's request ID.
     waiting: HashMap<String, Waiting>,
     next_request: u64,
@@ -730,7 +741,15 @@ fn receive(shared: &Shared, v: &Value) {
         (None, Some(_)) => shared.rpc.settle(v),
         (Some(method), Some(id)) => request(shared, method, id, &v["params"]),
         (Some("session/update"), None) => {
-            for event in update(&mut shared.state.lock().unwrap(), &v["params"]["update"]) {
+            let events = {
+                let mut state = shared.state.lock().unwrap();
+                let session = v["params"]["sessionId"].as_str().unwrap_or_default();
+                match state.children.get_mut(session) {
+                    Some(child) => child_update(child, &v["params"]["update"]),
+                    None => update(&mut state, &v["params"]["update"]),
+                }
+            };
+            for event in events {
                 shared.emit(event);
             }
         }
@@ -864,6 +883,10 @@ fn request(shared: &Shared, method: &str, rpc_id: &Value, params: &Value) {
             });
         }
 
+        // Sent after a subagent's tool call finished, with what it did. The
+        // chat has it already from the updates.
+        "cursor/task" => shared.rpc.respond(rpc_id, json!({})),
+
         // The app offers no file system or terminal of its own.
         _ => shared.rpc.respond_error(rpc_id, -32601, &format!("Method not found: {method}")),
     }
@@ -899,6 +922,13 @@ fn name_and_input(tool: &Tool) -> (String, Value) {
     match raw["_toolName"].as_str() {
         Some("createPlan") => return named("ExitPlanMode", json!({ "plan": raw["plan"] })),
         Some("todoWrite") | Some("updateTodos") => return named("TodoWrite", raw.clone()),
+        // A subagent, worded and followed like Claude Code's.
+        Some("task") => {
+            return named(
+                "Agent",
+                json!({ "description": raw["description"], "prompt": raw["prompt"] }),
+            );
+        }
         _ => {}
     }
     match tool.kind.as_str() {
@@ -1080,9 +1110,124 @@ fn update(state: &mut State, u: &Value) -> Vec<AgentEvent> {
             }
         }
         "config_option_update" => state.config.read(&u["configOptions"]),
+        // A subagent started: its own session reports its steps (see `child_update`).
+        "subagent_spawned" => {
+            let (Some(session), Some(tool)) = (
+                u["subagentSessionId"].as_str(),
+                u["_meta"]["cursor"]["toolCallId"].as_str(),
+            ) else {
+                return out;
+            };
+            state.children.insert(
+                session.to_string(),
+                Child { parent_tool: tool.to_string(), text: String::new(), tools: HashMap::new() },
+            );
+            out.push(AgentEvent::TaskStarted {
+                task_id: session.to_string(),
+                tool_id: Some(tool.to_string()),
+                description: u["name"].as_str().unwrap_or_default().to_string(),
+                agent_type: u["name"].as_str().map(str::to_owned),
+                background: false,
+            });
+        }
+        "subagent_state_update" => {
+            let Some(session) = u["subagentSessionId"].as_str() else {
+                return out;
+            };
+            let status = match u["state"].as_str() {
+                Some("completed") => "completed",
+                Some("failed") => "failed",
+                Some("running") | None => return out,
+                _ => "stopped",
+            };
+            let tool_id = u["_meta"]["cursor"]["toolCallId"].as_str().map(str::to_owned);
+            if let Some(mut child) = state.children.remove(session) {
+                out.extend(close_child_text(&mut child));
+            }
+            out.push(AgentEvent::TaskEnded {
+                task_id: session.to_string(),
+                tool_id,
+                status: status.to_string(),
+                summary: None,
+                duration_ms: None,
+            });
+        }
         "session_info_update" => {
             if let Some(title) = u["title"].as_str().filter(|t| !t.trim().is_empty()) {
                 out.push(AgentEvent::TitleChanged { title: title.trim().to_string() });
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// A subagent's text so far, as one finished block under its tool call.
+fn close_child_text(child: &mut Child) -> Option<AgentEvent> {
+    let text = std::mem::take(&mut child.text);
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(AgentEvent::AssistantBlock {
+        message_id: uuid::Uuid::new_v4().to_string(),
+        block: Block::Text { text },
+        parent_tool_id: Some(child.parent_tool.clone()),
+    })
+}
+
+/// One `session/update` from a subagent's session: its text and tool calls,
+/// tagged with the chat's tool call that started it. Nothing streams live.
+fn child_update(child: &mut Child, u: &Value) -> Vec<AgentEvent> {
+    let mut out = Vec::new();
+    let tag = |event: AgentEvent, parent: &str| match event {
+        AgentEvent::AssistantBlock { message_id, block, .. } => AgentEvent::AssistantBlock {
+            message_id,
+            block,
+            parent_tool_id: Some(parent.to_string()),
+        },
+        AgentEvent::ToolResult { tool_id, content, is_error, .. } => AgentEvent::ToolResult {
+            tool_id,
+            content,
+            is_error,
+            parent_tool_id: Some(parent.to_string()),
+        },
+        other => other,
+    };
+    match u["sessionUpdate"].as_str().unwrap_or_default() {
+        "agent_message_chunk" => {
+            if let Some(text) = u["content"]["text"].as_str() {
+                child.text.push_str(text);
+            }
+        }
+        "tool_call" | "tool_call_update" => {
+            out.extend(close_child_text(child));
+            let Some(tool_id) = u["toolCallId"].as_str() else {
+                return out;
+            };
+            let parent = child.parent_tool.clone();
+            let tool = child.tools.entry(tool_id.to_string()).or_default();
+            if let Some(title) = u["title"].as_str() {
+                tool.title = title.to_string();
+            }
+            if let Some(kind) = u["kind"].as_str() {
+                tool.kind = kind.to_string();
+            }
+            if let Some(input) = u.get("rawInput").filter(|i| i.is_object()) {
+                tool.raw_input = input.clone();
+            }
+            let status = u["status"].as_str().unwrap_or_default();
+            let started = matches!(status, "in_progress" | "completed" | "failed");
+            if let Some(event) = show_tool(tool_id, tool, started) {
+                out.push(tag(event, &parent));
+            }
+            if matches!(status, "completed" | "failed") && !tool.done && tool.shown {
+                tool.done = true;
+                out.push(AgentEvent::ToolResult {
+                    tool_id: tool_id.to_string(),
+                    content: json!(result_text(u)),
+                    is_error: status == "failed",
+                    parent_tool_id: Some(parent),
+                });
             }
         }
         _ => {}
@@ -1373,6 +1518,41 @@ mod tests {
         assert!(matches!(&events[0], AgentEvent::AssistantBlock { block: Block::ToolCall { name, input, .. }, .. }
             if name == "Bash" && input["command"] == "ls"));
         assert!(matches!(&events[1], AgentEvent::ToolResult { content, is_error: false, .. } if content == "a\noops"));
+    }
+
+    // Lines below are from a live run on Cursor CLI 2026.11.13 (trimmed).
+    #[test]
+    fn a_subagents_session_is_shown_under_its_tool_call() {
+        let (shared, mut rx, seen) = rig();
+        let child = |update: &str| {
+            line(&shared, &format!(r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"kid","update":{update}}}}}"#));
+        };
+        upd(&shared, r#"{"sessionUpdate":"subagent_spawned","subagentSessionId":"kid","name":"generalPurpose","task":"Read these two files","capabilities":{},"_meta":{"cursor":{"toolCallId":"call-6\nfc_0","agentId":"kid","model":"default"}}}"#);
+        upd(&shared, r#"{"sessionUpdate":"tool_call","toolCallId":"call-6\nfc_0","title":"Task: Read package.json","kind":"other","status":"pending","rawInput":{"_toolName":"task","prompt":"Read these two files","description":"Read package.json"}}"#);
+        child(r#"{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"The user wants"}}"#);
+        child(r#"{"sessionUpdate":"tool_call","toolCallId":"call-3","title":"Read File","kind":"read","status":"pending","rawInput":{}}"#);
+        child(r#"{"sessionUpdate":"tool_call_update","toolCallId":"call-3","title":"Read /p/package.json","rawInput":{"path":"/p/package.json"}}"#);
+        child(r#"{"sessionUpdate":"tool_call_update","toolCallId":"call-3","status":"completed","rawOutput":{"content":"{}\n"}}"#);
+        child(r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Both "}}"#);
+        child(r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"read."}}"#);
+        upd(&shared, r#"{"sessionUpdate":"subagent_state_update","subagentSessionId":"kid","state":"completed","_meta":{"cursor":{"toolCallId":"call-6\nfc_0","agentId":"kid"}}}"#);
+        line(&shared, r#"{"jsonrpc":"2.0","id":7,"method":"cursor/task","params":{"toolCallId":"call-6\nfc_0"}}"#);
+
+        let events = take(&seen);
+        assert!(matches!(&events[0], AgentEvent::TaskStarted { tool_id: Some(t), .. } if t == "call-6\nfc_0"));
+        assert!(matches!(&events[1], AgentEvent::AssistantBlock { block: Block::ToolCall { name, input, .. }, parent_tool_id: None, .. }
+            if name == "Agent" && input["prompt"] == "Read these two files"));
+        let under: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::AssistantBlock { parent_tool_id: Some(_), .. } | AgentEvent::ToolResult { parent_tool_id: Some(_), .. }))
+            .collect();
+        assert_eq!(under.len(), 3, "{events:?}");
+        assert!(matches!(under[0], AgentEvent::AssistantBlock { block: Block::ToolCall { name, .. }, .. } if name == "Read"));
+        assert!(matches!(under[2], AgentEvent::AssistantBlock { block: Block::Text { text }, .. } if text == "Both read."));
+        assert!(matches!(events.last().unwrap(), AgentEvent::TaskEnded { status, .. } if status == "completed"));
+        // Nothing of the subagent's leaks into the chat's own text.
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::TextDelta { .. })));
+        assert_eq!(written(&mut rx).last().unwrap()["result"], json!({}));
     }
 
     #[test]

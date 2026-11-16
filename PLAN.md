@@ -7,6 +7,11 @@ first message. See "Cursor over ACP".
 Added 2026-11-16: Harness's own skills, imported in Settings and offered to
 every chat whatever its agent. See "Skills".
 
+Added 2026-11-16 (branch `harness/chat-info-view-83b2a2`): a fifth side
+panel view, chat info: context use, the task list, the chat's subagents
+(each opened as a tab with its steps) and background commands, for Claude
+Code and Cursor. See "Chat info view".
+
 Status, 2026-11-13: steps 1 to 5 of "Order of work" are built. Images
 (paste, drop, tool images, a full-space image view) were added 2026-11-14;
 see "Images". The app has a
@@ -26,7 +31,7 @@ real window by eye (the screen was locked; it was checked in the browser
 preview instead, see "Preview page").
 
 Step 6, the side panel, is built, checked in the browser preview and tested
-live once (see "Side panel, as built" and step 6 of "Order of work"). Not built yet: showing subagent work. The settings page
+live once (see "Side panel, as built" and step 6 of "Order of work"). Subagent work shows in chat info (see "Chat info view"). The settings page
 holds only theme and size so far.
 
 Added 2026-11-13 (quick wins): rename a chat (double-click its title), close a single side panel tab, Cmd+N for a new chat, a
@@ -497,6 +502,11 @@ between CLI versions and must never crash the reader.
 | `system`, subtype `post_turn_summary` | One-line summary of the turn | `status_detail` |
 | `rate_limit_event` | Subscription usage | `rate_limit_info.unifiedWindows.*.utilization`, `resetsAt` |
 | `system`, subtype `background_tasks_changed` | The full list of running background commands and agents, sent whenever it changes; `[]` when all are done | `tasks[]` (`task_id`, `task_type` such as `local_bash`, `description`) |
+| `system`, subtype `task_started` | A subagent (task) started | `task_id`, `tool_use_id` (the `Agent` call), `description`, `subagent_type`, `is_backgrounded`, `prompt` |
+| `system`, subtype `task_progress` | After each of its steps | `task_id`, `tool_use_id`, `description` (live line, e.g. "Reading src/one.txt"), `usage.tool_uses`, `last_tool_name` |
+| `system`, subtype `task_updated` | A patch to a task; a final status comes just before `task_notification` | `task_id`, `patch.status` (`completed`, `failed`, `killed`…) |
+| `system`, subtype `task_notification` | A task ended | `task_id`, `tool_use_id`, `status` (`completed`, `failed`, `stopped`), `summary`, `usage.duration_ms` |
+| `control_response` to `get_context_usage` | Asked by the app after each turn | `totalTokens`, `maxTokens`, `categories[]` (`name`, `tokens`, `kind`: `used`, `deferred`, `buffer`, `free`) |
 
 When background work ends, Claude Code starts a turn on its own (`init`, a
 short reply, `result`) to report it. Tested on CLI 2.1.322.
@@ -512,8 +522,9 @@ Details that matter:
   `message_stop`. Accumulate text per (`api_message_id`, `index`). When the
   matching `assistant` block arrives, it is the final truth; drop the draft.
   Only the main session streams; subagents do not.
-- **Subagent traffic** has a non-null `parent_tool_use_id`. In v1, nest it
-  under the tool call with that ID, collapsed.
+- **Subagent traffic** has a non-null `parent_tool_use_id`: the main chat's
+  `Agent` (or older `Task`) tool call that started it. It is kept out of the
+  chat and shown in chat info (see "Chat info view").
 - **Any `result` means the turn is over,** including after an interrupt
   (where `stop_reason` is null).
 - **Special approval requests** by `tool_name`:
@@ -1680,6 +1691,96 @@ conversation, and the model list loaded. Not tested live: the sign-in card
   required" (`data.message` says to run `agent login`).
 - **Errors in a turn** show up as message text ("Error: RetriableError: …")
   with `stopReason: "end_turn"`.
+
+### Chat info view (built 2026-11-16, branch `harness/chat-info-view-83b2a2`)
+
+A fifth side panel view, for checking a long task is still going. The
+top bar's icons now run chat info, docs, side chat, terminal, browser: this
+chat's own things first, then the project's tools (agreed 2026-11-16).
+Chat info's icon is a small tree with rounded elbows, a dot with two well-spaced dots under it ("Tree ·
+nodes only" on the Magic Patterns canvas "Chat Info"; picked over a bullet
+list, which looked too much like docs beside it, and the earlier
+"hand-off"). It is close in shape to the branch mark; watch for mix-ups.
+Its row in the top bar
+just says "chat info". Subagents unfold in place on the page (option F on
+the canvas); nothing opens elsewhere. Tried first and dropped on
+2026-11-16: a tab per agent (cluttered), then the agent shown in the page's
+place. Kept in reserve if unfolding feels limiting: an "open" link on the
+box for a full-size view with a ▾ to switch agents (option G).
+
+- **The page** (`InfoView.svelte`). Sections, each
+  left out when empty: context (bar, "92k of 200k · 46%", then what takes
+  the room), tasks (✓ done, ● doing, ○ to do), subagents (every one, running
+  and finished: name and run time, then its last step and how long ago), and
+  in the background (commands, not agents). A running agent with no step for
+  3 minutes shows "… ago" in the accent colour.
+- **A subagent, unfolded** (`AgentView.svelte` with `boxed`). Clicking its
+  row (marked ● running, ✓ done, ✗ failed or – stopped) opens a box under
+  it, 16 lines tall with a line on its left, that scrolls on its own and
+  stays on the newest step unless scrolled up. It holds the prompt (three
+  lines, all on a click), its steps folded like the chat's (`WorkRun`), the
+  text it wrote, and its answer (`←`), unless that repeats its last text.
+  Clicking the row again folds it; several can be open. Which are open lives
+  on the `Chat`, so it stays when leaving the chat but not after a restart.
+- A subagent's line in an opened work run in the chat shows chat info with
+  that agent unfolded and scrolled into view.
+
+State lives in `state/chatInfo.svelte.ts` (`ChatInfo`, one per chat, fed by
+`Chat.handle` before its own switch; events with a `parent_tool_id` stop
+there and never reach `items`). Clock times are taken only for live events,
+so a reopened chat shows run times from `TaskEnded.duration_ms` and no "ago".
+
+**What Claude Code sends** (probed live on CLI 2.1.325 with `--forward-subagent-text`):
+
+- Most subagents now run in the background, even ones not asked to: the
+  `Agent` call's result comes at once ("Async agent launched successfully"),
+  and only `task_notification` says when it's done. Their steps still carry
+  `parent_tool_use_id`, also after the main turn's `result`. When one ends,
+  Claude Code starts a turn on its own.
+- A subagent hands its report back by calling `SubagentHandback`
+  (`input.message`). The task's `summary` and the `Agent` result then only
+  point at it, so the handback's message is the answer and the call is not
+  shown as a step. A stopped task's summary is just its description again.
+- After the user presses stop, a cut-short `Agent` call returns an error
+  ("The user doesn't want to proceed…"); with an `interrupted` before it,
+  the agent is "stopped", not "failed".
+- `--forward-subagent-text` adds subagents' text and thinking. Their thinking
+  is dropped in `translate`.
+- The task list now uses `TaskCreate` (`subject`; the result says "Task #3
+  created") and `TaskUpdate` (`taskId`, `status`, `deleted` removes). Older
+  `TodoWrite` (whole list each time) is still read.
+- `get_context_usage` with `detail: "summary"` answers in about 20 ms. The
+  app asks after each `result` (main chats only) with request ID
+  `harness-context-usage`; an error answer is ignored. Only categories of
+  kind `used` with tokens are kept, largest first.
+
+**What Cursor sends** (probed live, CLI 2026.11.13, with
+`clientCapabilities._meta.subagents: true`, now always sent):
+
+- On the chat's session: `subagent_spawned` (`subagentSessionId`, `name`,
+  `task`, `_meta.cursor.toolCallId`), sent just before the tool call itself
+  (`rawInput._toolName: "task"`, `description`, `prompt`; shown as `Agent`),
+  then `subagent_state_update` (`state`: `completed`, `failed`, `cancelled`,
+  `disconnected`).
+- The subagent's own updates arrive on `subagentSessionId`: thinking, tool
+  calls and text, like a chat's. `acp.rs` keeps a `Child` per running
+  subagent and tags its tool calls and text with the parent tool call; text
+  is collected and sent as one block; thinking is dropped.
+- A `cursor/task` request follows the finished tool call; it is answered
+  with `{}`.
+- Cursor's todo updates (`updateTodos`) carry only the changed items, with
+  statuses like `TODO_STATUS_COMPLETED`; they are merged by `id`.
+- Cursor reports no context use, so its chats have no context section.
+
+Self-test: `@info`, `@agent <n>` (unfold the nth subagent), `@agents`
+(wait until none runs), `@model claude:<name>`; the report's `info` part.
+Preview: `#open=agents&info` (a chat with a finished, a failed and a live
+subagent; add `&agent` to unfold the first one).
+
+Not covered: subagents started by subagents (one step inside their parent),
+agents inside multi-agent workflows, stopping one subagent from the view,
+Gemini and Codex (Codex shows subagents only over its app-server protocol;
+Gemini reports only start and end).
 
 ### Skills (`skills.rs`, built 2026-11-16)
 

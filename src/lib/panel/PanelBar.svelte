@@ -1,7 +1,7 @@
 <script lang="ts">
   // The open panel's own row, drawn in the top bar right above it, so the panel
   // needs no row of its own: docs' tabs, the side chat's name, the browser's
-  // address, or the terminal's tabs. What it doesn't fill stays empty for
+  // address, the terminal's tabs, or chat info's tabs. What it doesn't fill stays empty for
   // dragging the window.
   import BarIcon from "../BarIcon.svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
@@ -252,6 +252,10 @@
     <button class="icon" title="Close the browser" onclick={() => chat.closeBrowser()}>
       <BarIcon name="close" />
     </button>
+  {:else if chat.panelView === "info"}
+    <span class="name on">chat info</span>
+    <span class="spacer" data-tauri-drag-region></span>
+    {@render widen()}
   {:else if chat.panelView === "side" && chat.side}
     <span class="name on">{chat.side.title || "side chat"}</span>
     <span class="spacer" data-tauri-drag-region></span>
