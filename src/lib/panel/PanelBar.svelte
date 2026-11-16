@@ -91,26 +91,44 @@
   const page = $derived(chat.browser);
   let address = $state("");
   let editing = $state(false);
-  /** Typing a new address: double-click on it, or there's no page yet. */
-  let typingUrl = $state(false);
-  /** Lit for a moment after a click copies the address. */
-  let copied = $state(false);
-  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The click that focused the box; its mouseup would otherwise undo select-all. */
+  let focusClick = false;
+  /** The last mousedown was that focusing click. */
+  let justFocused = false;
 
-  async function copy() {
-    if (!page) return;
-    try {
-      await navigator.clipboard.writeText(page.url);
-    } catch {
+  /**
+   * Click handling: the first click selects the whole address. A second click
+   * places the cursor, even a quick one, which the system counts as a
+   * double-click and would turn into a word selection.
+   */
+  function pressAddress(e: MouseEvent) {
+    const box = e.currentTarget as HTMLInputElement;
+    if (document.activeElement !== box) {
+      focusClick = justFocused = true;
       return;
     }
-    copied = true;
-    clearTimeout(copiedTimer);
-    copiedTimer = setTimeout(() => (copied = false), 600);
+    if (justFocused && e.detail === 2) {
+      e.preventDefault();
+      const at = offsetAt(box, e.clientX);
+      box.setSelectionRange(at, at);
+    }
+    justFocused = false;
   }
 
-  function focusBox(node: HTMLInputElement) {
-    if (typingUrl) node.focus();
+  /** The text position nearest to `x` in a one-line box, measured with the box's own font. */
+  function offsetAt(box: HTMLInputElement, x: number): number {
+    const style = getComputedStyle(box);
+    const pen = document.createElement("canvas").getContext("2d");
+    if (!pen) return box.value.length;
+    pen.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    const target = x - box.getBoundingClientRect().left - parseFloat(style.paddingLeft) + box.scrollLeft;
+    let before = 0;
+    for (let i = 1; i <= box.value.length; i++) {
+      const width = pen.measureText(box.value.slice(0, i)).width;
+      if (width >= target) return target - before < width - target ? i - 1 : i;
+      before = width;
+    }
+    return box.value.length;
   }
 
   // The address follows the page, except while the user types in it.
@@ -190,46 +208,37 @@
       </div>
     {/if}
   {:else if chat.panelView === "browser"}
-    <!-- Before the address, like most browsers. Kept in place (just hidden)
-         until a page is open, so the address doesn't jump right. -->
-    <button
-      class="icon reload"
-      class:off={!page}
-      class:busy={page?.loading}
-      title="Reload"
-      onclick={() => void browserReload(chat.sessionId).catch(() => {})}
-    >
-      <BarIcon name="reload" />
-    </button>
-    <!-- One click copies the address; double-click types a new one. -->
-    {#if page && !typingUrl}
+    <!-- Before the address, like most browsers. Left out until a page is
+         open, so an empty bar starts with the address box, not a gap. -->
+    {#if page}
       <button
-        class="address shown"
-        class:copied
-        title="Click to copy, double-click to type an address"
-        onclick={copy}
-        ondblclick={() => (typingUrl = true)}>{page.url}</button
+        class="icon reload"
+        class:busy={page.loading}
+        title="Reload"
+        onclick={() => void browserReload(chat.sessionId).catch(() => {})}
       >
-    {:else}
+        <BarIcon name="reload" />
+      </button>
+    {/if}
+    <!-- One click selects the whole address, ready to type over or copy. -->
     <input
       class="address"
-      use:focusBox
       bind:value={address}
+      onmousedown={pressAddress}
+      onmouseup={(e) => {
+        if (focusClick) e.preventDefault();
+        focusClick = false;
+      }}
       onfocus={(e) => {
         editing = true;
-        (e.target as HTMLInputElement).select();
+        e.currentTarget.select();
       }}
-      onblur={() => {
-        editing = false;
-        typingUrl = false;
-      }}
+      onblur={() => (editing = false)}
       onkeydown={go}
       spellcheck="false"
       autocomplete="off"
       placeholder="Type a url"
     />
-    {/if}
-    <span class="spacer" data-tauri-drag-region></span>
     <!-- With the panel's other buttons at the right, not after the address. -->
     <button
       class="icon"
@@ -382,7 +391,6 @@
   .keep {
     color: var(--dim);
   }
-  .reload.off,
   .icon.off {
     visibility: hidden;
   }
@@ -395,33 +403,18 @@
       transform: rotate(360deg);
     }
   }
-  /* As wide as an address usually needs; the rest drags the window. */
+  /* Fills the bar up to the buttons, so anywhere there is clickable. A long
+     address is cut short with an ellipsis. */
   .address {
-    flex: 0 1 48ch;
+    flex: 1;
     min-width: 12ch;
+    text-overflow: ellipsis;
     border: 0;
     outline: 0;
     padding: 0;
     background: transparent;
     color: var(--dim);
     caret-color: var(--accent);
-  }
-  /* The address as text: only as wide as it is (the rest drags the window),
-     one line, cut short with an ellipsis. */
-  .address.shown {
-    flex: 0 1 auto;
-    max-width: 48ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    text-align: left;
-  }
-  .address.shown:hover {
-    color: var(--fg);
-  }
-  /* Copied: the accent for a moment, the only sign. */
-  .address.shown.copied {
-    color: var(--accent);
   }
   .address:focus {
     color: var(--bright);

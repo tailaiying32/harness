@@ -9,7 +9,7 @@ import type { Theme } from "../themes";
 
 export type Made = { term: Terminal; fit: FitAddon; host: HTMLDivElement };
 
-/** A colour with some see-through, for the selection. */
+/** A colour with some see-through, for the scroll bar. */
 function soft(colour: string): string {
   return /^#[0-9a-f]{6}$/i.test(colour) ? `${colour}55` : colour;
 }
@@ -21,7 +21,9 @@ export function xtermTheme(t: Theme): ITheme {
     foreground: t.fg,
     cursor: t.accent,
     cursorAccent: t.bg,
-    selectionBackground: soft(t.accent),
+    // Same as selected text elsewhere in the app: solid accent, background colour on top.
+    selectionBackground: t.accent,
+    selectionForeground: t.bg,
     scrollbarSliderBackground: soft(t.line),
     scrollbarSliderHoverBackground: soft(t.faint),
     scrollbarSliderActiveBackground: soft(t.dim),

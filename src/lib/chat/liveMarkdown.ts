@@ -215,9 +215,6 @@ const look = EditorView.theme({
   ".cm-content": { padding: "0", caretColor: "var(--accent)", minHeight: "12em" },
   ".cm-line": { padding: "0" },
   ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)" },
-  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": {
-    backgroundColor: "color-mix(in srgb, var(--accent) 25%, transparent) !important",
-  },
   ".cm-placeholder": { color: "var(--faint)" },
   ".cm-md-mark": { color: "var(--faint)" },
   ".cm-md-h": { fontWeight: "700" },
