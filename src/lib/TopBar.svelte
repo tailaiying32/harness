@@ -19,12 +19,17 @@
   );
   const open = $derived(chat.panelOpen && chat.panelHasContent);
 
-  const views: { view: PanelView; name: string }[] = [
-    { view: "docs", name: "docs" },
-    { view: "side", name: "side chat" },
-    { view: "browser", name: "browser" },
-    { view: "terminal", name: "terminal" },
-  ];
+  // Side chats copy a Claude Code conversation, so Cursor chats have none.
+  const views = $derived(
+    (
+      [
+        { view: "docs", name: "docs" },
+        { view: "side", name: "side chat" },
+        { view: "browser", name: "browser" },
+        { view: "terminal", name: "terminal" },
+      ] as { view: PanelView; name: string }[]
+    ).filter((v) => v.view !== "side" || chat.agent !== "cursor"),
+  );
 
   function pick(view: PanelView) {
     if (open && chat.panelView === view) chat.panelOpen = false;

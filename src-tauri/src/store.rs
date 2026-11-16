@@ -45,6 +45,9 @@ pub struct SessionRow {
     pub prs: Vec<PrInfo>,
     /// When the chat was moved to the trash (ms); None when it isn't there.
     pub trashed_at: Option<i64>,
+    /// The agent the chat runs on ("claude-code", "cursor"). Set when the
+    /// chat is made and never changed.
+    pub agent: String,
 }
 
 /// Everything about a chat's git state, for the session manager and the sweep.
@@ -131,7 +134,7 @@ fn title_from(text: &str) -> String {
 }
 
 const SESSION_COLUMNS: &str = "s.id, p.path, s.title, s.mode, s.model, s.agent_session_id, \
-     s.last_used_at, s.wt, s.wt_status, s.prs, s.trashed_at, s.effort";
+     s.last_used_at, s.wt, s.wt_status, s.prs, s.trashed_at, s.effort, s.agent";
 
 /// A JSON column read leniently: unreadable means absent.
 fn json_col<T: serde::de::DeserializeOwned>(row: &rusqlite::Row, i: usize) -> rusqlite::Result<Option<T>> {
@@ -157,6 +160,7 @@ fn session_from(row: &rusqlite::Row) -> rusqlite::Result<SessionRow> {
         prs: json_col(row, 9)?.unwrap_or_default(),
         trashed_at: row.get(10)?,
         effort: row.get(11)?,
+        agent: row.get(12)?,
     })
 }
 
@@ -419,6 +423,16 @@ impl Store {
         .map_err(err)?;
         tx.commit().map_err(err)?;
         Ok(created)
+    }
+
+    /// The agent a new chat runs on. Called once, when the chat is made.
+    pub fn set_agent(&self, session_id: &str, agent: &str) -> Result<(), String> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE sessions SET agent = ?2 WHERE id = ?1", params![session_id, agent])
+            .map_err(err)?;
+        Ok(())
     }
 
     /// Replaces the title cut from the first message with a written one. A chat

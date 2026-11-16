@@ -20,8 +20,9 @@ use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Manager, RunEvent, State};
 
-use agent::AppTools;
 use agent::claude_code::ClaudeCodeAdapter;
+use agent::cursor::CursorAdapter;
+use agent::{Agents, AppTools};
 use browser::Browsers;
 use events::{AgentEvent, Decision, Envelope, ModelInfo};
 use locate::SetupInfo;
@@ -43,7 +44,8 @@ struct AppState {
     store: Arc<Store>,
     /// One app-wide channel to the window, so chats that aren't open still report status.
     channel: Arc<Mutex<Option<Channel<Envelope>>>>,
-    binary: Mutex<Option<PathBuf>>,
+    /// Every agent and where its program is (found by `check_setup`).
+    agents: Agents,
 }
 
 /// The sidebar: every project with its chats.
@@ -116,16 +118,8 @@ async fn choose_worktree(
     request_id: String,
     choice: String,
 ) -> Result<(), String> {
-    let binary = state
-        .binary
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("Claude Code couldn't be found")?;
     let sessions = state.sessions.clone();
-    sessions
-        .choose_worktree(&session_id, &request_id, &choice, binary)
-        .await
+    sessions.choose_worktree(&session_id, &request_id, &choice).await
 }
 
 /// Gives a chat a new title.
@@ -145,7 +139,8 @@ async fn check_setup(state: State<'_, AppState>) -> Result<SetupInfo, String> {
     let info = tauri::async_runtime::spawn_blocking(locate::check_setup)
         .await
         .map_err(|e| e.to_string())?;
-    *state.binary.lock().unwrap() = info.binary.as_ref().map(PathBuf::from);
+    state.agents.set_binary(agent::CLAUDE, info.binary.as_ref().map(PathBuf::from));
+    state.agents.set_binary(agent::CURSOR, info.cursor.as_ref().map(PathBuf::from));
     Ok(info)
 }
 
@@ -153,6 +148,8 @@ async fn check_setup(state: State<'_, AppState>) -> Result<SetupInfo, String> {
 async fn send_message(
     state: State<'_, AppState>,
     session_id: String,
+    // The agent a new chat runs on; a saved chat keeps its own.
+    agent: Option<String>,
     project_path: String,
     mode: Option<String>,
     model: Option<String>,
@@ -162,21 +159,16 @@ async fn send_message(
     images: Option<Vec<u32>>,
     message_id: String,
 ) -> Result<(), String> {
-    let binary = state
-        .binary
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("Claude Code couldn't be found")?;
     let project_path = PathBuf::from(project_path);
     if !project_path.is_dir() {
         return Err(format!("Not a folder: {}", project_path.display()));
     }
+    let agent = agent.unwrap_or_else(|| agent::CLAUDE.to_string());
 
     // The manager is cloned so nothing borrowed from `state` is held while waiting.
     let sessions = state.sessions.clone();
     sessions
-        .send_message(&session_id, binary, project_path, mode, model, effort, &text, &images.unwrap_or_default(), &message_id)
+        .send_message(&session_id, &agent, project_path, mode, model, effort, &text, &images.unwrap_or_default(), &message_id)
         .await
 }
 
@@ -192,12 +184,8 @@ async fn side_send(
     text: String,
     message_id: String,
 ) -> Result<(), String> {
-    let binary = state
-        .binary
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("Claude Code couldn't be found")?;
+    // Side chats run on Claude Code, which can copy a conversation.
+    let (_, binary) = state.agents.get(agent::CLAUDE)?;
     let project_path = PathBuf::from(project_path);
     if !project_path.is_dir() {
         return Err(format!("Not a folder: {}", project_path.display()));
@@ -524,34 +512,28 @@ fn close_window(window: tauri::Window) -> Result<(), String> {
     window.close().map_err(|e| e.to_string())
 }
 
-/// The models the agent offers. Starts a short-lived agent process, so it runs
-/// off the main thread and takes about 7 seconds (it also reads each model's
-/// default effort). The window shows the last list meanwhile.
+/// The models an agent offers (Claude Code if none is named). Starts a
+/// short-lived agent process, so it runs off the main thread: about 7 seconds
+/// for Claude Code; for Cursor a few seconds plus about one per model named in
+/// `efforts_for` (whose effort levels are read). The window shows the last
+/// list meanwhile.
 #[tauri::command]
-async fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfo>, String> {
-    let binary = state
-        .binary
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("Claude Code couldn't be found")?;
-    let adapter = state.sessions.adapter();
-    tauri::async_runtime::spawn_blocking(move || adapter.list_models(&binary))
+async fn list_models(
+    state: State<'_, AppState>,
+    agent: Option<String>,
+    efforts_for: Option<Vec<String>>,
+) -> Result<Vec<ModelInfo>, String> {
+    let (adapter, binary) = state.agents.get(agent.as_deref().unwrap_or(agent::CLAUDE))?;
+    tauri::async_runtime::spawn_blocking(move || adapter.list_models(&binary, efforts_for.as_deref()))
         .await
         .map_err(|e| e.to_string())?
 }
 
-/// Runs Claude Code's own sign-in, which opens the browser. Waits until the
-/// user is done there, up to a few minutes.
+/// Runs an agent's own sign-in (Claude Code if none is named), which opens
+/// the browser. Waits until the user is done there, up to a few minutes.
 #[tauri::command]
-async fn sign_in(state: State<'_, AppState>) -> Result<(), String> {
-    let binary = state
-        .binary
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("Claude Code couldn't be found")?;
-    let adapter = state.sessions.adapter();
+async fn sign_in(state: State<'_, AppState>, agent: Option<String>) -> Result<(), String> {
+    let (adapter, binary) = state.agents.get(agent.as_deref().unwrap_or(agent::CLAUDE))?;
     tauri::async_runtime::spawn_blocking(move || adapter.sign_in(&binary))
         .await
         .map_err(|e| e.to_string())?
@@ -716,11 +698,14 @@ pub fn run() {
                     }
                 });
             }
-            let adapter = Arc::new(ClaudeCodeAdapter);
-            let side = SideChats::new(adapter.clone(), store.clone(), out.clone(), dir.join("notes"));
+            let claude = Arc::new(ClaudeCodeAdapter);
+            let agents = Agents::default();
+            agents.add(agent::CLAUDE, claude.clone(), None);
+            agents.add(agent::CURSOR, Arc::new(CursorAdapter), None);
+            let side = SideChats::new(claude, store.clone(), out.clone(), dir.join("notes"));
             let browsers = Browsers::new(app.handle().clone(), out.clone());
             let terminals = Terminals::new(out.clone(), store.clone());
-            let sessions = SessionManager::new(adapter, store.clone(), out, dir);
+            let sessions = SessionManager::new(agents.clone(), store.clone(), out, dir);
             // Every chat's agent can drive that chat's browser and read its
             // project's terminal.
             {
@@ -788,7 +773,7 @@ pub fn run() {
                 terminals,
                 store,
                 channel,
-                binary: Mutex::new(None),
+                agents,
             });
             Ok(())
         })

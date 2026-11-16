@@ -1,19 +1,21 @@
 <script lang="ts">
-  // Claude Code said it isn't signed in. One button runs its own sign-in in
-  // the browser, then the message that failed is sent again.
+  // The chat's agent said it isn't signed in. One button runs its own sign-in
+  // in the browser, then the message that failed is sent again.
+  import { agentLabel, CURSOR } from "../ipc";
   import type { Chat, SignInItem } from "../state/chat.svelte";
 
   let { item, chat }: { item: SignInItem; chat: Chat } = $props();
+  const command = $derived(chat.agent === CURSOR ? "agent login" : "claude auth login");
 </script>
 
 {#if item.state === "done"}
   <div class="faint">signed in</div>
 {:else}
   <div class="card">
-    <div class="bright">Claude Code isn't signed in</div>
+    <div class="bright">{agentLabel(chat.agent)} isn't signed in</div>
     {#if item.state === "failed"}
       <div class="bad pre">{item.error}</div>
-      <div class="dim">Or run <span class="bright">claude auth login</span> in a terminal, then send again.</div>
+      <div class="dim">Or run <span class="bright">{command}</span> in a terminal, then send again.</div>
     {/if}
     <div class="actions">
       {#if item.state === "working"}

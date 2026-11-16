@@ -263,6 +263,8 @@ type Prefs = {
   appearance: Appearance;
   size: Size;
   model: string;
+  /** The agent of the model new chats start on ("claude-code", "cursor"). */
+  agent: string;
   fontSize: number;
   /** The permission mode new chats start in: the last one picked, plan aside. */
   mode: string;
@@ -306,6 +308,7 @@ export function loadPrefs(): Prefs {
       size,
       // Any saved name is kept; if Claude Code no longer knows it, the chat says so.
       model: typeof saved.model === "string" && saved.model ? saved.model : "default",
+      agent: saved.agent === "cursor" ? "cursor" : "claude-code",
       // With none saved, keep the text size the saved spacing used to give.
       fontSize: (fontSizes as readonly number[]).includes(saved.fontSize as number) ? saved.fontSize! : fontOfSize[size],
       mode: modes.includes(saved.mode as string) ? saved.mode! : DEFAULT_MODE,
@@ -318,7 +321,7 @@ export function loadPrefs(): Prefs {
       projectOrder: Array.isArray(saved.projectOrder) ? saved.projectOrder.filter((p) => typeof p === "string") : [],
     };
   } catch {
-    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH, foldedProjects: [], sidebarHidden: false, projectOrder: [] };
+    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", agent: "claude-code", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH, foldedProjects: [], sidebarHidden: false, projectOrder: [] };
   }
 }
 

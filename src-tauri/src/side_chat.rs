@@ -352,7 +352,7 @@ mod tests {
                 told: self.told.clone(),
             }))
         }
-        fn list_models(&self, _: &Path) -> Result<Vec<ModelInfo>, String> {
+        fn list_models(&self, _: &Path, _: Option<&[String]>) -> Result<Vec<ModelInfo>, String> {
             Ok(Vec::new())
         }
         fn make_title(&self, _: &Path, first: &str) -> Result<String, String> {

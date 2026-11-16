@@ -16,8 +16,10 @@ import {
   type SessionRow,
   type SessionState,
 } from "../ipc";
+import { modeFor } from "../models";
 import { loadPrefs } from "../themes";
 import { Chat } from "./chat.svelte";
+import type { AgentId } from "../ipc";
 
 /** A new chat starts in the mode the user last picked (auto until they pick one). */
 function fresh(): Chat {
@@ -50,8 +52,16 @@ export class AppState {
 
   /** The user's home folder; where a first chat starts. */
   home = $state("");
-  /** The model new chats start on. */
+  /** The model new chats start on, and its agent. */
   defaultModel = "default";
+  defaultAgent: AgentId = "claude-code";
+
+  /** A new chat's agent, model and mode: the last ones picked. */
+  startChat(chat: Chat): void {
+    chat.agent = this.defaultAgent;
+    chat.modelChoice = this.defaultModel;
+    chat.mode = modeFor(chat.agent, loadPrefs().mode, loadPrefs().mode);
+  }
 
   // Chats opened since the app started stay in memory, so switching back is
   // instant and a chat that is still working keeps receiving its events.
@@ -131,7 +141,7 @@ export class AppState {
     }
     const chat = fresh();
     chat.projectPath = folder ?? (this.current.projectPath || this.home);
-    chat.modelChoice = this.defaultModel;
+    this.startChat(chat);
     this.adopt(chat);
     this.current = chat;
   }
@@ -213,7 +223,7 @@ export class AppState {
     if (this.current.sessionId === sessionId) {
       const chat = fresh();
       chat.projectPath = folder || this.home;
-      chat.modelChoice = this.defaultModel;
+      this.startChat(chat);
       this.adopt(chat);
       this.current = chat;
     }

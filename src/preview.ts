@@ -48,6 +48,7 @@ const row = (
   wt_status: branch ? "live" : null,
   prs: !pr ? [] : typeof pr === "string" ? [part(40 + minutesAgo, pr, branch ?? "")] : pr,
   trashed_at: null,
+  agent: "claude-code",
 });
 
 /** A task split into pull requests: one landed, two open, the last built on the second. */
@@ -446,7 +447,7 @@ const commands: Record<string, (args: Args) => unknown> = {
       emit("unseen", ended);
     }, 50);
   },
-  check_setup: () => ({ binary: "claude", problem: null }),
+  check_setup: () => ({ binary: "claude", cursor: "agent", agents: ["claude-code", "cursor"], problem: null }),
   sidebar: () => projects,
   list_trash: () => trash,
   restore_chat: (args) => {
@@ -507,8 +508,18 @@ const commands: Record<string, (args: Args) => unknown> = {
   set_mode: (args) => emit(args.sessionId, { kind: "mode_changed", mode: args.mode }),
   set_model: () => undefined,
   set_effort: () => undefined,
-  list_models: () => {
+  list_models: (args) => {
     const all = ["low", "medium", "high", "xhigh", "max"];
+    // Cursor's, as the core sends them: Auto first, newest of each family.
+    if (args.agent === "cursor")
+      return [
+        { value: "default", name: "Auto", detail: null, efforts: [], default_effort: null },
+        { value: "claude-opus-5-5", name: "Claude Opus 5.5", detail: null, efforts: all, default_effort: "medium" },
+        { value: "gpt-5.6-sol", name: "GPT-5.6 Sol", detail: null, efforts: ["none", "low", "medium", "high", "xhigh", "max"], default_effort: "medium" },
+        { value: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen", detail: null, efforts: ["low", "medium", "high", "xhigh"], default_effort: "high" },
+        { value: "grok-4.7", name: "Grok 4.7", detail: null, efforts: ["low", "medium", "high", "xhigh"], default_effort: "high" },
+        { value: "composer-2.5", name: "Composer 2.5", detail: null, efforts: [], default_effort: null },
+      ];
     // As the core sends it: newest of each family, the recommended one first.
     return [
       { value: "opus", name: "Opus 5.5", detail: null, efforts: all, default_effort: "high" },

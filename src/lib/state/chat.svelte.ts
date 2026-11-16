@@ -32,7 +32,11 @@ import {
   type WorktreeChoice,
   type WorktreeStatus,
   writeNotes,
+  CLAUDE,
+  CURSOR,
+  type AgentId,
 } from "../ipc";
+import { modeFor } from "../models";
 import { FILE_LINK, fileWord, linkable, toLinks, type FileRef } from "../chat/files";
 import { docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
 
@@ -253,6 +257,8 @@ export class Chat {
   }
   items = $state<Item[]>([]);
   status = $state<SessionState | "none">("none");
+  /** The agent this chat runs on. Picked with the model before the first message, fixed after. */
+  agent = $state<AgentId>(CLAUDE);
   /** The model Claude Code reports it is using. Known after the first turn starts. */
   model = $state<string | null>(null);
   /** The model the user picked: an alias, a full name, or "default" for Claude Code's own default. */
@@ -275,6 +281,7 @@ export class Chat {
   }
   /** Takes the saved row's worktree details (they change outside the chat's events). */
   syncRow(row: SessionRow): void {
+    this.agent = row.agent ?? CLAUDE;
     this.workPath = row.work_path;
     this.branch = row.branch;
     this.wtStatus = row.wt_status;
@@ -885,6 +892,10 @@ export class Chat {
     if (!message) return;
     // `/btw` goes to the side chat, never to Claude Code (which can't run it headless).
     const btw = this.owner ? null : message.match(/^\/btw(?:\s+([\s\S]*))?$/);
+    if (btw && this.agent === CURSOR) {
+      this.push({ type: "error", text: "Side chats work in Claude Code chats only." });
+      return;
+    }
     if (btw) {
       const question = (btw[1] ?? "").trim();
       if (question) await this.askSide(question);
@@ -914,6 +925,7 @@ export class Chat {
       } else {
         await sendMessage(
           this.sessionId,
+          this.agent,
           this.projectPath.trim(),
           this.mode,
           this.modelChoice,
@@ -938,7 +950,7 @@ export class Chat {
     item.state = "working";
     item.error = undefined;
     try {
-      await signIn();
+      await signIn(this.agent);
     } catch (e) {
       item.state = "failed";
       item.error = String(e);
@@ -1054,6 +1066,14 @@ export class Chat {
       this.stopping = false;
       this.push({ type: "error", text: String(e) });
     }
+  }
+
+  /** Moves a chat that hasn't started yet to another agent. Its mode follows (plan stays plan). */
+  setAgent(agent: AgentId, savedMode: string): void {
+    if (this.started || agent === this.agent) return;
+    this.agent = agent;
+    this.mode = modeFor(agent, this.mode, savedMode);
+    this.effortChoice = "default";
   }
 
   /** Switch model. A running process is told now; otherwise it applies when one starts. */

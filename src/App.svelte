@@ -13,6 +13,8 @@
   import TopBar from "./lib/TopBar.svelte";
   import BarIcon from "./lib/BarIcon.svelte";
   import {
+    type ModelInfo,
+    type AgentId,
     autotest,
     autotestReport,
     autotestWait,
@@ -29,7 +31,17 @@
     type SetupInfo,
   } from "./lib/ipc";
   import { attach } from "./lib/chat/images";
-  import { loadCachedModels, saveCachedModels, startingModel } from "./lib/models";
+  import {
+    followList,
+    keepEfforts,
+    loadCachedModels,
+    loadCursorPick,
+    saveCachedModels,
+    saveCursorPick,
+    startingModel,
+    type AgentModels,
+    type CursorPick,
+  } from "./lib/models";
   import { AppState } from "./lib/state/app.svelte";
   import { terminals } from "./lib/state/terminals.svelte";
   import type { Chat } from "./lib/state/chat.svelte";
@@ -57,8 +69,9 @@
   applyPanelWidth(prefs.panelWidth);
 
   const app = new AppState();
-  app.defaultModel = startingModel(prefs.model, loadCachedModels());
-  app.current.modelChoice = app.defaultModel;
+  app.defaultAgent = prefs.agent as AgentId;
+  app.defaultModel = startingModel(prefs.model, app.defaultAgent, loadCachedModels());
+  app.startChat(app.current);
   const chat = $derived(app.current);
   const panelOpen = $derived(chat.panelOpen && chat.panelHasContent);
   // Full screen panel: it covers the chat, never the sidebar. Hiding the
@@ -155,7 +168,14 @@
     }
   });
   // Last known list first; refreshed from Claude Code once it has been found.
-  let models = $state(loadCachedModels());
+  let models = $state<AgentModels>(loadCachedModels());
+  // Which of Cursor's models the menu shows, picked in Settings.
+  let cursorPick = $state<CursorPick | null>(loadCursorPick());
+  const cursorShown = $derived(cursorPick?.shown ?? ["default"]);
+  const menuModels = $derived<AgentModels>({
+    "claude-code": models["claude-code"],
+    cursor: models.cursor.filter((m) => cursorShown.includes(m.value)),
+  });
 
   onMount(async () => {
     await subscribe((envelope) => app.route(envelope));
@@ -164,20 +184,64 @@
     // A first chat starts where the last one was, or at home.
     app.current.projectPath = app.projects[0]?.path ?? app.home;
     setup = await checkSetup();
-    if (setup.binary) void refreshModels();
+    // A saved pick of an agent that isn't installed falls back to Claude Code.
+    if (!setup.agents.includes(app.defaultAgent) && setup.agents.length) {
+      app.defaultAgent = setup.agents[0];
+      app.defaultModel = startingModel("", app.defaultAgent, models);
+      if (!app.current.started) app.startChat(app.current);
+    }
+    for (const agent of setup.agents) void refreshModels(agent);
     void runSelfTest();
   });
 
-  async function refreshModels() {
+  async function refreshModels(agent: AgentId) {
     try {
-      const list = await listModels();
+      if (agent === "cursor") return await refreshCursor();
+      const list = await listModels(agent);
       if (list.length > 0) {
-        models = list;
-        saveCachedModels(list);
+        models[agent] = list;
+        saveCachedModels(agent, list);
       }
     } catch {
       // Keep the list we have; the picker still works with it.
     }
+  }
+
+  /** Effort levels are read only for the models the menu shows, a second each. */
+  async function refreshCursor() {
+    const asked = [...cursorShown];
+    const list = await listModels("cursor", asked);
+    if (list.length === 0) return;
+    setCursorModels(keepEfforts(list, models.cursor));
+    // Models Cursor added since last time join the menu.
+    cursorPick = followList(cursorPick, models.cursor);
+    saveCursorPick(cursorPick);
+    const added = cursorShown.filter((v) => !asked.includes(v));
+    if (added.length) await readEfforts(added);
+  }
+
+  function setCursorModels(list: ModelInfo[]) {
+    models.cursor = list;
+    saveCachedModels("cursor", list);
+  }
+
+  async function readEfforts(values: string[]) {
+    try {
+      const list = await listModels("cursor", values);
+      setCursorModels(keepEfforts(list, models.cursor));
+    } catch {
+      // The model works without them; the effort row just doesn't show.
+    }
+  }
+
+  /** Settings: show or hide one of Cursor's models in the menu. */
+  function pickCursorModel(value: string, on: boolean) {
+    const pick = cursorPick ?? followList(null, models.cursor);
+    const shown = on ? [...pick.shown.filter((v) => v !== value), value] : pick.shown.filter((v) => v !== value);
+    cursorPick = { ...pick, shown };
+    saveCursorPick(cursorPick);
+    const known = models.cursor.find((m) => m.value === value);
+    if (on && !known?.efforts?.length) void readEfforts([value]);
   }
 
   // Self-test: send scripted messages through this same window, answer every
@@ -211,7 +275,11 @@
       size = test.size as Size;
       applySize(size);
     }
-    if (test.model) app.current.modelChoice = test.model;
+    // "cursor:<model>" picks one of Cursor's models.
+    if (test.model?.startsWith("cursor:")) {
+      app.current.setAgent("cursor", loadPrefs().mode);
+      app.current.modelChoice = test.model.slice("cursor:".length);
+    } else if (test.model) app.current.modelChoice = test.model;
     const started = performance.now();
     const modelsUsed: (string | null)[] = [];
     const modesAfter: string[] = [];
@@ -241,7 +309,7 @@
 
     for (const message of test.messages) {
       // Lines starting with `@` steer the test instead of being sent:
-      //   @model <name>, @mode <mode>
+      //   @model <name> (cursor:<name> for Cursor's), @mode <mode>
       //   @answer <allow|always_allow|deny|none>  how approvals are answered from here on
       //   @worktree <worktree|here|none>  how the worktree card is answered
       //   @turn          wait for the open chat's next turn to end (after a move to a
@@ -279,7 +347,10 @@
       const current = app.current;
       if (directive === "notes") await current.saveNotes(value);
       if (directive === "planedit") current.autoPlanEdit = value;
-      if (directive === "model") await current.changeModel(value);
+      if (directive === "model" && value.startsWith("cursor:")) {
+        current.setAgent("cursor", loadPrefs().mode);
+        await current.changeModel(value.slice("cursor:".length));
+      } else if (directive === "model") await current.changeModel(value);
       if (directive === "mode") await current.changeMode(value as Mode);
       if (directive === "answer") answer = value === "none" ? null : (value as Decision);
       if (directive === "worktree") worktreeAnswer = value === "none" ? null : (value as WorktreeChoice);
@@ -392,7 +463,7 @@
           status: current.status,
           worktree: { branch: current.branch, workPath: current.workPath, prs: current.prs },
           trash: app.trash.map((s) => s.title),
-          modelsOffered: models.map((m) => m.name),
+          modelsOffered: Object.values(models).flatMap((list) => list.map((m) => m.name)),
           usage: current.usage,
           panel: {
             open: current.panelOpen,
@@ -457,13 +528,13 @@
   </button>
   <div class="right">
   <TopBar {app} />
-  <!-- Chat and side panel; settings are drawn over both, never the sidebar. -->
+  <!-- Chat and side panel. -->
   <div class="work">
   <main>
     <!-- Each chat gets its own view, so scroll position and open folds don't leak between chats. -->
     {#key chat.sessionId}
       <ChatView {chat} problem={setup?.problem ?? null} />
-      <Composer {chat} ready={!!setup?.binary} home={app.home} {models} focus={app.focusBox} drops={!showSettings && !chat.viewing} />
+      <Composer {chat} ready={!!setup?.agents.length} agents={setup?.agents ?? []} home={app.home} models={menuModels} allModels={models} focus={app.focusBox} drops={!showSettings && !chat.viewing} />
     {/key}
   </main>
   {#if panelOpen}
@@ -477,10 +548,11 @@
       <ImageViewer {chat} />
     {/key}
   {/if}
-  {#if showSettings}
-    <Settings {app} bind:darkTheme bind:lightTheme bind:appearance bind:size bind:fontSize onclose={() => (showSettings = false)} />
-  {/if}
   </div>
+  <!-- Over the top bar, chat and panel alike: everything but the sidebar. -->
+  {#if showSettings}
+    <Settings {app} cursorModels={models.cursor} {cursorShown} onCursorPick={pickCursorModel} bind:darkTheme bind:lightTheme bind:appearance bind:size bind:fontSize onclose={() => (showSettings = false)} />
+  {/if}
   </div>
 </div>
 
@@ -501,7 +573,8 @@
     display: flex;
     align-items: center;
     color: var(--faint);
-    z-index: 2;
+    /* Above settings, which cover the top bar. */
+    z-index: 3;
   }
   .bare .side-toggle {
     left: var(--toggle-x);
@@ -519,6 +592,7 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
+    position: relative;
   }
   .work {
     flex: 1;

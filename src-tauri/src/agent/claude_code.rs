@@ -441,7 +441,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
     // SDK opens with. The reply lists the models; no chat message is sent, so
     // nothing is spent. The list takes about a second, the effort defaults below
     // about 7 more (tested on CLI 2.1.322).
-    fn list_models(&self, binary: &Path) -> Result<Vec<ModelInfo>, String> {
+    fn list_models(&self, binary: &Path, _efforts_for: Option<&[String]>) -> Result<Vec<ModelInfo>, String> {
         use std::io::{BufRead, Write};
 
         let mut cmd = std::process::Command::new(binary);
@@ -998,30 +998,10 @@ fn is_tool_message(v: &Value, tools: &AppTools) -> bool {
 /// Answers one MCP message for the app's tools; returns the line to send back.
 async fn answer_tool_message(tools: &AppTools, v: &Value) -> String {
     let message = &v["request"]["message"];
-    let id = message["id"].clone();
-    let result = match message["method"].as_str().unwrap_or_default() {
-        "initialize" => Ok(json!({
-            "protocolVersion": message["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": tools.server, "version": env!("CARGO_PKG_VERSION") },
-        })),
-        "tools/list" => Ok(json!({ "tools": tools.list })),
-        "tools/call" => {
-            let name = message["params"]["name"].as_str().unwrap_or_default().to_string();
-            let args = message["params"]["arguments"].clone();
-            Ok(match (tools.call)(name, args).await {
-                Ok(content) => json!({ "content": content }),
-                Err(error) => json!({ "content": [{ "type": "text", "text": error }], "isError": true }),
-            })
-        }
-        method if method.starts_with("notifications/") => Ok(json!({})),
-        method => Err(json!({ "code": -32601, "message": format!("Method not found: {method}") })),
-    };
-    let mut response = json!({ "jsonrpc": "2.0", "id": id });
-    match result {
-        Ok(result) => response["result"] = result,
-        Err(error) => response["error"] = error,
-    }
+    // Claude Code wants a reply to notifications too.
+    let response = super::answer_mcp(tools, message)
+        .await
+        .unwrap_or_else(|| json!({ "jsonrpc": "2.0", "id": message["id"], "result": {} }));
     json!({
         "type": "control_response",
         "response": {

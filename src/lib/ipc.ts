@@ -16,10 +16,17 @@ export type ApprovalKind = "tool" | "plan" | "question";
 export type Decision = "allow" | "always_allow" | "deny";
 
 /**
- * Claude Code's permission modes, as the app offers them. In "auto" Claude Code
- * decides by itself which actions are safe to run without asking.
+ * A chat's mode, as its agent names it. Claude Code: "default",
+ * "acceptEdits", "plan", "auto" (it decides by itself which actions are safe
+ * to run without asking). Cursor: "agent", "plan", "ask".
  */
-export type Mode = "default" | "acceptEdits" | "plan" | "auto";
+export type Mode = string;
+
+/** The agents a chat can run on. Mirrors `agent::CLAUDE` and `agent::CURSOR`. */
+export type AgentId = "claude-code" | "cursor";
+export const CLAUDE: AgentId = "claude-code";
+export const CURSOR: AgentId = "cursor";
+export const agentLabel = (agent: string) => (agent === CURSOR ? "Cursor" : "Claude Code");
 
 export type AgentEvent =
   | { kind: "session_started"; agent_session_id: string; model: string | null; mode: string | null }
@@ -82,7 +89,12 @@ export type PrInfo = {
 export type Envelope = { session_id: string; event: AgentEvent };
 
 export type SetupInfo = {
+  /** Claude Code's program. */
   binary: string | null;
+  /** Cursor's agent program. */
+  cursor: string | null;
+  /** The agents found, Claude Code first. */
+  agents: AgentId[];
   problem: string | null;
 };
 
@@ -114,6 +126,8 @@ export type SessionRow = {
   prs: PrInfo[];
   /** When the chat went to the trash (ms); null when it isn't there. */
   trashed_at: number | null;
+  /** The agent the chat runs on. */
+  agent: AgentId;
 };
 
 /** A project folder and its chats, newest first. */
@@ -144,6 +158,8 @@ export const chooseWorktree = (sessionId: string, requestId: string, choice: Wor
  *  are passed to the agent when this message has to start the chat's process. */
 export const sendMessage = (
   sessionId: string,
+  /** The agent a new chat runs on; a saved chat keeps its own. */
+  agent: AgentId,
   projectPath: string,
   mode: Mode,
   model: string,
@@ -152,7 +168,7 @@ export const sendMessage = (
   messageId: string,
   /** Numbers of the chat's saved images to send with the text. */
   images: number[] = [],
-) => invoke<void>("send_message", { sessionId, projectPath, mode, model, effort, text, images, messageId });
+) => invoke<void>("send_message", { sessionId, agent, projectPath, mode, model, effort, text, images, messageId });
 
 export const answerApproval = (
   sessionId: string,
@@ -199,11 +215,16 @@ export type ModelInfo = {
   default_effort?: string | null;
 };
 
-/** Asks Claude Code for its current models and their effort levels. Takes about 7 seconds. */
-export const listModels = () => invoke<ModelInfo[]>("list_models");
+/**
+ * Asks an agent for its current models and their effort levels. About 7
+ * seconds for Claude Code. Cursor reads effort levels only for `effortsFor`
+ * (all if left out), about a second each.
+ */
+export const listModels = (agent: AgentId, effortsFor?: string[]) =>
+  invoke<ModelInfo[]>("list_models", { agent, effortsFor });
 
-/** Runs Claude Code's own sign-in, which opens the browser. Resolves once the user is done. */
-export const signIn = () => invoke<void>("sign_in");
+/** Runs an agent's own sign-in, which opens the browser. Resolves once the user is done. */
+export const signIn = (agent: AgentId) => invoke<void>("sign_in", { agent });
 
 /** `model` is an alias ("opus"), a full name, or "default". */
 export const setModel = (sessionId: string, model: string) => invoke<void>("set_model", { sessionId, model });

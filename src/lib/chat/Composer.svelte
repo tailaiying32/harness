@@ -4,10 +4,11 @@
   import { onMount, tick } from "svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import BranchMark from "../BranchMark.svelte";
-  import { clipboardFiles, onFileDrop, pickFolder, readImageFile, type Mode, type ModelInfo } from "../ipc";
+  import { agentLabel, clipboardFiles, CLAUDE, onFileDrop, pickFolder, readImageFile, type AgentId, type Mode, type ModelInfo } from "../ipc";
+  import { agentModes, type AgentModels } from "../models";
   import { prLabel, prShort, shortPath } from "../paths";
   import { IMAGE_WORD, type Chat } from "../state/chat.svelte";
-  import { savePrefs } from "../themes";
+  import { loadPrefs, savePrefs } from "../themes";
   import { indent, newLine, outdent, renumbered, type Edit } from "./editing";
   import { imageType } from "./files";
   import { attach, imageFiles } from "./images";
@@ -17,13 +18,20 @@
     ready,
     home,
     models,
+    allModels,
+    agents,
     focus = 0,
     drops = true,
   }: {
     chat: Chat;
     ready: boolean;
     home: string;
-    models: ModelInfo[];
+    /** What the menu offers: for Cursor, the models picked in Settings. */
+    models: AgentModels;
+    /** Every model, to name a chat's model that isn't offered any more. */
+    allModels: AgentModels;
+    /** The agents found on this machine, Claude Code first. */
+    agents: AgentId[];
     focus?: number;
     /** Whether dropped files land here now; not while something is drawn over the chat. */
     drops?: boolean;
@@ -51,20 +59,17 @@
     if (focus) box?.focus();
   });
 
-  const modes: { id: Mode; label: string }[] = [
-    { id: "default", label: "ask before edits" },
-    { id: "acceptEdits", label: "auto-accept edits" },
-    { id: "plan", label: "plan" },
-    { id: "auto", label: "auto" },
-  ];
+  // Each agent has its own modes.
+  const modes = $derived(agentModes[chat.agent]);
   const modeLabel = $derived(modes.find((m) => m.id === chat.mode)?.label ?? chat.mode);
 
   function nextMode() {
     const index = modes.findIndex((m) => m.id === chat.mode);
-    const mode = modes[(index + 1) % modes.length].id;
+    const mode: Mode = modes[(index + 1) % modes.length].id;
     void chat.changeMode(mode);
-    // New chats start in the last mode picked. Plan is for one task, so it isn't kept.
-    if (mode !== "plan") savePrefs({ mode });
+    // New chats start in the last mode picked. Plan is for one task, so it
+    // isn't kept; Cursor's modes aren't either (Claude Code's are the saved kind).
+    if (mode !== "plan" && chat.agent === CLAUDE) savePrefs({ mode });
   }
 
   const folder = $derived(shortPath(chat.projectPath, home));
@@ -74,25 +79,39 @@
     if (picked) chat.projectPath = picked;
   }
 
-  // The list comes from Claude Code, so it shows real names ("Opus 5.5"). A
+  // The lists come from the agents, so they show real names ("Opus 5.5"). A
   // saved choice that is no longer listed still gets an entry, so it shows.
   // An older chat on Claude Code's "default" shows as the model that stands
-  // for, which the list puts first.
-  const shownChoice = $derived(chat.modelChoice === "default" && models.length ? models[0].value : chat.modelChoice);
-  const modelOptions = $derived(
-    models.some((m) => m.value === shownChoice)
-      ? models
-      : [{ value: shownChoice, name: shownChoice, detail: null }, ...models],
+  // for, which its list puts first. (Cursor's "default" is Auto, listed.)
+  const ownModels = $derived(models[chat.agent] ?? []);
+  const shownChoice = $derived(
+    chat.agent === CLAUDE && chat.modelChoice === "default" && ownModels.length ? ownModels[0].value : chat.modelChoice,
+  );
+  const modelOptions = $derived<ModelInfo[]>(
+    ownModels.some((m) => m.value === shownChoice)
+      ? ownModels
+      : [
+          allModels[chat.agent]?.find((m) => m.value === shownChoice) ?? { value: shownChoice, name: shownChoice, detail: null },
+          ...ownModels,
+        ],
+  );
+  // Before the first message every installed agent's models are offered, under
+  // its name; picking one puts the chat on that agent. After, only its own.
+  const groups = $derived(
+    (chat.started ? [chat.agent] : agents.filter((a) => a === chat.agent || (models[a] ?? []).length > 0)).map(
+      (agent) => ({ agent, list: agent === chat.agent ? modelOptions : models[agent] }),
+    ),
   );
 
-  function pickModel(choice: string) {
+  function pickModel(agent: AgentId, choice: string) {
+    chat.setAgent(agent, loadPrefs().mode);
     void chat.changeModel(choice);
-    savePrefs({ model: choice });
+    savePrefs({ model: choice, agent });
   }
 
   // Effort lives in the model menu. A level picked here is for this chat only;
   // new chats start on Claude Code's own default for their model.
-  const picked = $derived(modelOptions.find((m) => m.value === shownChoice));
+  const picked = $derived<ModelInfo | undefined>(modelOptions.find((m) => m.value === shownChoice));
   const efforts = $derived(picked?.efforts ?? []);
   const effort = $derived(
     efforts.includes(chat.effortChoice) ? chat.effortChoice : (picked?.default_effort ?? null),
@@ -388,7 +407,7 @@
           onkeyup={() => snap()}
           onscroll={syncMirror}
           rows="1"
-          placeholder="Message Claude Code"
+          placeholder={`Message ${agentLabel(chat.agent)}`}
         ></textarea>
       </div>
       {#if chat.busy}
@@ -440,14 +459,20 @@
         </button>
         {#if open === "model"}
           <div class="menu" role="menu">
-            {#each modelOptions as m (m.value)}
-              <button
-                role="menuitemradio"
-                aria-checked={m.value === shownChoice}
-                class:on={m.value === shownChoice}
-                title={m.detail ?? ""}
-                onclick={() => pickModel(m.value)}>{m.name}</button
-              >
+            {#each groups as group (group.agent)}
+              {#if groups.length > 1}
+                <div class="group">{agentLabel(group.agent)}</div>
+              {/if}
+              {#each group.list as m (m.value)}
+                {@const on = group.agent === chat.agent && m.value === shownChoice}
+                <button
+                  role="menuitemradio"
+                  aria-checked={on}
+                  class:on
+                  title={m.detail ?? ""}
+                  onclick={() => pickModel(group.agent, m.value)}>{m.name}</button
+                >
+              {/each}
             {/each}
             {#if efforts.length}
               <div class="efforts" role="group" aria-label="Effort">
@@ -636,6 +661,16 @@
     padding: calc(var(--gap) * 0.4) 2ch 0;
     border-top: 1px solid var(--line);
     color: var(--faint);
+  }
+  /* An agent's name over its models; a line above every one but the first. */
+  .group {
+    padding: 0 2ch;
+    color: var(--faint);
+  }
+  .group ~ .group {
+    margin-top: calc(var(--gap) * 0.4);
+    padding-top: calc(var(--gap) * 0.4);
+    border-top: 1px solid var(--line);
   }
   .efforts {
     display: flex;

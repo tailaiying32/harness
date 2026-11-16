@@ -1,17 +1,58 @@
-//! The boundary between the app and any coding agent.
-//! `claude_code` is the only adapter in v1; a second agent means a second file here.
+//! The boundary between the app and any coding agent. Each agent is one
+//! adapter here: `claude_code` (Claude Code's own channel) and `cursor`
+//! (Cursor's agent over ACP, see `acp`).
 
+pub mod acp;
 pub mod claude_code;
+pub mod cursor;
+pub mod mcp_http;
 
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
 use crate::events::{AgentEvent, Decision, ModelInfo};
+
+/// Agent IDs, as saved with each chat.
+pub const CLAUDE: &str = "claude-code";
+pub const CURSOR: &str = "cursor";
+
+/// What the user sees an agent called.
+pub fn label(agent: &str) -> &'static str {
+    match agent {
+        CURSOR => "Cursor",
+        _ => "Claude Code",
+    }
+}
+
+/// Every agent the app knows, with where its program was found (None = not
+/// installed, or not looked for yet).
+#[derive(Clone, Default)]
+pub struct Agents(Arc<Mutex<BTreeMap<String, (Arc<dyn AgentAdapter>, Option<PathBuf>)>>>);
+
+impl Agents {
+    pub fn add(&self, id: &str, adapter: Arc<dyn AgentAdapter>, binary: Option<PathBuf>) {
+        self.0.lock().unwrap().insert(id.to_string(), (adapter, binary));
+    }
+
+    pub fn set_binary(&self, id: &str, binary: Option<PathBuf>) {
+        if let Some(entry) = self.0.lock().unwrap().get_mut(id) {
+            entry.1 = binary;
+        }
+    }
+
+    /// The agent and its program, or why it can't be used.
+    pub fn get(&self, id: &str) -> Result<(Arc<dyn AgentAdapter>, PathBuf), String> {
+        let agents = self.0.lock().unwrap();
+        let (adapter, binary) = agents.get(id).ok_or_else(|| format!("Unknown agent: {id}"))?;
+        let binary = binary.clone().ok_or_else(|| format!("{} couldn't be found", label(id)))?;
+        Ok((adapter.clone(), binary))
+    }
+}
 
 /// Where an adapter delivers events. Called from background tasks.
 pub type EventSink = Arc<dyn Fn(AgentEvent) + Send + Sync>;
@@ -54,6 +95,40 @@ pub struct AppTools {
     pub list: Value,
     /// Runs a call: tool name and arguments.
     pub call: Arc<dyn Fn(String, Value) -> ToolFuture + Send + Sync>,
+}
+
+/// Answers one MCP JSON-RPC message for the app's own tools. None for a
+/// notification, which gets no reply. Shared by every adapter: Claude Code
+/// passes these over its control channel, ACP agents over HTTP.
+pub async fn answer_mcp(tools: &AppTools, message: &Value) -> Option<Value> {
+    let method = message["method"].as_str().unwrap_or_default();
+    if message.get("id").is_none() || method.starts_with("notifications/") {
+        return None;
+    }
+    let result = match method {
+        "initialize" => Ok(serde_json::json!({
+            "protocolVersion": message["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": tools.server, "version": env!("CARGO_PKG_VERSION") },
+        })),
+        "ping" => Ok(serde_json::json!({})),
+        "tools/list" => Ok(serde_json::json!({ "tools": tools.list })),
+        "tools/call" => {
+            let name = message["params"]["name"].as_str().unwrap_or_default().to_string();
+            let args = message["params"]["arguments"].clone();
+            Ok(match (tools.call)(name, args).await {
+                Ok(content) => serde_json::json!({ "content": content }),
+                Err(error) => serde_json::json!({ "content": [{ "type": "text", "text": error }], "isError": true }),
+            })
+        }
+        method => Err(serde_json::json!({ "code": -32601, "message": format!("Method not found: {method}") })),
+    };
+    let mut response = serde_json::json!({ "jsonrpc": "2.0", "id": message["id"] });
+    match result {
+        Ok(result) => response["result"] = result,
+        Err(error) => response["error"] = error,
+    }
+    Some(response)
 }
 
 /// How a side chat starts.
@@ -109,8 +184,10 @@ pub trait AgentAdapter: Send + Sync {
     fn spawn(&self, opts: SpawnOptions, sink: EventSink) -> Result<Box<dyn RunningAgent>, String>;
 
     /// The models the agent offers right now, in the order it lists them.
-    /// Blocks for up to a few seconds; call it off the main thread.
-    fn list_models(&self, binary: &Path) -> Result<Vec<ModelInfo>, String>;
+    /// `efforts_for` names the models whose effort levels to read when that
+    /// takes a call per model (Cursor); None = all. Blocks for up to a few
+    /// seconds; call it off the main thread.
+    fn list_models(&self, binary: &Path, efforts_for: Option<&[String]>) -> Result<Vec<ModelInfo>, String>;
 
     /// A short title for a chat that starts with `first_message`, written by a
     /// small model. Blocks for a few seconds; call it off the main thread.

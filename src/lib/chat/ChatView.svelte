@@ -177,7 +177,7 @@
           <!-- Claude reads a message sent mid-turn after its current step,
                unless the user would rather cut that step short. -->
           {#if group.item.queued}
-            <button class="now" title="Stop what Claude is doing and send this now" onclick={() => chat.stop()}>
+            <button class="now" title="Stop the current turn and send this now" onclick={() => chat.stop()}>
               send now
             </button>
           {/if}

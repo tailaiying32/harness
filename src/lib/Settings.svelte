@@ -1,7 +1,8 @@
 <script lang="ts">
-  // Settings, drawn over the chat and side panel. A choice applies at once and
+  // Settings, drawn over everything but the sidebar: top bar, chat and side panel. A choice applies at once and
   // is remembered. Also home to things that aren't part of the work at hand,
   // like the trash.
+  import type { ModelInfo } from "./ipc";
   import type { AppState } from "./state/app.svelte";
   import { appearances, applyFontSize, applySize, fontSizes, savePrefs, sizes, themes, type Appearance, type Size } from "./themes";
 
@@ -12,8 +13,47 @@
     appearance = $bindable(),
     size = $bindable(),
     fontSize = $bindable(),
+    cursorModels = [],
+    cursorShown = [],
+    onCursorPick = () => {},
     onclose,
-  }: { app: AppState; darkTheme: string; lightTheme: string; appearance: Appearance; size: Size; fontSize: number; onclose: () => void } = $props();
+  }: {
+    app: AppState;
+    darkTheme: string;
+    lightTheme: string;
+    appearance: Appearance;
+    size: Size;
+    fontSize: number;
+    /** Every model Cursor offers; empty when Cursor isn't installed. */
+    cursorModels?: ModelInfo[];
+    /** The ones the model menu shows. */
+    cursorShown?: string[];
+    onCursorPick?: (value: string, on: boolean) => void;
+    onclose: () => void;
+  } = $props();
+
+  // Cursor's models: the ones in the menu, each with "remove", and one box
+  // that finds the rest as you type. Dozens of models, so no list of them all.
+  const picked = $derived(cursorModels.filter((m) => cursorShown.includes(m.value)));
+  let query = $state("");
+  const found = $derived.by(() => {
+    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return [];
+    return cursorModels
+      .filter((m) => !cursorShown.includes(m.value))
+      .filter((m) => words.every((w) => `${m.name} ${m.value}`.toLowerCase().includes(w)))
+      .slice(0, 8);
+  });
+
+  function addModel(value: string) {
+    onCursorPick(value, true);
+    query = "";
+  }
+
+  function findKey(e: KeyboardEvent) {
+    if (e.key === "Enter" && found.length) addModel(found[0].value);
+    if (e.key === "Escape") query = "";
+  }
 
   // One pick per side. The app shows whichever side the appearance says, so
   // picking for the other side changes nothing on screen. App.svelte applies it.
@@ -73,7 +113,8 @@
   }
 </script>
 
-<div class="settings">
+<!-- It covers the title bar's strip, so its empty space moves the window. -->
+<div class="settings" data-tauri-drag-region>
   <div class="inner">
     <div class="head">
       <span class="title">Settings</span>
@@ -126,6 +167,27 @@
         </div>
       {/each}
     </section>
+
+    {#if cursorModels.length}
+      <section>
+        <div class="label">Cursor models</div>
+        {#each picked as m (m.value)}
+          <div class="row">
+            <span class="name">{m.name}</span>
+            {#if picked.length > 1}
+              <button class="act" onclick={() => onCursorPick(m.value, false)}>remove</button>
+            {/if}
+          </div>
+        {/each}
+        <input class="find" placeholder="add a model" spellcheck="false" bind:value={query} onkeydown={findKey} />
+        {#each found as m (m.value)}
+          <button class="open add" onclick={() => addModel(m.value)}>{m.name}</button>
+        {/each}
+        {#if query.trim() && !found.length}
+          <div class="sub">no match</div>
+        {/if}
+      </section>
+    {/if}
 
     <section>
       <div class="label">Usage</div>
@@ -268,6 +330,33 @@
   }
   .warn {
     color: var(--fg);
+  }
+  .name {
+    flex: 1;
+    min-width: 0;
+    color: var(--fg);
+  }
+  .find {
+    display: block;
+    width: 100%;
+    margin-top: calc(var(--gap) * 0.6);
+    padding: 0.2em 0;
+    font: inherit;
+    color: var(--fg);
+    background: none;
+    border: none;
+    border-bottom: 1px solid var(--line);
+    outline: none;
+  }
+  .find::placeholder {
+    color: var(--faint);
+  }
+  .find:focus {
+    border-bottom-color: var(--accent);
+  }
+  .add {
+    display: block;
+    width: 100%;
   }
   .danger {
     color: var(--bad);

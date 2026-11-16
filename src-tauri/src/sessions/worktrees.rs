@@ -292,7 +292,6 @@ impl SessionManager {
         session_id: &str,
         request_id: &str,
         choice: &str,
-        binary: PathBuf,
     ) -> Result<(), String> {
         if choice != "worktree" && choice != "here" {
             return Err(format!("Unknown choice: {choice}"));
@@ -382,7 +381,7 @@ impl SessionManager {
         let message_id = uuid::Uuid::new_v4().to_string();
         self.send_inner(
             session_id,
-            binary,
+            &saved.agent,
             PathBuf::from(&saved.project_path),
             Some(saved.mode),
             Some(saved.model),

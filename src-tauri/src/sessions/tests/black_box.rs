@@ -189,7 +189,7 @@ fn rig_in(dir: &Path, worktree_idle: Duration, keep: Duration, lookup: PrLookup)
         worktree_idle: Some(worktree_idle),
         keep: Some(keep),
     };
-    let manager = SessionManager::build(fake.clone(), store.clone(), out, timings, dir.to_path_buf(), lookup);
+    let manager = SessionManager::build(fake_agents(&fake), store.clone(), out, timings, dir.to_path_buf(), lookup);
     Rig {
         fake,
         store,
@@ -687,7 +687,7 @@ async fn b11_finished_chat_starts_new_work_with_an_empty_list() {
     // New work, in a new worktree.
     rig.send_at(&repo, "auto", "one more thing").await;
     rig.agent_says(worktree_call("r2", "one more thing"));
-    rig.manager.choose_worktree("s1", "r2", "worktree", "claude".into()).await.unwrap();
+    rig.manager.choose_worktree("s1", "r2", "worktree").await.unwrap();
     let next = rig.worktree().expect("a new worktree");
     assert!(next.path.exists());
     assert_ne!(next.branch, wt.branch);

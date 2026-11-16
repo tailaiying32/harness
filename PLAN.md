@@ -1,5 +1,9 @@
 # Harness v1 plan
 
+Added 2026-11-15 (branch `harness/cursor-acp-217ae2`): chats can run on
+Cursor's agent as well as Claude Code, picked from the model menu before the
+first message. See "Cursor over ACP".
+
 Status, 2026-11-13: steps 1 to 5 of "Order of work" are built. Images
 (paste, drop, tool images, a full-space image view) were added 2026-11-14;
 see "Images". The app has a
@@ -224,7 +228,11 @@ the login itself.
 
 - A skills editor and a screen for managing app connections. Skills, instructions and connections you already have still
   work; there is just no UI for editing them yet.
-- Codex, Cursor or other agents. The design leaves room; nothing is built.
+- Agents other than Claude Code and Cursor (Codex, Gemini). Most ACP agents
+  would reuse `agent/acp.rs`.
+- In Cursor chats: side chat, worktrees (loading a session in another folder
+  works, so the same move Claude chats make is possible), the usage meter,
+  and moving a chat between agents.
 - Chats made earlier in the desktop app or the terminal. Only chats started in
   this app appear in the sidebar.
 - Attachments other than images (PDFs and other files), pictures inside
@@ -1021,7 +1029,9 @@ Mocked up on the same board:
   failure.
 - **Settings page: started 2026-11-13** (the user wanted theme and size out of
   the bottom bar). "settings" at the bottom of the sidebar, or Cmd+, / Ctrl+,
-  opens it over the chat and side panel (never the sidebar); "close", Escape
+  opens it over the top bar, chat and side panel (never the sidebar; the top
+  bar was left showing until 2026-11-15, which looked out of place); its
+  empty space moves the window, as the top bar did; "close", Escape
   or opening a chat closes it. It holds spacing
   (compact, regular, roomy: line height, gaps and margins), font size (11 to
   16 px) and theme (dark and light lists). Spacing and font size were one
@@ -1475,6 +1485,121 @@ pretend shell with two tabs: one at its prompt, one running a server; it
 answers `ls`, `pwd` and `echo hello`, and `sleep`/`python3` "run" until Ctrl+C).
 It is not part of the built app. `.claude/launch.json` starts it as
 `ui-preview`.
+
+### Cursor over ACP (probed 2026-11-15, Cursor CLI 2026.11.13-eacade1)
+
+Cursor's command-line agent (`agent`, in `~/.local/bin`; `cursor-agent` is the
+same program) is driven with `agent acp`: newline-delimited JSON-RPC 2.0 on
+stdin/stdout. What a live test showed:
+
+- **`initialize`** result: `loadSession: true`, `mcpCapabilities {http, sse}`
+  true, `promptCapabilities.image` true (a PNG was described correctly),
+  `authMethods: [cursor_login]`. Sending `clientCapabilities._meta.parameterizedModelPicker: true`
+  changes the model list (below). `_meta.subagents` also exists; not used.
+- **`session/new`** returns `sessionId`, `modes` (`agent`, `plan`, `ask`) and
+  `configOptions`. A new session starts on the **last model used in any
+  Cursor session**, so always set the model explicitly.
+- **Models.** Without the `_meta` flag, model ids look like
+  `claude-opus-5-5[context=300k,effort=medium,fast=false]` and only those
+  exact values are accepted. With it, the `model` option lists 48 plain ids
+  with display names (`claude-opus-5-5` / "Claude Opus 5.5", `default` /
+  "Auto"), and each model brings its own extra options: a `thought_level`
+  option (id `effort`, `reasoning_effort` or `reasoning`; levels differ per
+  model, e.g. `none … extra-high`, `low … max`), sometimes `thinking`
+  (`true`/`false`), and `model_config` options `context` and `fast` (fast is
+  2.5x the price; leave it). Change with `session/set_config_option
+  {sessionId, configId, value}`; the reply is the full option list for the
+  new model. Reading every model's levels takes ~40 s (one set per model), so
+  do it in the background and cache it.
+- **Modes**: `session/set_mode {modeId}` replies `{}` and sends
+  `current_mode_update`. Plan mode has a `SwitchMode` tool the agent may use.
+- **Turn text**: `agent_thought_chunk` then `agent_message_chunk` deltas;
+  no message ids. `session_info_update {title}` arrives at the start of the
+  first turn with a short chat title.
+- **Tool calls**: `tool_call` arrives with `rawInput: {}` and a generic
+  title ("Terminal", "Read File"); a `tool_call_update` then fills `title`
+  and `rawInput`. Ids contain a newline. Several can run at once. Kinds and
+  inputs seen: `execute {command}` → result `rawOutput {exitCode, stdout,
+  stderr}`; `read {path}` → `{content}`; `edit {path}` → `content: [{type:
+  diff, path, oldText, newText}]`; `search {pattern, path?}` (grep and file
+  find) → `{totalMatches|totalFiles, truncated}`; MCP tools: kind `other`,
+  `rawInput {providerIdentifier, toolName, args}` → `{success}` only.
+- **Approvals**: only shell commands and MCP tools asked; edits and reads
+  didn't. `session/request_permission` carries `toolCall {toolCallId, title,
+  kind, content: "Not in allowlist: echo"}` and options with `optionId`
+  `allow-once` / `allow-always` / `reject-once` (`kind` `allow_once` etc.).
+  The answer is `{outcome: {outcome: "selected", optionId}}`.
+- **Plans**: in plan mode the agent calls `createPlan` and Cursor sends the
+  request `cursor/create_plan {toolCallId, name, overview, plan (markdown),
+  todos, isProject, phases}`. **Answers to Cursor's own requests are wrapped
+  like permission answers**: `{outcome: {outcome: "accepted"}}`,
+  `{outcome: {outcome: "rejected", reason}}` (Cursor's code reads
+  `outcome.outcome`; its docs show them unwrapped, and an unwrapped answer
+  reaches the model as "User cancelled"). A rejection's `reason` reaches the
+  model. After acceptance the agent stops and the mode stays `plan`, so the
+  app switches to `agent` once the turn ends (switching while the plan call
+  finishes made it read as cancelled) and sends "approved, build it" (with
+  the edited plan, if edited) as a note, in the same turn as far as the
+  window can tell.
+- **Questions**: `cursor/ask_question` is handled in Cursor's code, but no
+  model was given an ask-question tool (listed tools in plan mode: Shell,
+  Glob, rg, ReadFile, Delete, TodoWrite, WebSearch, WebFetch, CreatePlan,
+  SwitchMode, ApplyPatch, Subagent, MCP resource tools…). The agent asks in
+  plain text instead. Nothing in the docs or the client code enables it.
+  Answers are `{outcome: {outcome: "answered", answers: [{questionId,
+  selectedOptionIds}]}}` or `skipped` with a `reason`; the app handles it in
+  case it starts arriving.
+
+**As built (2026-11-15, branch `harness/cursor-acp-217ae2`).** `agent/acp.rs`
+speaks ACP (driver task: `initialize`, `session/new` or `session/load`, then
+one `session/prompt` at a time; reader task routes replies, requests and
+updates); `agent/cursor.rs` starts `agent acp` with the `_meta` flag, lists
+every model (Auto first; those named in `efforts_for` are picked once each
+to read their effort levels, then the user's own current model is put back)
+and runs `agent login`. **Which Cursor models the menu shows is the user's
+pick** (Settings, "Cursor models"; changed from a guessed "newest of each
+family" on 2026-11-15, since Cursor's ids don't say what is current): the
+picked ones listed with "remove", plus one "add a model" box that finds the
+rest as you type (every word must be in the name or id; Enter adds the first
+match). The first pick is Auto alone; a model Cursor lists later that wasn't
+seen before joins the menu by itself. Kept in the window's storage
+(`harness.models.cursor.picked`: `shown`, `known`); effort levels are read
+only for shown models, and for one when it is added. `agent/mcp_http.rs` serves the browser and terminal tools over HTTP
+on 127.0.0.1 (one random token per chat process); calls to them are allowed
+without a card. A chat's agent is saved in `sessions.agent` when it is made
+and never changes; `Agents` in `agent/mod.rs` maps agent IDs to adapters and
+programs (`locate::find_cursor` prefers `cursor-agent`). Messages sent while
+a turn runs wait and go together as the next prompt; app notes (a denial's
+reason, an approved plan) are added to it. Titles come from Cursor's
+`session_info_update`. In the window the model menu lists both agents under
+their names until the first message, the label shows just the model (no agent name; the message box says "Message Cursor"),
+the mode button steps through agent / plan / ask only, and side chat is
+hidden. **Tested live** with the self-test (Auto model): a command approved,
+an image read, the browser opened through the app's tool, a plan approved and
+built in one turn, a stop mid-command, a close and resume that kept the
+conversation, and the model list loaded. Not tested live: the sign-in card
+(the error shape was probed), a question card (Cursor never sent one), and
+"Keep planning" from the panel.
+- **Stop**: `session/cancel` (notification) makes the open `session/prompt`
+  return `stopReason: "cancelled"`. A permission request still waiting is not
+  withdrawn by Cursor; the client answers it `cancelled` itself. The next
+  prompt works normally.
+- **Resume**: `session/load {sessionId, cwd, mcpServers}` replays history as
+  `session/update`s (tool calls with ids `replay-N-M`) before its reply, which
+  has the same `modes`/`models`/`configOptions` as `session/new`, with the
+  session's own model. The chat remembers earlier turns. **Loading with a
+  different `cwd` works**: history kept, commands run in the new folder (what
+  a later worktree move for Cursor chats needs). `agent --worktree` and a
+  `/worktree` slash command also exist.
+- **MCP over HTTP**: an `{type: "http", name, url, headers: []}` server in
+  `session/new.mcpServers` is used as is (Streamable HTTP: `initialize`,
+  `notifications/initialized`, a `GET` that may be refused with 405,
+  `tools/list`, `tools/call`). Its calls go through `session/request_permission`
+  like shell commands.
+- **Signed out**: `session/new` fails with error `-32000` "Authentication
+  required" (`data.message` says to run `agent login`).
+- **Errors in a turn** show up as message text ("Error: RetriableError: …")
+  with `stopReason: "end_turn"`.
 
 ### If the approval channel breaks
 
