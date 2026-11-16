@@ -53,7 +53,7 @@ export type AgentEvent =
   | { kind: "message_seen"; id: string }
   | { kind: "turn_ended"; ok: boolean; duration_ms: number | null }
   | { kind: "usage_update"; window: string | null; utilization: number; resets_at: number | null }
-  | { kind: "background_work"; running: number }
+  | { kind: "background_work"; running: number; agents: number }
   | { kind: "error"; message: string }
   | { kind: "compacting"; active: boolean }
   | { kind: "compacted"; auto: boolean }

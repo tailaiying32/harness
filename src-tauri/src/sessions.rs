@@ -539,7 +539,7 @@ impl SessionManager {
                     }
                 }
                 AgentEvent::Status { state } => manager.on_state(&id, run, state),
-                AgentEvent::BackgroundWork { running } => manager.on_background(&id, run, *running > 0),
+                AgentEvent::BackgroundWork { running, .. } => manager.on_background(&id, run, *running > 0),
                 AgentEvent::TurnEnded { .. } => manager.after_turn(&id),
                 AgentEvent::AssistantBlock {
                     block: Block::ToolCall { tool_id, name, input },
@@ -1073,7 +1073,7 @@ mod tests {
             self.fake.told.lock().unwrap().clone()
         }
         fn background(&self, running: u32) {
-            self.agent_says(AgentEvent::BackgroundWork { running });
+            self.agent_says(AgentEvent::BackgroundWork { running, agents: 0 });
         }
         fn count(&self, what: &str) -> usize {
             self.told().iter().filter(|t| *t == what).count()
