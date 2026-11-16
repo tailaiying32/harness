@@ -303,8 +303,10 @@ export const openFile = (path: string) => invoke<void>("open_file", { path });
 /** Paths of the files on the system clipboard (copied in Finder or Explorer); none when it holds something else. */
 export const clipboardFiles = () => invoke<string[]>("clipboard_files");
 
-/** A markdown file's text, for a link opened in the side panel. */
+/** A markdown file's text, for a tab in the side panel. */
 export const readDoc = (path: string) => invoke<string>("read_doc", { path });
+/** Saves the user's edit to a markdown file the panel has read. */
+export const writeDoc = (path: string, text: string) => invoke<void>("write_doc", { path, text });
 
 // ---- The side panel's browser (one per chat, localhost pages only) ----
 

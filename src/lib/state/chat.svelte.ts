@@ -31,6 +31,7 @@ import {
   type SessionState,
   type WorktreeChoice,
   type WorktreeStatus,
+  writeDoc,
   writeNotes,
   CLAUDE,
   CURSOR,
@@ -469,10 +470,12 @@ export class Chat {
    */
   async refreshNotes(): Promise<void> {
     if (this.owner) return this.owner.refreshNotes();
-    if (this.notes === null) return;
+    const before = this.notes;
+    if (before === null) return;
     try {
       const text = await readNotes(this.sessionId);
-      if (text !== this.notes) this.notes = text;
+      // Typed into while reading: the typing is newer than what was read.
+      if (this.notes === before && text !== before) this.notes = text;
     } catch {
       // Left as shown; the next write or turn end tries again.
     }
@@ -596,6 +599,34 @@ export class Chat {
     if (text === null) return;
     if (doc) doc.text = text;
     else this.docs.push({ path, text });
+    // Then the file itself: the user may have edited it since Claude read it.
+    if (!this.replaying) void this.refreshDoc(path);
+  }
+
+  /** Reads a document's tab again from its file. Left as shown if it can't be read. */
+  async refreshDoc(path: string): Promise<void> {
+    if (this.owner) return this.owner.refreshDoc(path);
+    const before = this.docs.find((d) => d.path === path)?.text;
+    let text: string;
+    try {
+      text = await readDoc(path);
+    } catch {
+      return;
+    }
+    const doc = this.docs.find((d) => d.path === path);
+    // Typed into while reading: the typing is newer than what was read.
+    if (doc && doc.text === before && doc.text !== text) doc.text = text;
+  }
+
+  /** Keeps a document as the user typed it and saves it to its file. */
+  async saveDoc(path: string, text: string): Promise<void> {
+    const doc = this.docs.find((d) => d.path === path);
+    if (doc) doc.text = text;
+    try {
+      await writeDoc(path, text);
+    } catch (e) {
+      this.showError(`Couldn't save ${path}: ${e}`);
+    }
   }
 
   /** Called once each time a turn ends. Used by the self-test. */
@@ -856,8 +887,10 @@ export class Chat {
         this.settle();
         if (this.stopping) this.push({ type: "note", text: "stopped" });
         this.stopping = false;
-        // Claude may have written the notes some other way (a shell command, Cursor's tools).
+        // Claude may have written the notes or a document some other way (a
+        // shell command, Cursor's tools).
         void this.refreshNotes();
+        for (const doc of this.openDocs) void this.refreshDoc(doc.path);
         this.onTurnEnd?.();
         break;
 

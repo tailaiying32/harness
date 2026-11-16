@@ -46,6 +46,8 @@ struct AppState {
     channel: Arc<Mutex<Option<Channel<Envelope>>>>,
     /// Every agent and where its program is (found by `check_setup`).
     agents: Agents,
+    /// Markdown files shown in the side panel, which the user may edit.
+    docs: Arc<docs::Docs>,
 }
 
 /// The sidebar: every project with its chats.
@@ -388,10 +390,20 @@ async fn clipboard_files() -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// A markdown file's text, for a link opened in the side panel.
+/// A markdown file's text, for a tab in the side panel.
 #[tauri::command]
-async fn read_doc(path: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || docs::read_doc(Path::new(&path)))
+async fn read_doc(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    let docs = state.docs.clone();
+    tauri::async_runtime::spawn_blocking(move || docs.read(Path::new(&path)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Saves the user's edit to a markdown file shown in the side panel.
+#[tauri::command]
+async fn write_doc(state: State<'_, AppState>, path: String, text: String) -> Result<(), String> {
+    let docs = state.docs.clone();
+    tauri::async_runtime::spawn_blocking(move || docs.write(Path::new(&path), &text))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -774,6 +786,7 @@ pub fn run() {
                 store,
                 channel,
                 agents,
+                docs: Arc::default(),
             });
             Ok(())
         })
@@ -801,6 +814,7 @@ pub fn run() {
             side_end,
             close_session,
             read_doc,
+            write_doc,
             read_notes,
             write_notes,
             browser_navigate,

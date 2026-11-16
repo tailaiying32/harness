@@ -281,11 +281,14 @@
       size = test.size as Size;
       applySize(size);
     }
-    // "cursor:<model>" picks one of Cursor's models.
-    if (test.model?.startsWith("cursor:")) {
-      app.current.setAgent("cursor", loadPrefs().mode);
-      app.current.modelChoice = test.model.slice("cursor:".length);
-    } else if (test.model) app.current.modelChoice = test.model;
+    // "cursor:<model>" picks one of Cursor's models; any other name is Claude
+    // Code's. Marked as picked, so the project's last pick doesn't replace it.
+    if (test.model) {
+      const cursor = test.model.startsWith("cursor:");
+      app.current.setAgent(cursor ? "cursor" : "claude-code", loadPrefs().mode);
+      app.current.modelChoice = cursor ? test.model.slice("cursor:".length) : test.model;
+      app.current.modelPicked = true;
+    }
     const started = performance.now();
     const modelsUsed: (string | null)[] = [];
     const modesAfter: string[] = [];
@@ -342,16 +345,18 @@
       //   @termclose     close the tab on show, answering "close" if it asks
       //   @docs          show the docs view (the terminal goes off screen)
       //   @notes <text>  write the open chat's notes (the rest of the line, spaces and all)
+      //   @docedit <text>  save <text> as the open chat's first document, as typing in its tab does
       //   @planedit <text>  add a line to the next plan before it is auto-approved
       //   @wait <ms>     do nothing for a while. With the window hidden or the screen
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
         message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|image|file|browser|settings|termtab|termclose|docs)(?:\s+(\S+))?$/) ??
-        message.match(/^@(notes|planedit|terminal|termwait)\s+(.+)$/s) ??
+        message.match(/^@(notes|docedit|planedit|terminal|termwait)\s+(.+)$/s) ??
         [];
       const current = app.current;
       if (directive === "notes") await current.saveNotes(value);
+      if (directive === "docedit" && current.docs[0]) await current.saveDoc(current.docs[0].path, value);
       if (directive === "planedit") current.autoPlanEdit = value;
       if (directive === "model" && value.startsWith("cursor:")) {
         current.setAgent("cursor", loadPrefs().mode);

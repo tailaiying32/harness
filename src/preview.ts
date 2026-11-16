@@ -429,6 +429,9 @@ function finish(id: string) {
 
 type Args = Record<string, any>;
 
+/** Documents edited in a tab, kept for the page's life. */
+const docsByPath = new Map<string, string>();
+
 const notesByChat = new Map<string, string>([
   [
     "planning",
@@ -579,8 +582,12 @@ const commands: Record<string, (args: Args) => unknown> = {
   read_doc: (args: Args) => {
     const path = String(args.path);
     if (path.endsWith("gone.md")) throw "That file doesn't exist.";
-    return `# ${path.split("/").pop()}\n\nRead from \`${path}\` on disk.\n\nA [link back](../PLAN.md) opens the plan file.`;
+    return (
+      docsByPath.get(path) ??
+      `# ${path.split("/").pop()}\n\nRead from \`${path}\` on disk.\n\nA [link back](../PLAN.md) opens the plan file.`
+    );
   },
+  write_doc: (args: Args) => void docsByPath.set(String(args.path), String(args.text)),
 };
 
 // ---- The terminal: a pretend shell that echoes and answers a few commands ----

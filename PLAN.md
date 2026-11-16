@@ -1414,6 +1414,32 @@ followed exactly and still shown after a restart. Checked in the preview: the
 tab order, formatted notes, editing. Self-test: `@notes <text>`,
 `@planedit <text>`; report `notes` and `plans`.
 
+**Document edits** (2026-11-15). Every markdown tab (files the chat wrote or
+a link opened, in the project or not) is edited in place like the notes and
+saved as the user types (`write_doc`, 400 ms after typing stops, when editing
+ends, and before typing starts in another tab). The answered plan stays
+read-only.
+- Tabs follow the file, not Claude's calls: a tab is read from disk when it
+  shows, after each Write/Edit to it, and at every turn end. A read that
+  finishes after the user typed is dropped (the typing is newer).
+- `docs.rs` only writes a file the panel has read (`Docs` remembers paths
+  `read_doc` returned), that still exists (typing doesn't bring back a file
+  Claude deleted), and whose text was valid UTF-8 (else the shown text
+  differs from the bytes). Written to a side file in the same folder and
+  moved into place, keeping the file's permissions; a link is followed and
+  stays a link.
+- Same clash rules as the notes: Claude's change replaces only the changed
+  middle while the user types and isn't saved back; a pending save of older
+  typing is dropped. If the user edits after Claude read a file, Claude's
+  next Edit fails ("modified since read") and it reads again.
+- **Tested**: Rust tests; in the preview, typing saves, also when switching
+  tabs at once; live with the self-test (Haiku): Claude wrote a doc,
+  `@docedit <text>` saved an edit through the core, Claude's next Edit
+  landed on top, and tab, file and Claude agreed. The self-test's
+  `HARNESS_AUTOTEST_MODEL` now also picks the agent (a plain name is Claude
+  Code) and marks the model as picked: since new chats take the project's
+  last pick, tests had been running on Cursor.
+
 ### Terminal (`terminal.rs`, built 2026-11-15)
 
 Real shells in the side panel, for scratch work (finding things, a quick
