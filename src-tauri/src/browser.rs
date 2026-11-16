@@ -35,6 +35,12 @@ small-screen layout; use resize (e.g. 1440) to check the desktop layout.";
 const ACTION_WAIT: Duration = Duration::from_secs(15);
 /// How long `open` waits for a page to load.
 const LOAD_WAIT: Duration = Duration::from_secs(20);
+/// How often, during an action, to check that the page hasn't taken the
+/// window's keys (see `keep_keys`).
+const KEYS_POLL: Duration = Duration::from_millis(30);
+/// How long to keep checking once the action is done: WebKit can hand the
+/// keys over a moment later.
+const KEYS_TAIL: Duration = Duration::from_millis(500);
 /// After a click: how long to watch for a page load it started.
 const CLICK_SETTLE: Duration = Duration::from_millis(400);
 /// Where a hidden browser is parked: far left of the window, out of sight.
@@ -174,6 +180,9 @@ struct Page {
     title: String,
     /// Waiting for the current load to finish.
     load_waiters: Vec<oneshot::Sender<()>>,
+    /// The page's native view, by address, to tell whether it holds the
+    /// window's keys (see `keep_keys`). 0 where that isn't checked.
+    view: usize,
 }
 
 /// Where the window wants a chat's browser. Kept apart from the page, so it
@@ -511,14 +520,16 @@ impl Browsers {
         // On Mac they are taken out, leaving only the bridge; elsewhere they stay
         // for now (calls through them are refused: no capability covers this view).
         #[cfg(target_os = "macos")]
-        {
-            let (tx, rx) = oneshot::channel::<()>();
+        let view = {
+            let (tx, rx) = oneshot::channel::<usize>();
             let _ = webview.with_webview(move |platform| {
                 mac::only_bridge(platform.inner(), BRIDGE_JS);
-                let _ = tx.send(());
+                let _ = tx.send(platform.inner() as usize);
             });
-            let _ = rx.await;
-        }
+            rx.await.unwrap_or(0)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let view = 0;
 
         self.0.pages.lock().unwrap().insert(
             chat.to_string(),
@@ -529,6 +540,7 @@ impl Browsers {
                 url: url.to_string(),
                 title: String::new(),
                 load_waiters: vec![loaded],
+                view,
             },
         );
         // Where the window last wanted it, if it said already.
@@ -591,6 +603,19 @@ impl Browsers {
 
     /// Runs one of the agent's tool calls. Returns MCP content items.
     pub async fn call(&self, chat: &str, tool: &str, args: &Value) -> Result<Vec<Value>, String> {
+        let keys = self.keys_holder().await;
+        // Dropped when the call ends, which tells `keep_keys` the action is done.
+        let (_running, done) = oneshot::channel::<()>();
+        {
+            let browsers = self.clone();
+            let chat = chat.to_string();
+            tauri::async_runtime::spawn(async move { browsers.keep_keys(&chat, keys, done).await });
+        }
+        self.run_tool(chat, tool, args).await
+    }
+
+    /// One tool call, as `call` runs it.
+    async fn run_tool(&self, chat: &str, tool: &str, args: &Value) -> Result<Vec<Value>, String> {
         let text = |s: String| Ok(vec![json!({ "type": "text", "text": s })]);
         // A page put away while unused comes back for the agent's next look.
         if tool != "open" {
@@ -634,6 +659,73 @@ impl Browsers {
             }
             _ => Err(format!("Unknown browser tool: {tool}")),
         }
+    }
+
+    /// The agent's actions mustn't move the user's keys. Focusing a box in a
+    /// page (to type in it or click it) makes WebKit give that page the
+    /// window's keys, even when it is parked off screen for a chat not on
+    /// show, so the user's typing in another chat would land in it. If the
+    /// page took the keys, they go back to `before` (what held them before
+    /// the action), or to the main window when that's gone.
+    ///
+    /// A page on show that held the keys before the action keeps them: the
+    /// user clicked into it. A parked page never keeps them, even if it held
+    /// them before: that can only be an earlier action's doing, not yet undone
+    /// (two quick actions in a row).
+    ///
+    /// Checks while the action runs and for `KEYS_TAIL` after (`done` closes
+    /// when it ends).
+    async fn keep_keys(&self, chat: &str, before: usize, mut done: oneshot::Receiver<()>) {
+        let mut ended: Option<Instant> = None;
+        loop {
+            match ended {
+                Some(at) if at.elapsed() > KEYS_TAIL => return,
+                Some(_) => {}
+                None if matches!(done.try_recv(), Err(oneshot::error::TryRecvError::Empty)) => {}
+                None => ended = Some(Instant::now()),
+            }
+            tokio::time::sleep(KEYS_POLL).await;
+            let page = self.0.pages.lock().unwrap().get(chat).map(|p| p.view).unwrap_or(0);
+            let shown = self.0.places.lock().unwrap().get(chat).is_some_and(|p| p.visible);
+            if page == 0 || (page == before && shown) || self.keys_holder().await != page {
+                continue;
+            }
+            let back = self
+                .0
+                .pages
+                .lock()
+                .unwrap()
+                .values()
+                .find(|p| p.view == before && p.view != page)
+                .map(|p| p.webview.clone())
+                .or_else(|| self.0.app.get_webview("main"));
+            if let Some(webview) = back {
+                let _ = webview.set_focus();
+            }
+        }
+    }
+
+    /// The view holding the window's keys, by address; 0 if unknown.
+    async fn keys_holder(&self) -> usize {
+        #[cfg(target_os = "macos")]
+        {
+            let (tx, rx) = oneshot::channel();
+            let app = self.0.app.clone();
+            let asked = self.0.app.run_on_main_thread(move || {
+                let holder = app
+                    .get_window("main")
+                    .and_then(|w| w.ns_window().ok())
+                    .map(mac::keys_holder)
+                    .unwrap_or(0);
+                let _ = tx.send(holder);
+            });
+            if asked.is_err() {
+                return 0;
+            }
+            rx.await.unwrap_or(0)
+        }
+        #[cfg(not(target_os = "macos"))]
+        0
     }
 
     /// After a click: if it started a page load, wait for it.
@@ -812,6 +904,17 @@ mod mac {
             reply(png_of(image).ok_or_else(|| "Couldn't turn the screenshot into a PNG.".to_string()));
         });
         unsafe { view.takeSnapshotWithConfiguration_completionHandler(Some(&config), &block) };
+    }
+
+    /// The view holding `window`'s keys (its first responder), by address; 0 for none.
+    pub fn keys_holder(window: *mut c_void) -> usize {
+        if window.is_null() {
+            return 0;
+        }
+        // SAFETY: Tauri's live NSWindow; called on the main thread.
+        let window: &objc2::runtime::AnyObject = unsafe { &*(window as *const objc2::runtime::AnyObject) };
+        let holder: *mut objc2::runtime::AnyObject = unsafe { objc2::msg_send![window, firstResponder] };
+        holder as usize
     }
 
     /// Leaves `script` as the page's only start-up script, for every load from now on.
