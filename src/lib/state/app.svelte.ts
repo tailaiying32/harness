@@ -183,19 +183,47 @@ export class AppState {
     }
   }
 
-  /** Starts an empty chat in `folder` (default: the open chat's folder). */
+  /**
+   * Starts a new chat in `folder` (default: the open chat's folder). A new chat
+   * left there with something typed in it comes back instead of a blank one.
+   */
   newChat(folder?: string): void {
     this.focusBox++;
-    // An untouched new chat is reused rather than piling up.
-    if (!this.current.started) {
-      if (folder) this.current.projectPath = folder;
+    const left = this.current;
+    if (!left.started && (!folder || sameFolder(left.projectPath, folder))) return;
+    const target = folder ?? (left.projectPath || this.home);
+    const unsent = this.unsentIn(target);
+    // An untouched new chat moves rather than piling up.
+    if (!left.started && !left.hasDraft && !unsent) {
+      left.projectPath = target;
       return;
     }
+    this.current = unsent ?? this.blankIn(target);
+    this.leave(left);
+  }
+
+  /** A new chat in `folder`, not sent yet, with something typed in it. */
+  private unsentIn(folder: string): Chat | undefined {
+    for (const chat of this.chats.values()) {
+      if (chat === this.current || chat.started || !chat.hasDraft) continue;
+      if (sameFolder(chat.projectPath, folder)) return chat;
+    }
+    return undefined;
+  }
+
+  private blankIn(folder: string): Chat {
     const chat = fresh();
-    chat.projectPath = folder ?? (this.current.projectPath || this.home);
+    chat.projectPath = folder;
     this.startChat(chat);
     this.adopt(chat);
-    this.current = chat;
+    return chat;
+  }
+
+  /** Forgets a chat just switched away from if it holds nothing: never sent, nothing typed. Its side chats end with it. */
+  private leave(chat: Chat): void {
+    if (chat.started || chat.hasDraft) return;
+    chat.endAllSides();
+    this.chats.delete(chat.sessionId);
   }
 
   async open(sessionId: string): Promise<void> {
@@ -215,11 +243,9 @@ export class AppState {
       }
       this.adopt(chat);
     }
-    if (!this.current.started) {
-      this.current.endAllSides();
-      this.chats.delete(this.current.sessionId);
-    }
+    const left = this.current;
     this.current = chat;
+    this.leave(left);
     delete this.unseen[sessionId];
   }
 
@@ -277,14 +303,15 @@ export class AppState {
     delete this.helpers[sessionId];
     delete this.unseen[sessionId];
     if (this.current.sessionId === sessionId) {
-      const chat = fresh();
-      chat.projectPath = folder || this.home;
-      this.startChat(chat);
-      this.adopt(chat);
-      this.current = chat;
+      const target = folder || this.home;
+      this.current = this.unsentIn(target) ?? this.blankIn(target);
     }
     await this.refresh();
   }
+}
+
+function sameFolder(a: string, b: string): boolean {
+  return a.trim() === b.trim();
 }
 
 /** One usage limit: how much is spent (0 to 1) and when it starts over (seconds since 1970). */
