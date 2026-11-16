@@ -52,7 +52,7 @@ export type AgentEvent =
   | { kind: "user_message"; text: string; id?: string | null; images?: ImageRef[] }
   | { kind: "message_seen"; id: string }
   | { kind: "turn_ended"; ok: boolean; duration_ms: number | null }
-  | { kind: "usage_update"; window: string | null; utilization: number }
+  | { kind: "usage_update"; window: string | null; utilization: number; resets_at: number | null }
   | { kind: "background_work"; running: number }
   | { kind: "error"; message: string }
   | { kind: "compacting"; active: boolean }
@@ -239,6 +239,22 @@ export async function pickFolder(startAt?: string): Promise<string | null> {
   const picked = await open({ directory: true, multiple: false, defaultPath: startAt });
   return typeof picked === "string" ? picked : null;
 }
+
+/** Native file picker for the given extensions. Null if the user cancels. */
+export async function pickFile(name: string, extensions: string[]): Promise<string | null> {
+  const picked = await open({ directory: false, multiple: false, filters: [{ name, extensions }] });
+  return typeof picked === "string" ? picked : null;
+}
+
+/** One of the app's own skills (see src-tauri/src/skills.rs). */
+export type SkillInfo = { name: string; description: string };
+
+export const listSkills = () => invoke<SkillInfo[]>("list_skills");
+
+/** A skill folder, a .zip of one, or a .md file. Replaces a skill of the same name. */
+export const importSkill = (path: string) => invoke<SkillInfo>("import_skill", { path });
+
+export const removeSkill = (name: string) => invoke<void>("remove_skill", { name });
 
 // Self-test (see `autotest` in src-tauri/src/lib.rs). Null when not turned on.
 export const autotest = () =>

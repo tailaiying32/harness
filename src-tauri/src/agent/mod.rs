@@ -108,7 +108,7 @@ pub struct AppTools {
     /// The name the agent knows the group by.
     pub server: &'static str,
     /// A line added to the agent's instructions about when to use them.
-    pub instruction: &'static str,
+    pub instruction: String,
     /// MCP tool definitions.
     pub list: Value,
     /// Runs a call: tool name and arguments.

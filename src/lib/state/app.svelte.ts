@@ -19,7 +19,7 @@ import {
 import { loadCachedModels, modeFor, startingModel } from "../models";
 import { loadPrefs, savePrefs } from "../themes";
 import { Chat } from "./chat.svelte";
-import type { AgentId } from "../ipc";
+import { CLAUDE, type AgentId } from "../ipc";
 
 /** A new chat starts in the mode the user last picked (auto until they pick one). */
 function fresh(): Chat {
@@ -44,8 +44,10 @@ export class AppState {
   statuses = $state<Record<string, SessionState>>({});
   /** Chats that finished a turn, or need an answer, while another was on screen. */
   unseen = $state<Record<string, boolean>>({});
-  /** The latest usage-limit reading from any chat. Limits are per account, so the newest one wins. */
-  usage = $state<{ window: string | null; utilization: number } | null>(null);
+  /** The newest reading of each usage limit, by agent and then limit name.
+   *  Limits are per account, so any chat's reading counts. Saved, because an
+   *  agent reports a limit only after a reply from a model it applies to. */
+  limits = $state<Limits>(loadLimits());
   /** A problem opening or deleting a chat, shown in the sidebar. */
   problem = $state("");
 
@@ -128,7 +130,12 @@ export class AppState {
       return;
     }
     if (event.kind === "status") this.statuses[id] = event.state;
-    if (event.kind === "usage_update") this.usage = { window: event.window, utilization: event.utilization };
+    if (event.kind === "usage_update" && event.window) {
+      const agent = this.chats.get(id)?.agent ?? CLAUDE;
+      const reading = { utilization: event.utilization, resetsAt: event.resets_at };
+      this.limits = { ...this.limits, [agent]: { ...this.limits[agent], [event.window]: reading } };
+      localStorage.setItem(LIMITS_KEY, JSON.stringify(this.limits));
+    }
     // These change the chat's row (title, worktree, pull request).
     if (
       event.kind === "title_changed" ||
@@ -263,5 +270,19 @@ export class AppState {
       this.current = chat;
     }
     await this.refresh();
+  }
+}
+
+/** One usage limit: how much is spent (0 to 1) and when it starts over (seconds since 1970). */
+export type Limit = { utilization: number; resetsAt: number | null };
+export type Limits = Partial<Record<AgentId, Record<string, Limit>>>;
+
+const LIMITS_KEY = "harness.limits";
+
+function loadLimits(): Limits {
+  try {
+    return JSON.parse(localStorage.getItem(LIMITS_KEY) ?? "{}") as Limits;
+  } catch {
+    return {};
   }
 }

@@ -141,7 +141,7 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
         args.extend(["--mcp-config".to_string(), mcp_config(&opts.tools)]);
         for tools in &opts.tools {
             instructions.push_str("\n\n");
-            instructions.push_str(tools.instruction);
+            instructions.push_str(&tools.instruction);
         }
     }
     if let Some(notes) = &opts.notes {
@@ -1237,19 +1237,34 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
             });
         }
 
-        // Subscription usage. `rateLimitType` names the window that applies and
-        // `unifiedWindows` holds how much of each is spent.
+        // Subscription usage. `unifiedWindows` holds every limit that applies
+        // to the model that answered, each with how much is spent: "seven_day"
+        // (all models), plus "seven_day_overage_included" (Fable's own) after a
+        // Fable reply, and "five_hour" when it applies (seen on CLI 2.1.322).
+        // Older events carry only `rateLimitType` and `utilization`.
         "rate_limit_event" => {
             let info = &v["rate_limit_info"];
-            let window = info["rateLimitType"].as_str();
-            let utilization = window
-                .and_then(|w| info["unifiedWindows"][w]["utilization"].as_f64())
-                .or_else(|| info["utilization"].as_f64());
-            if let Some(utilization) = utilization {
-                out.events.push(AgentEvent::UsageUpdate {
-                    window: window.map(str::to_owned),
-                    utilization,
-                });
+            match info["unifiedWindows"].as_object().filter(|w| !w.is_empty()) {
+                Some(windows) => {
+                    for (window, reading) in windows {
+                        if let Some(utilization) = reading["utilization"].as_f64() {
+                            out.events.push(AgentEvent::UsageUpdate {
+                                window: Some(window.clone()),
+                                utilization,
+                                resets_at: reading["resetsAt"].as_u64(),
+                            });
+                        }
+                    }
+                }
+                None => {
+                    if let Some(utilization) = info["utilization"].as_f64() {
+                        out.events.push(AgentEvent::UsageUpdate {
+                            window: info["rateLimitType"].as_str().map(str::to_owned),
+                            utilization,
+                            resets_at: info["resetsAt"].as_u64(),
+                        });
+                    }
+                }
             }
         }
 
@@ -1357,7 +1372,7 @@ mod tests {
     fn echo_tools() -> AppTools {
         AppTools {
             server: "app_tools",
-            instruction: "Use the app tools.",
+            instruction: "Use the app tools.".into(),
             list: json!([{ "name": "echo", "inputSchema": { "type": "object" } }]),
             call: Arc::new(|name, args| {
                 Box::pin(async move {
@@ -1398,7 +1413,7 @@ mod tests {
     fn several_tool_servers_are_all_declared_allowed_and_explained() {
         let mut more = echo_tools();
         more.server = "more_tools";
-        more.instruction = "Use the other tools.";
+        more.instruction = "Use the other tools.".into();
         let args = launch_args(&SpawnOptions {
             binary: "claude".into(),
             project_path: "/work".into(),
@@ -1795,18 +1810,28 @@ mod tests {
     }
 
     #[test]
-    fn usage_comes_from_the_active_window() {
+    fn usage_reports_every_limit() {
         let got = events(
-            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"seven_day","unifiedWindows":{"seven_day":{"utilization":0.34}}}}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1794866400,"rateLimitType":"seven_day_overage_included","utilization":0.94,"unifiedWindows":{"seven_day":{"utilization":0.63,"resetsAt":1794866400},"seven_day_overage_included":{"utilization":0.94,"resetsAt":1794866401}}}}"#,
             &Pending::default(),
         );
         assert_eq!(
             got,
-            vec![AgentEvent::UsageUpdate {
-                window: Some("seven_day".into()),
-                utilization: 0.34,
-            }]
+            vec![
+                AgentEvent::UsageUpdate { window: Some("seven_day".into()), utilization: 0.63, resets_at: Some(1794866400) },
+                AgentEvent::UsageUpdate {
+                    window: Some("seven_day_overage_included".into()),
+                    utilization: 0.94,
+                    resets_at: Some(1794866401),
+                },
+            ]
         );
+        // Without the windows, the one named limit.
+        let got = events(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"rateLimitType":"five_hour","utilization":0.1}}"#,
+            &Pending::default(),
+        );
+        assert_eq!(got, vec![AgentEvent::UsageUpdate { window: Some("five_hour".into()), utilization: 0.1, resets_at: None }]);
     }
 
     #[test]

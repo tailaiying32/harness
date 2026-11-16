@@ -2,8 +2,8 @@
   // Settings, drawn over everything but the sidebar: top bar, chat and side panel. A choice applies at once and
   // is remembered. Also home to things that aren't part of the work at hand,
   // like the trash.
-  import type { ModelInfo } from "./ipc";
-  import type { AppState } from "./state/app.svelte";
+  import { CLAUDE, importSkill, listSkills, pickFile, pickFolder, removeSkill, type ModelInfo, type SkillInfo } from "./ipc";
+  import type { AppState, Limit } from "./state/app.svelte";
   import { appearances, applyFontSize, applySize, fontSizes, savePrefs, sizes, themes, type Appearance, type Size } from "./themes";
 
   let {
@@ -79,17 +79,27 @@
     savePrefs({ size: value });
   }
 
-  // Before any reply since the app started, the open chat's last reading stands in.
-  const usage = $derived.by(() => {
-    const reading = app.usage ?? app.current.usage;
-    if (!reading) return "";
-    // Claude Code names the limit that applies to the current model, e.g.
-    // "seven_day", "seven_day_overage_included" or "five_hour".
-    const window = reading.window ?? "";
-    const name = window.startsWith("seven_day") ? "weekly" : window.startsWith("five_hour") ? "5-hour" : "";
-    const percent = Math.round(reading.utilization * 100);
-    return name ? `${percent}% of ${name} limit` : `${percent}% of limit`;
-  });
+  // Claude Code's limits, by the names it reports them under (CLI 2.1.322):
+  // "seven_day" covers all models and "seven_day_overage_included" is Fable's
+  // own, matched against `/usage`. Each agent gets its own heading.
+  const claudeLimits = $derived(
+    [
+      { name: "all models", window: "seven_day" },
+      { name: "fable", window: "seven_day_overage_included" },
+    ].map(({ name, window }) => ({ name, text: limitText(app.limits[CLAUDE]?.[window]) })),
+  );
+
+  /** "64% · resets Sun 4:59 PM"; unknown before any reading. Once the limit has
+   *  started over it reads 0% (use elsewhere since then isn't known) until the
+   *  next reading, which also brings the next reset time. */
+  function limitText(limit: Limit | undefined): string {
+    if (!limit) return "unknown";
+    if (limit.resetsAt !== null && limit.resetsAt * 1000 < Date.now()) return "0%";
+    const percent = `${Math.round(limit.utilization * 100)}%`;
+    if (limit.resetsAt === null) return percent;
+    const when = new Date(limit.resetsAt * 1000).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+    return `${percent} · resets ${when}`;
+  }
 
   /** How long a trashed chat has left before it is deleted for good. */
   const TRASH_DAYS = 30;
@@ -104,6 +114,46 @@
   async function emptyTrash() {
     emptying = false;
     await app.emptyTrash();
+  }
+
+  // The app's own skills, which every chat's agent can use. Copies: importing
+  // one with the same name replaces it.
+  let skills = $state<SkillInfo[]>([]);
+  /** The skill whose "remove" was clicked, asking to be sure. */
+  let removing = $state<string | null>(null);
+  let skillProblem = $state("");
+
+  async function loadSkills() {
+    try {
+      skills = await listSkills();
+    } catch (e) {
+      skillProblem = String(e);
+    }
+  }
+  loadSkills();
+
+  async function importFrom(pick: () => Promise<string | null>) {
+    skillProblem = "";
+    removing = null;
+    try {
+      const path = await pick();
+      if (!path) return;
+      await importSkill(path);
+      await loadSkills();
+    } catch (e) {
+      skillProblem = String(e);
+    }
+  }
+
+  async function removeOne(name: string) {
+    skillProblem = "";
+    removing = null;
+    try {
+      await removeSkill(name);
+      await loadSkills();
+    } catch (e) {
+      skillProblem = String(e);
+    }
   }
 
   function pickFontSize(px: number) {
@@ -190,8 +240,38 @@
     {/if}
 
     <section>
+      <div class="label">Skills</div>
+      {#each skills as skill (skill.name)}
+        <div class="row">
+          <span class="skill">{skill.name}</span>
+          {#if removing === skill.name}
+            <span class="warn">Remove {skill.name}?</span>
+            <button class="danger" onclick={() => removeOne(skill.name)}>yes</button>
+            <button class="act" onclick={() => (removing = null)}>no</button>
+          {:else}
+            <span class="about" title={skill.description}>{skill.description}</span>
+            <button class="act" onclick={() => (removing = skill.name)}>remove</button>
+          {/if}
+        </div>
+      {/each}
+      <div class="empty">
+        <button class="act" onclick={() => importFrom(() => pickFolder())}>import folder</button>
+        <button class="act" onclick={() => importFrom(() => pickFile("Skill", ["zip", "md"]))}>import file</button>
+      </div>
+      {#if skillProblem}
+        <div class="sub">{skillProblem}</div>
+      {/if}
+    </section>
+
+    <section>
       <div class="label">Usage</div>
-      <div class="sub">{usage || "unknown"}</div>
+      <div class="sub">Claude Code</div>
+      {#each claudeLimits as limit (limit.name)}
+        <div class="row">
+          <span class="name">{limit.name}</span>
+          <span class="left">{limit.text}</span>
+        </div>
+      {/each}
     </section>
 
     <section>
@@ -330,6 +410,21 @@
   }
   .warn {
     color: var(--fg);
+  }
+  .skill {
+    flex-shrink: 0;
+    color: var(--fg);
+  }
+  .about {
+    flex: 1;
+    min-width: 0;
+    color: var(--faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .row .warn {
+    flex: 1;
   }
   .name {
     flex: 1;
