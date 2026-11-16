@@ -34,6 +34,8 @@ export type Dot = "working" | "waiting" | "unseen" | "idle";
 export class AppState {
   /** Every project that has chats, most recently used first. */
   projects = $state<ProjectRow[]>([]);
+  /** False until the first sidebar load; before it, `projects` is empty, not "no projects". */
+  loaded = $state(false);
   /** Chats in the trash, most recently trashed first. */
   trash = $state<SessionRow[]>([]);
   /** The chat on screen. A new one isn't in the sidebar until its first message. */
@@ -160,6 +162,7 @@ export class AppState {
   async refresh(): Promise<void> {
     try {
       [this.projects, this.trash] = await Promise.all([sidebar(), listTrash()]);
+      this.loaded = true;
     } catch (e) {
       this.problem = String(e);
       return;
