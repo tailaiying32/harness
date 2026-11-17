@@ -129,7 +129,8 @@
 
   // Cmd+, (Ctrl+, on Windows) opens settings, as in most apps; Escape closes
   // them. Cmd+N starts a new chat. Cmd+B shows or hides the sidebar. Escape
-  // also ends a full screen panel, unless it belongs to a box being typed in.
+  // also ends a full screen panel, unless it belongs to a box still being
+  // typed in (the docs editor lets go on Escape, so one press ends both).
   function onKey(e: KeyboardEvent) {
     // In a terminal, Ctrl keys belong to the shell (Ctrl+C, Ctrl+N, Ctrl+R...).
     if (terminals.focused() && e.ctrlKey && !e.metaKey) return;
@@ -150,7 +151,7 @@
       toggleSidebar();
     } else if (e.key === "Escape" && showSettings) {
       showSettings = false;
-    } else if (e.key === "Escape" && wide && !chat.viewing && !typing(e.target) && !e.defaultPrevented) {
+    } else if (e.key === "Escape" && wide && !chat.viewing && !(typing(e.target) && e.target === document.activeElement) && !e.defaultPrevented) {
       chat.panelWide = false;
     }
   }

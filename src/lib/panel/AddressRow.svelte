@@ -66,6 +66,8 @@
   async function go(e: KeyboardEvent) {
     const box = e.target as HTMLInputElement;
     if (e.key === "Escape") {
+      // Used here: it doesn't also end a full screen panel.
+      e.preventDefault();
       address = page?.url ?? "";
       box.blur();
       return;

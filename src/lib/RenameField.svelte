@@ -49,7 +49,10 @@
   onblur={() => finish(true)}
   onkeydown={(e) => {
     if (e.key === "Enter") finish(true);
-    else if (e.key === "Escape") finish(false);
+    else if (e.key === "Escape") {
+      e.preventDefault();
+      finish(false);
+    }
   }}
 />
 
