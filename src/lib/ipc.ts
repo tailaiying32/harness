@@ -88,6 +88,7 @@ export type AgentEvent =
   | { kind: "compacted"; auto: boolean }
   | { kind: "sign_in_needed"; message: string }
   | { kind: "title_changed"; title: string }
+  | { kind: "batch_titled"; tool_id: string; title: string }
   | { kind: "worktree_ask"; request_id: string; repo_root: string; tool_id: string | null; name?: string | null }
   | { kind: "worktree_chosen"; choice: WorktreeChoice }
   | { kind: "worktree_changed"; status: WorktreeStatus; branch: string | null }
@@ -173,6 +174,9 @@ export const loadSession = (sessionId: string) =>
 
 export const renameSession = (sessionId: string, title: string) =>
   invoke<void>("rename_session", { sessionId, title });
+/** Asks for a short label for a batch of subagents; it comes back as a `batch_titled` event. */
+export const titleBatch = (sessionId: string, toolId: string, ask: string, agents: string[]) =>
+  invoke<void>("title_batch", { sessionId, toolId, ask, agents });
 /** Moves a chat to the trash. */
 export const deleteSession = (sessionId: string) => invoke<void>("delete_session", { sessionId });
 /** Chats in the trash, most recently trashed first. */

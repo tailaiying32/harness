@@ -517,6 +517,23 @@ impl SessionManager {
         });
     }
 
+    /// Names a batch of subagents for chat info, by the chat's own agent. The
+    /// window asks once per batch; the label is saved with the chat.
+    pub async fn title_batch(&self, session_id: &str, tool_id: &str, ask: &str, agents: Vec<String>) -> Result<(), String> {
+        let saved = self.0.store.session(session_id)?.ok_or("No such chat")?;
+        let (adapter, binary) = self.0.agents.get(&saved.agent)?;
+        let ask = ask.to_string();
+        let title = tokio::task::spawn_blocking(move || adapter.name_batch(&binary, &ask, &agents))
+            .await
+            .map_err(|e| e.to_string())??;
+        // Deleted meanwhile: nothing to label.
+        if self.0.store.session(session_id)?.is_none() {
+            return Ok(());
+        }
+        self.record(session_id, AgentEvent::BatchTitled { tool_id: tool_id.to_string(), title });
+        Ok(())
+    }
+
     /// What a process's events pass through: bookkeeping, saving, then the window.
     fn sink(&self, session_id: &str, run: u64) -> EventSink {
         let manager = self.clone();
@@ -1022,6 +1039,9 @@ mod tests {
         fn make_title(&self, _: &Path, first_message: &str) -> Result<String, String> {
             Ok(format!("Written: {first_message}"))
         }
+        fn name_batch(&self, _: &Path, ask: &str, agents: &[String]) -> Result<String, String> {
+            Ok(format!("{ask}: {}", agents.join(", ")))
+        }
         fn sign_in(&self, _: &Path) -> Result<(), String> {
             Ok(())
         }
@@ -1205,6 +1225,19 @@ mod tests {
         assert_eq!(told, 1);
         // Not saved in the history: the store holds the title.
         assert!(!rig.store.events("s1").unwrap().iter().any(|e| matches!(e, AgentEvent::TitleChanged { .. })));
+    }
+
+    #[tokio::test]
+    async fn a_batch_label_is_saved_with_the_chat() {
+        let rig = rig(LONG);
+        rig.send("Fix login").await;
+        let agents = vec!["review auth".to_string(), "run tests".to_string()];
+        rig.manager.title_batch("s1", "ag1", "Fix login", agents).await.unwrap();
+        let labelled = AgentEvent::BatchTitled { tool_id: "ag1".into(), title: "Fix login: review auth, run tests".into() };
+        assert!(rig.store.events("s1").unwrap().contains(&labelled));
+        assert!(rig.seen.lock().unwrap().contains(&labelled));
+        // A chat that doesn't exist gets nothing.
+        assert!(rig.manager.title_batch("nope", "ag1", "", vec![]).await.is_err());
     }
 
     #[tokio::test]

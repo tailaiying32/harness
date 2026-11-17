@@ -235,6 +235,13 @@ pub trait AgentAdapter: Send + Sync {
     /// small model. Blocks for a few seconds; call it off the main thread.
     fn make_title(&self, binary: &Path, first_message: &str) -> Result<String, String>;
 
+    /// A few words for what a batch of subagents is doing, from the user's
+    /// message (may be empty) and each subagent's short task. Blocks like
+    /// `make_title`. Agents without a small model to ask keep the default.
+    fn name_batch(&self, _binary: &Path, _ask: &str, _agents: &[String]) -> Result<String, String> {
+        Err("This agent can't name batches".to_string())
+    }
+
     /// Sign the agent in, the way its own login command does (for Claude Code
     /// it opens the browser). Blocks until done; call it off the main thread.
     fn sign_in(&self, binary: &Path) -> Result<(), String>;

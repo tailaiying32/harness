@@ -5,7 +5,7 @@
   // subagent shows it full size (see AgentView); so does picking it in the
   // top bar's ▾ menu (see PanelBar), and "chat info" there comes back here.
   import type { Chat } from "../state/chat.svelte";
-  import { ago, QUIET_MS, runTime, span, tokens, type Agent } from "../state/chatInfo.svelte";
+  import { ago, batchLabel, QUIET_MS, runTime, span, tokens, type Agent } from "../state/chatInfo.svelte";
   import { past, present } from "../tools";
   import { MARKS } from "./agentMarks";
 
@@ -26,9 +26,6 @@
   const share = $derived(context && context.max > 0 ? Math.min(1, context.used / context.max) : 0);
 
   const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
-
-  /** A batch's label: the first line of the message it answers. */
-  const askLine = (text: string) => text.trim().split("\n")[0] || "before any message";
 
   /** What the agent did last, in the chat's words. */
   function lastStep(agent: Agent): string {
@@ -86,11 +83,12 @@
         <span>subagents</span>
         <span>{[info.running && `${info.running} running`, finished && `${finished} finished`].filter(Boolean).join(" · ")}</span>
       </div>
-      <!-- By batch, newest first, each under the message it answers; the
-           same grouping as the top bar's ▾ menu. -->
+      <!-- By batch, newest first, each under a short label for what it is
+           doing (the message it answers until that comes); the same
+           grouping as the top bar's ▾ menu. -->
       {#each info.batches as batch (batch.batch)}
       <div class="agents">
-        <div class="ask faint">{askLine(batch.ask)}{batch.followUp ? " · follow-up" : ""}</div>
+        <div class="ask faint" title={batch.ask.trim() || undefined}>{batchLabel(batch)}</div>
         {#each batch.agents as agent (agent.toolId)}
           <button class="agent" onclick={() => info.show(agent.toolId)}>
             <span class="mark {agent.state}">{MARKS[agent.state]}</span>

@@ -5,6 +5,7 @@
   // dragging the window.
   import BarIcon from "../BarIcon.svelte";
   import { MARKS } from "./agentMarks";
+  import { batchLabel } from "../state/chatInfo.svelte";
   import { shortBranch } from "../paths";
   import { NOTES_TAB, PLAN_TAB, type Chat } from "../state/chat.svelte";
   import { terminals } from "../state/terminals.svelte";
@@ -270,7 +271,7 @@
           {#if agentMenu}
             <div class="menu agent-menu" role="menu">
               {#each chat.info.batches as batch (batch.batch)}
-                <div class="batch">{batch.ask.trim().split("\n")[0] || "before any message"}{batch.followUp ? " · follow-up" : ""}</div>
+                <div class="batch">{batchLabel(batch)}</div>
                 {#each batch.agents as agent (agent.toolId)}
                   <button role="menuitem" class:on={agent === chat.info.shownAgent} onclick={() => pickAgent(agent.toolId)}>
                     <span class="mark {agent.state}">{MARKS[agent.state]}</span>
