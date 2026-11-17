@@ -370,6 +370,7 @@ pub fn spawn(binary: PathBuf, cfg: AcpConfig, opts: SpawnOptions, sink: EventSin
     let mut cmd = Command::new(&binary);
     cmd.args(&cfg.args)
         .current_dir(&opts.project_path)
+        .envs(opts.env.iter().cloned())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1591,6 +1592,7 @@ mod tests {
             project_docs: Some("/home/projects/-work/docs".into()),
             memory: None,
             preferences: None,
+            env: Vec::new(),
         };
         let told = instructions(&opts).unwrap();
         assert!(told.contains("That folder, /data/notes/chat-1, is this chat's own"));
@@ -1618,6 +1620,7 @@ mod tests {
             project_docs: None,
             memory,
             preferences: None,
+            env: Vec::new(),
         };
         let told = instructions(&opts(Some(dir.clone()))).unwrap();
         assert!(told.contains(&format!("This project has a shared memory in {}", dir.display())));

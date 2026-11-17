@@ -44,7 +44,7 @@ pub fn call(out: &Out, chat_id: &str, tool: &str, args: &Value) -> Result<Vec<Va
         }
         (None, None) => return Err("Give `path` (a markdown file) or `view`.".into()),
     };
-    out(Envelope { session_id: chat_id.to_string(), event: AgentEvent::ShowPanel { path, view } });
+    out(Envelope { session_id: chat_id.to_string(), event: AgentEvent::ShowPanel { path, view, tab: None } });
     Ok(vec![json!({ "type": "text", "text": said })])
 }
 
@@ -94,14 +94,14 @@ mod tests {
         call(&out, "c1", "show", &json!({ "path": path })).unwrap();
         let seen = seen.lock().unwrap();
         assert_eq!(seen[0].session_id, "c1");
-        assert_eq!(seen[0].event, AgentEvent::ShowPanel { path: Some(path.into()), view: None });
+        assert_eq!(seen[0].event, AgentEvent::ShowPanel { path: Some(path.into()), view: None, tab: None });
     }
 
     #[test]
     fn opens_a_view() {
         let (out, seen) = rig();
         call(&out, "c1", "show", &json!({ "view": "terminal" })).unwrap();
-        assert_eq!(seen.lock().unwrap()[0].event, AgentEvent::ShowPanel { path: None, view: Some("terminal".into()) });
+        assert_eq!(seen.lock().unwrap()[0].event, AgentEvent::ShowPanel { path: None, view: Some("terminal".into()), tab: None });
     }
 
     #[test]

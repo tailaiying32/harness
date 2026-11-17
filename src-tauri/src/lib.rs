@@ -963,6 +963,11 @@ pub fn run() {
             agents.add(agent::CLAUDE, claude.clone(), None);
             agents.add(agent::CURSOR, Arc::new(CursorAdapter), None);
             let home = Home::resolve(&dir);
+            // The command agents run to open a terminal tab; rewritten if changed.
+            if let Err(e) = home.write_tab_command() {
+                eprintln!("harness: couldn't write harness-tab: {e}");
+            }
+            let tab_command = home.tab_command();
             let side = SideChats::new(claude, store.clone(), out.clone(), home.clone(), dir.join("side_copies.json"));
             let browsers = Browsers::new(app.handle().clone(), out.clone());
             let terminals = Terminals::new(out.clone(), store.clone());
@@ -980,6 +985,7 @@ pub fn run() {
                 );
                 let keep_awake = keep_awake.clone();
                 let panel_out = panel_out.clone();
+                let tab_command = tab_command.clone();
                 sessions.set_app_tools(Arc::new(move |chat_id: &str, project: &str| {
                     let browser_tools = {
                         let browsers = browsers.clone();
@@ -1000,7 +1006,7 @@ pub fn run() {
                         let project = project.to_string();
                         AppTools {
                             server: terminal::SERVER,
-                            instruction: terminal::INSTRUCTION.into(),
+                            instruction: terminal::instruction(&tab_command),
                             list: terminal::tools(),
                             call: Arc::new(move |tool, args| {
                                 let terminals = terminals.clone();
@@ -1081,6 +1087,12 @@ pub fn run() {
                     moved: {
                         let terminals = terminals.clone();
                         Arc::new(move |from: &str, to: &str| terminals.project_moved(from, to))
+                    },
+                    run: {
+                        let terminals = terminals.clone();
+                        Arc::new(move |project: &str, worktree: Option<String>, command: &str| {
+                            terminals.run_for_agent(project, worktree, command)
+                        })
                     },
                 });
             }

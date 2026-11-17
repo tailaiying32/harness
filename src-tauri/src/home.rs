@@ -82,6 +82,47 @@ impl Home {
         path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
     }
 
+    /// Where the app's own small commands for agents live (`bin/`).
+    pub fn bin_dir(&self) -> PathBuf {
+        self.root.join("bin")
+    }
+
+    /// The full path of `harness-tab`, the command an agent runs to open a
+    /// terminal tab (see `write_tab_command`).
+    pub fn tab_command(&self) -> PathBuf {
+        self.bin_dir().join(if cfg!(windows) { "harness-tab.cmd" } else { "harness-tab" })
+    }
+
+    /// Writes `harness-tab`, if it isn't there as it should be. It holds no
+    /// path or port: each chat process gets its own `HARNESS_TAB_URL`, so the
+    /// script never goes stale. It posts its arguments as one command line;
+    /// curl prints Harness's answer, and fails with it when Harness refused.
+    pub fn write_tab_command(&self) -> Result<(), String> {
+        let path = self.tab_command();
+        let text = if cfg!(windows) {
+            // Untested: quotes inside %* may need work.
+            "@echo off\r\n\
+if \"%HARNESS_TAB_URL%\"==\"\" (echo harness-tab: only works inside a Harness chat 1>&2 & exit /b 1)\r\n\
+curl.exe -sS --fail-with-body --max-time 20 --data-binary \"%*\" \"%HARNESS_TAB_URL%\"\r\n"
+        } else {
+            "#!/bin/sh\n\
+# Opens a tab in Harness's side-panel terminal and runs the command there.\n\
+[ -n \"$HARNESS_TAB_URL\" ] || { echo \"harness-tab: only works inside a Harness chat\" >&2; exit 1; }\n\
+[ $# -gt 0 ] || { echo 'usage: harness-tab \"<command>\"' >&2; exit 2; }\n\
+exec curl -sS --fail-with-body --max-time 20 --data-binary \"$*\" \"$HARNESS_TAB_URL\"\n"
+        };
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
+            std::fs::create_dir_all(self.bin_dir()).map_err(|e| e.to_string())?;
+            std::fs::write(&path, text).map_err(|e| e.to_string())?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     /// The file the user's working preferences are kept in.
     pub fn preferences_file(&self) -> PathBuf {
         self.root.join("preferences.md")
@@ -281,6 +322,47 @@ mod tests {
         assert_eq!(Home::key("/Users/me/tailai/harness"), "-Users-me-tailai-harness");
         assert_eq!(Home::key(" /Users/me/my app_v2.0/ "), "-Users-me-my-app-v2-0");
         assert_eq!(Home::key(r"C:\code\app"), "C--code-app");
+    }
+
+    /// The real script, run by a shell against the app's real route.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn harness_tab_reaches_the_app_and_prints_its_answer() {
+        let dir = std::env::temp_dir().join(format!("harness-home-test-{}", uuid::Uuid::new_v4()));
+        let home = Home::new(dir.clone());
+        home.write_tab_command().unwrap();
+        home.write_tab_command().unwrap();
+        let run: crate::agent::mcp_http::TabRun = std::sync::Arc::new(|command| {
+            Box::pin(async move { if command == "nope" { Err("Refused.".to_string()) } else { Ok(format!("Opened: {command}")) } })
+        });
+        let endpoint = crate::agent::mcp_http::open_tab(run).unwrap();
+        let script = home.tab_command();
+        let url = endpoint.url.clone();
+        let out = tokio::task::spawn_blocking(move || {
+            let go = |args: &[&str], url: Option<&str>| {
+                let mut cmd = std::process::Command::new(&script);
+                cmd.args(args).env_remove("HARNESS_TAB_URL");
+                if let Some(url) = url {
+                    cmd.env("HARNESS_TAB_URL", url);
+                }
+                cmd.output().unwrap()
+            };
+            (
+                go(&["npm run dev"], Some(&url)),
+                go(&["npm", "test"], Some(&url)),
+                go(&["nope"], Some(&url)),
+                go(&["npm run dev"], None),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.0.stdout), "Opened: npm run dev\n");
+        assert_eq!(String::from_utf8_lossy(&out.1.stdout), "Opened: npm test\n");
+        assert!(!out.2.status.success());
+        assert!(String::from_utf8_lossy(&out.2.stdout).contains("Refused."), "{:?}", out.2);
+        assert!(!out.3.status.success());
+        assert!(String::from_utf8_lossy(&out.3.stderr).contains("only works inside a Harness chat"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -129,7 +129,9 @@ states (the lookup command was run read-only against pookie). See "Worktrees".
 Added 2026-11-15 (terminal, branch `harness/terminal-7d6f44`): the side
 panel's fourth view, real shells whose tabs belong to the project (every chat
 of the project shows the same ones). New tabs open in the main folder; + also
-offers the chat's worktree. Claude can read a tab (not type into it). A tab
+offers the chat's worktree. Claude can read a tab (not type into it; since
+2026-11-17 an agent can open a tab of its own, see "Agents open terminal
+tabs"). A tab
 unused for a day of awake time closes, keeping its output and a line saying
 why; quitting saves tabs and they come back closed. See "Terminal
 (`terminal.rs`)". **Tested** live with the self-test: a login shell in the
@@ -2393,7 +2395,37 @@ opened by itself when the agent wrote or edited it.
   chat's panel. Not saved, so a reopened chat doesn't reopen anything.
 - **Why a tool, not a guess**: opening every file the agent reads would
   fill the panel with files read only to understand the code.
-- Not tested yet in the real app.
+- Tried by the user in a test copy (2026-11-17): works.
+
+### Agents open terminal tabs (`harness-tab`, built 2026-11-17)
+
+To work together through the terminal: the agent runs a command in a new
+tab that the user can watch and type into (a dev server, a sign-in prompt,
+"run it in the terminal"). The agent still can't type into the user's tabs.
+
+- **A shell command, not an app tool.** Harness writes
+  `<home>/bin/harness-tab` at start (`Home::write_tab_command`; `.cmd` on
+  Windows, untested). The agent runs it with its own shell tool, so the
+  agent's own checks decide whether to ask. Harness adds no risk rules (the
+  user's call: that belongs to the model and mode). App tools are allowed
+  without a card, so a tool here would have skipped those checks.
+- **Approvals, tested 2026-11-17** with a stand-in in a test copy: Claude
+  Code's auto mode treated wrapped and plain commands alike. Cursor (agent
+  mode, auto-review) asked about risky ones both ways and asks once for any
+  `harness-tab` call, since it isn't on its allowed list. Deny means no tab.
+- **The link**: each main chat's process gets `HARNESS_TAB_URL` (a token on
+  the app's local server, `mcp_http::open_tab`, dropped with the process).
+  The script posts its arguments as one command line with curl; the reply
+  is plain text. Side chats get none.
+- **The tab** opens in the chat's folder (its worktree, if any) through
+  `Terminals::run_for_agent`. The command is typed in once the shell has
+  printed something (up to 3 s), so it shows once. One line only. The chat's
+  panel switches to that tab (`show_panel` with `tab`) without taking the
+  keys. The agent is told the tab's ID, since the name changes to what runs.
+- **Tested** live (2026-11-17) with Claude Code and Cursor: tab opened, the
+  panel showed it, the agent read the server's line, and a denied Cursor
+  call opened nothing.
+- Not covered: typing into existing tabs; Windows untried.
 
 ### If the approval channel breaks
 

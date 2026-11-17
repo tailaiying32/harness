@@ -347,6 +347,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         let mut cmd = Command::new(&opts.binary);
         cmd.args(launch_args(&opts));
         cmd.current_dir(&opts.project_path)
+            .envs(opts.env.iter().cloned())
             // An API key in the environment overrides the subscription login in
             // headless mode and would bill per use.
             .env_remove("ANTHROPIC_API_KEY")
@@ -1612,6 +1613,7 @@ mod tests {
                 project_docs: None,
                 memory: None,
                 preferences: None,
+                env: Vec::new(),
             })
         };
         let args = with(Some("max"));
@@ -1636,6 +1638,7 @@ mod tests {
             project_docs: None,
             memory: None,
             preferences: None,
+            env: Vec::new(),
         });
         assert!(args.contains(&"--replay-user-messages".to_string()));
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
@@ -1681,6 +1684,7 @@ mod tests {
             project_docs: None,
             memory: None,
             preferences: None,
+            env: Vec::new(),
         });
         let at = args.iter().position(|a| a == "--mcp-config").unwrap();
         let config: Value = serde_json::from_str(&args[at + 1]).unwrap();
@@ -1711,6 +1715,7 @@ mod tests {
             project_docs: None,
             memory: None,
             preferences: None,
+            env: Vec::new(),
         });
         let at = args.iter().position(|a| a == "--mcp-config").unwrap();
         let config: Value = serde_json::from_str(&args[at + 1]).unwrap();
@@ -1745,6 +1750,7 @@ mod tests {
             project_docs: None,
             memory: None,
             preferences: None,
+            env: Vec::new(),
         });
         let at = args.iter().position(|a| a == "--settings").unwrap();
         let settings: Value = serde_json::from_str(&args[at + 1]).unwrap();
@@ -1768,6 +1774,7 @@ mod tests {
             project_docs: None,
             memory: None,
             preferences: None,
+            env: Vec::new(),
         };
         for args in [launch_args(&opts(None)), launch_args(&opts(Some(SideOptions::default())))] {
             assert!(args.windows(2).any(|w| w == ["--add-dir", "/data/notes/chat-1"]));
@@ -1791,6 +1798,7 @@ mod tests {
             project_docs: Some("/home/projects/-work/docs".into()),
             memory: None,
             preferences: None,
+            env: Vec::new(),
         };
         let arg_after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).map(|at| args[at + 1].clone());
 
@@ -1829,6 +1837,7 @@ mod tests {
             project_docs: None,
             memory: None,
             preferences: None,
+            env: Vec::new(),
         };
         let arg_after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).map(|at| args[at + 1].clone());
 
@@ -1864,6 +1873,7 @@ mod tests {
             project_docs: None,
             memory: None,
             preferences: None,
+            env: Vec::new(),
         }
     }
 
@@ -2145,6 +2155,7 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
             project_docs: None,
             memory: None,
             preferences: None,
+            env: Vec::new(),
         });
         assert!(args.contains(&"--forward-subagent-text".to_string()));
     }
@@ -2567,6 +2578,7 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
                 project_docs: None,
                 memory: None,
                 preferences: None,
+                env: Vec::new(),
             })
         };
         let first = side(Some("main-1"));

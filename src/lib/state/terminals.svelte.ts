@@ -45,6 +45,8 @@ class Terminals {
   private making = new Map<string, Promise<Made>>();
   private lib: Promise<Lib> | null = null;
   private loaded = new Set<string>();
+  /** A tab an agent opened, to show once the core's list has it. */
+  private revealing: Record<string, string> = {};
   /** App shortcuts the terminal leaves to the window (set by App). */
   keys: (e: KeyboardEvent) => boolean = () => false;
 
@@ -88,7 +90,11 @@ class Terminals {
     for (const old of before) {
       if (!tabs.some((t) => t.id === old.id)) this.forget(old.id);
     }
-    if (!tabs.some((t) => t.id === this.active[project])) {
+    const asked = this.revealing[project];
+    if (asked && tabs.some((t) => t.id === asked)) {
+      this.active[project] = asked;
+      delete this.revealing[project];
+    } else if (!tabs.some((t) => t.id === this.active[project]) && !asked) {
       const at = before.findIndex((t) => t.id === this.active[project]);
       const next = tabs[Math.min(Math.max(at, 0), tabs.length - 1)];
       if (next) this.active[project] = next.id;
@@ -106,6 +112,15 @@ class Terminals {
     this.loaded.add(project);
     this.active[project] = tab.id;
     this.wantsKeys = true;
+  }
+
+  /**
+   * Shows a tab an agent opened, leaving the keys where they are (the user
+   * may be typing a message). The core's list may not have it yet.
+   */
+  reveal(project: string, id: string): void {
+    this.active[project] = id;
+    if (!this.tabs(project).some((t) => t.id === id)) this.revealing[project] = id;
   }
 
   pick(project: string, id: string): void {

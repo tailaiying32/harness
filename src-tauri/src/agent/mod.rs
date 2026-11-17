@@ -94,6 +94,9 @@ pub struct SpawnOptions {
     /// The user's working preferences, for the agent's instructions
     /// (`preferences_instruction`). None when the user has none.
     pub preferences: Option<Preferences>,
+    /// Extra environment for the agent's process, which its shell commands
+    /// inherit: `HARNESS_TAB_URL` for `harness-tab` in a main chat.
+    pub env: Vec<(String, String)>,
 }
 
 /// The user's working preferences as an agent is told them: standing

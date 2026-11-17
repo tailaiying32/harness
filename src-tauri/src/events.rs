@@ -314,11 +314,15 @@ pub enum AgentEvent {
     },
     /// The agent asked the side panel to show something: a markdown file as
     /// a tab (`path`), or a view (`view`: notes, plan, browser, terminal or
-    /// info). One of the two is set. Not saved: a reopened chat doesn't
+    /// info), as asked with `harness_panel` or by opening a terminal tab with
+    /// `harness-tab`. One of `path` and `view` is set. Not saved: a reopened chat doesn't
     /// reopen it.
     ShowPanel {
         path: Option<String>,
         view: Option<String>,
+        /// With the terminal view: the tab to show (one an agent just opened).
+        #[serde(default)]
+        tab: Option<String>,
     },
 }
 
