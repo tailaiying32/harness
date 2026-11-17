@@ -1821,9 +1821,14 @@ picking one shows it full size in the panel.
 "subagents", and clicking it opens the menu. The menu is laid
 against the whole row so it stays inside a narrow panel. The page groups
 subagents by batch, newest batch first (what chat info is for: what's going
-on now), each in launch order under a faint line with the first line of the
-user's message it answers. A batch Claude Code started on its own (a turn
-after a background agent ended) gets the latest message plus "· follow-up".
+on now), each in launch order under a faint line saying what the batch is
+doing. That line is written by Haiku (2026-11-16): 1.5 s after a live batch's
+last subagent starts, the window asks once (`title_batch`) with the user's
+message and each subagent's short task; the label comes back as a saved
+`batch_titled` event, so a reopened chat keeps it. Until it comes, and for
+Cursor or older chats, the line is the first line of the user's message it
+answers (also its hover text). A batch Claude Code started on its own (a turn
+after a background agent ended) gets "· follow-up" after it.
 History: a tab per agent with names (cluttered); the agent shown in the
 page's place; boxes unfolding in place on the page (option F), dropped
 because a 16-line box was too small to read; then a mark per agent in the

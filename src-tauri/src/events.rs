@@ -215,6 +215,12 @@ pub enum AgentEvent {
     SignInNeeded {
         message: String,
     },
+    /// A batch of subagents got a written label for chat info. `tool_id` is
+    /// the batch's first subagent. Saved, so a reopened chat keeps it.
+    BatchTitled {
+        tool_id: String,
+        title: String,
+    },
     /// The chat got a written title. Not saved: the store holds the title.
     TitleChanged {
         title: String,

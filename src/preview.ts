@@ -213,6 +213,7 @@ const agentsChat: AgentEvent[] = [
   }),
   { kind: "task_started", task_id: "t1", tool_id: "ag1", description: "find where chats close", agent_type: "Explore", background: true },
   result("ag1", "Async agent launched successfully."),
+  { kind: "batch_titled", tool_id: "ag1", title: "Tracing how chats close" },
   sub("ag1", "s1", "Grep", { pattern: "kill|close_idle|shutdown", path: "src-tauri" }),
   subResult("ag1", "s1", "sessions.rs:512   fn close_idle(&self, id: &SessionId)\nsessions.rs:688   child.kill().await\nterminal.rs:97    fn shutdown_all(&mut self)"),
   sub("ag1", "s2", "Read", { file_path: `${home}/code/harness/src-tauri/src/sessions.rs` }),
@@ -615,6 +616,9 @@ const commands: Record<string, (args: Args) => unknown> = {
     events: args.sessionId === "agents" ? (setTimeout(playAgents, 300), agentsChat) : args.sessionId === "images" ? imagesChat : args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : args.sessionId === "looks" ? looksChat : args.sessionId === "waiting" ? askingChat : args.sessionId === "working" ? movedChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
     live: args.sessionId === "planning" || args.sessionId === "waiting" || args.sessionId === "agents",
   }),
+  title_batch: (args) => {
+    setTimeout(() => emit(args.sessionId, { kind: "batch_titled", tool_id: args.toolId, title: "Measuring idle memory" }), 600);
+  },
   rename_session: (args) => {
     for (const p of projects) for (const s of p.sessions) if (s.id === args.sessionId) s.title = args.title.trim();
   },

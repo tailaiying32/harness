@@ -131,6 +131,19 @@ fn rename_session(state: State<'_, AppState>, session_id: String, title: String)
     state.sessions.rename(&session_id, &title)
 }
 
+/// Labels a batch of subagents in chat info; the label arrives as an event.
+#[tauri::command]
+async fn title_batch(
+    state: State<'_, AppState>,
+    session_id: String,
+    tool_id: String,
+    ask: String,
+    agents: Vec<String>,
+) -> Result<(), String> {
+    let sessions = state.sessions.clone();
+    sessions.title_batch(&session_id, &tool_id, &ask, agents).await
+}
+
 #[tauri::command]
 fn subscribe(state: State<'_, AppState>, on_event: Channel<Envelope>) {
     *state.channel.lock().unwrap() = Some(on_event);
@@ -912,6 +925,7 @@ pub fn run() {
             empty_trash,
             choose_worktree,
             rename_session,
+            title_batch,
             send_message,
             answer_approval,
             interrupt,

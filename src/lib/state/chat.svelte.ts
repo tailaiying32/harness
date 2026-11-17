@@ -24,6 +24,7 @@ import {
   setMode,
   setEffort,
   setModel,
+  titleBatch,
   type AgentEvent,
   type ApprovalKind,
   type BrowserTab,
@@ -240,6 +241,8 @@ export class Chat {
   constructor(sessionId: string = crypto.randomUUID(), owner: Chat | null = null) {
     this.sessionId = sessionId;
     this.owner = owner;
+    // A side chat's subagents aren't saved; only a chat of its own labels them.
+    if (!owner) this.info.onBatch = (toolId, ask, agents) => void titleBatch(sessionId, toolId, ask, agents).catch(() => {});
   }
 
   /**

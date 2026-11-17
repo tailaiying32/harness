@@ -48,8 +48,17 @@ export type Agent = {
   followUp: boolean;
 };
 
-/** Subagents started in one turn, and what they were for. */
-export type Batch = { batch: number; ask: string; followUp: boolean; agents: Agent[] };
+/** Subagents started in one turn, and what they were for. `title`: a short written label, once it comes. */
+export type Batch = { batch: number; ask: string; followUp: boolean; title?: string; agents: Agent[] };
+
+/** How long a new batch waits for its siblings before asking for its label. */
+const BATCH_SETTLE_MS = 1500;
+
+/** A batch's label: its written title, else the first line of the message it answers. */
+export function batchLabel(batch: Batch): string {
+  const what = batch.title || batch.ask.trim().split("\n")[0] || "before any message";
+  return batch.followUp ? `${what} · follow-up` : what;
+}
 
 export type Task = { id: string; text: string; status: "pending" | "in_progress" | "completed" };
 
@@ -88,6 +97,14 @@ export class ChatInfo {
   shown = $state<string | null>(null);
   /** The subagent picked last, kept while the overview shows. */
   picked = $state<string | null>(null);
+  /** Written batch labels, by the batch's first subagent. */
+  titles = $state<Record<string, string>>({});
+
+  /** Asks for a batch's label (see BatchTitled); set by the chat. */
+  onBatch: ((toolId: string, ask: string, agents: string[]) => void) | null = null;
+  /** Live batches waiting for their siblings before their label is asked for, and ones asked. */
+  private settling = new Map<number, ReturnType<typeof setTimeout>>();
+  private asked = new Set<number>();
 
   /** Counts turns ended, so each agent knows its batch. */
   private turn = 0;
@@ -125,7 +142,10 @@ export class ChatInfo {
     for (const agent of this.agents) {
       const last = out[out.length - 1];
       if (last?.batch === agent.batch) last.agents.push(agent);
-      else out.push({ batch: agent.batch, ask: agent.ask, followUp: agent.followUp, agents: [agent] });
+      else {
+        const title = this.titles[agent.toolId];
+        out.push({ batch: agent.batch, ask: agent.ask, followUp: agent.followUp, title, agents: [agent] });
+      }
     }
     return out.reverse();
   }
@@ -185,6 +205,7 @@ export class ChatInfo {
             ask: this.ask,
             followUp: this.turnsSinceAsk > 0,
           });
+          if (!replaying) this.settle(this.turn);
         } else if (block.name === "TodoWrite") {
           // Claude Code before 2.1.3xx sends the whole list each time. Cursor
           // sends only the items that changed ("updateTodos", or `merge`).
@@ -311,6 +332,10 @@ export class ChatInfo {
         return false;
       }
 
+      case "batch_titled":
+        this.titles[event.tool_id] = event.title;
+        return false;
+
       case "context_usage":
         this.context = { used: event.used, max: event.max, parts: event.parts ?? [] };
         return false;
@@ -340,6 +365,24 @@ export class ChatInfo {
         return false;
     }
     return false;
+  }
+
+  /**
+   * A live batch got a subagent: once none has joined for a moment, ask for
+   * its label, once. Parallel subagents arrive together, so this catches them.
+   */
+  private settle(batch: number): void {
+    if (this.asked.has(batch)) return;
+    clearTimeout(this.settling.get(batch));
+    const timer = setTimeout(() => {
+      this.settling.delete(batch);
+      this.asked.add(batch);
+      const agents = this.agents.filter((a) => a.batch === batch);
+      if (agents.length && !this.titles[agents[0].toolId]) {
+        this.onBatch?.(agents[0].toolId, agents[0].ask, agents.map((a) => a.name));
+      }
+    }, BATCH_SETTLE_MS);
+    this.settling.set(batch, timer);
   }
 
   /** Nothing runs any more (the process exited, or a saved chat was opened). */
