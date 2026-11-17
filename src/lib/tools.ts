@@ -13,6 +13,8 @@ export type ToolCall = {
   declined?: boolean;
   /** Pictures its result handed the agent, kept by the core. */
   images?: { n: number; media_type: string }[];
+  /** For a read of an earlier chat: that chat's title, once the read is back. */
+  chatTitle?: string;
 };
 
 export type DiffLine = { sign: "+" | "-"; text: string };
@@ -87,11 +89,55 @@ function terminalWording(tool: string, input: unknown): [string, string, string]
   return [`read ${what}`, `Reading ${what}`, `read ${what}`];
 }
 
+/** The project's earlier chats, which an agent can search and read (see chats.rs). */
+const CHATS = "mcp__harness_chats__";
+
+/** Which of the earlier-chats tools a call is ("search", "recent", "read"), or "" for another tool. */
+export const chatsTool = (tool: ToolCall) => (tool.name.startsWith(CHATS) ? tool.name.slice(CHATS.length) : "");
+
+function chatsWording(tool: ToolCall): [string, string, string] {
+  const { input } = tool;
+  switch (chatsTool(tool)) {
+    case "search": {
+      const what = `chats for “${clip(field(input, "query"), 40)}”`;
+      return [`searched ${what}`, `Searching ${what}`, `search ${what}`];
+    }
+    case "recent":
+      return [`listed recent chats`, `Listing recent chats`, `list recent chats`];
+    case "read": {
+      const chat = tool.chatTitle ? `chat “${clip(tool.chatTitle, 50)}”` : "a chat";
+      const doc = field(input, "doc");
+      const what = doc ? `${clip(doc, 40)} from ${chat}` : chat;
+      return [`read ${what}`, `Reading ${what}`, `read ${what}`];
+    }
+    default:
+      return [`looked at earlier chats`, `Looking at earlier chats`, `look at earlier chats`];
+  }
+}
+
+/** One chat in what `search` and `recent` hand back (see `chat_line` in chats.rs). */
+export type ChatLine = { id: string; age: string; title: string; about: string };
+
+/**
+ * The lines of a search or a list of recent chats: each chat as its parts,
+ * and any other line (a match's words, a count of the rest) as plain text.
+ */
+export function chatLines(result: string): (ChatLine | string)[] {
+  return result
+    .trimEnd()
+    .split("\n")
+    .map((line) => {
+      const chat = line.match(/^(\S{1,8})  (.+?)  (.+)  \(([^()]*)\)$/);
+      return chat ? { id: chat[1], age: chat[2], title: chat[3], about: chat[4] } : line.trim();
+    });
+}
+
 /** [past tense, present tense, "to ..." form], each followed by what it acted on. */
 function wording(tool: ToolCall): [string, string, string] {
   const { name, input } = tool;
   if (name.startsWith(BROWSER)) return browserWording(name.slice(BROWSER.length), input);
   if (name.startsWith(TERMINAL)) return terminalWording(name.slice(TERMINAL.length), input);
+  if (name.startsWith(CHATS)) return chatsWording(tool);
   const file = fileName(field(input, "file_path") || field(input, "notebook_path"));
   const pattern = clip(field(input, "pattern"), 30);
   const query = clip(field(input, "query"), 30);
@@ -148,7 +194,11 @@ function wording(tool: ToolCall): [string, string, string] {
 
 /** Tools whose output is shown when a folded run is opened. Errors always are. */
 export const showsOutput = (tool: ToolCall) =>
-  !tool.declined && (Boolean(tool.isError) || ["Bash", "Grep", "Glob", "WebSearch"].includes(tool.name));
+  !tool.declined &&
+  (Boolean(tool.isError) ||
+    ["Bash", "Grep", "Glob", "WebSearch"].includes(tool.name) ||
+    // The chats a search found: each can be opened, or picked for the agent.
+    ["search", "recent"].includes(chatsTool(tool)));
 
 /** Plans, questions and worktree requests have their own card, which says how they went. */
 const hasOwnCard = (tool: ToolCall) =>
@@ -185,6 +235,11 @@ function relative(path: string, root: string): string {
 /** One line naming the call in full, for an opened run. `root` is the project folder. */
 export function title(tool: ToolCall, root = ""): { verb: string; target: string } {
   const { name, input } = tool;
+  const chats = chatsTool(tool);
+  if (chats) {
+    const target = chats === "read" ? [tool.chatTitle || field(input, "id"), field(input, "doc")].filter(Boolean).join(" · ") : field(input, "query");
+    return { verb: `chats ${chats}`, target };
+  }
   const target =
     relative(field(input, "file_path") || field(input, "notebook_path"), root) ||
     firstLine(field(input, "command")) ||

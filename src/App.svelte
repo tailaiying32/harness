@@ -81,6 +81,11 @@
     untrack(() => app.followProject(chat));
   });
   const panelOpen = $derived(chat.panelOpen && chat.panelHasContent);
+
+  // The project's other chats, newest first, for the message box's @ pick.
+  const otherChats = $derived(
+    (app.projects.find((p) => p.path === chat.projectPath)?.sessions ?? []).filter((s) => s.id !== chat.sessionId),
+  );
   // Full screen panel: it covers the chat, never the sidebar. Hiding the
   // panel ends it, so the panel always comes back at its own width.
   const wide = $derived(panelOpen && chat.panelWide);
@@ -508,6 +513,12 @@
             })),
           },
           items: current.items.map((item) => ({ ...item })),
+          // Lookups of earlier chats: each call, and the title a read came back with.
+          chats: current.items.flatMap((item) =>
+            item.type === "tool" && item.name.startsWith("mcp__harness_chats__")
+              ? [{ tool: item.name.slice("mcp__harness_chats__".length), input: item.input, title: item.chatTitle ?? null }]
+              : [],
+          ),
           panelView: current.panelView,
           info: {
             context: current.info.context,
@@ -586,7 +597,7 @@
     <!-- Each chat gets its own view, so scroll position and open folds don't leak between chats. -->
     {#key chat.sessionId}
       <ChatView {chat} problem={setup?.problem ?? null} />
-      <Composer {chat} ready={!!setup?.agents.length} agents={setup?.agents ?? []} home={app.home} models={menuModels} allModels={models} focus={app.focusBox} drops={!showSettings && !chat.viewing} onModel={(agent, model) => app.rememberModel(chat, agent, model)} />
+      <Composer {chat} chats={otherChats} ready={!!setup?.agents.length} agents={setup?.agents ?? []} home={app.home} models={menuModels} allModels={models} focus={app.focusBox} drops={!showSettings && !chat.viewing} onModel={(agent, model) => app.rememberModel(chat, agent, model)} />
     {/key}
   </main>
   {#if panelOpen}

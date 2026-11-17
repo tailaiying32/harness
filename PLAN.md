@@ -12,6 +12,11 @@ panel view, chat info: context use, the task list, the chat's subagents
 (each opened as a tab with its steps) and background commands, for Claude
 Code and Cursor. See "Chat info view".
 
+Added 2026-11-17 (branch `harness/earlier-chats-2def0a`): any chat's agent
+can search, list and read the project's earlier chats, whatever agent they
+ran on, and a chat can be picked with @ in the message box. See "Earlier
+chats".
+
 Status, 2026-11-13: steps 1 to 5 of "Order of work" are built. Images
 (paste, drop, tool images, a full-space image view) were added 2026-11-14;
 see "Images". The app has a
@@ -309,7 +314,8 @@ src-tauri/
       claude_code.rs   the only file that knows Claude Code's wire format
     sessions.rs        SessionManager: live processes, saving, resume, idle shutdown
     side_chat.rs       SideChats: read-only side chats, several per chat as tabs (/btw), never saved
-    store.rs           SQLite schema, reads, writes
+    store.rs           SQLite schema, reads, writes, and the search index over what chats said
+    chats.rs           the earlier-chats tools: search, list and read a project's chats
     images.rs          pasted images and images from tools, as files per chat
     locate.rs          find the claude binary
 src/
@@ -839,6 +845,7 @@ events(id INTEGER PK AUTOINCREMENT, session_id TEXT -> sessions ON DELETE CASCAD
        payload TEXT /* AgentEvent as JSON */, created_at)
        INDEX (session_id, id)
 settings(key TEXT PK, value TEXT)
+chat_text(body, session_id, event_id, role)  /* FTS5; see "Earlier chats" */
 ```
 
 Times are milliseconds since 1970.
@@ -1965,6 +1972,118 @@ from those by hand.
   (`/compact`, Claude's own skills) goes through as before.
 - Not covered: editing skills in the app, turning them on or off per project
   or agent, side chats (they get no tools).
+
+### Earlier chats (`chats.rs`, built 2026-11-17)
+
+A new chat can pick up a piece of earlier work without the user explaining
+it again: the agent finds the earlier chat in this project and reads it. It
+is the same for every agent, and a Cursor chat can read a Claude chat. The
+research and the tests behind each choice are in
+`docs/ADE chat search and memory.md`.
+
+- **The tools** are a fourth app tool group, `harness_chats`, in every main
+  chat (side chats get none), made in `lib.rs` beside the browser's:
+  - `search {query, chat?}`: the project's chats that match, best first, 8
+    at most and a count of the rest. With `chat`, the matching turns of that
+    one chat.
+  - `recent {}`: the 15 latest chats.
+  - `read {id, upto_turn?, doc?}`: one chat (below), or one of its docs.
+  Same project only (`projects.path` = the main folder the window names);
+  the trash and the asking chat are left out. An ID is given by its first 8
+  characters; `find_chat` takes any start that names one chat.
+- **What a read gives** (`chats::render`): each turn's user message and the
+  agent's text, each tool call as one line (`tool_line`: the tool and the
+  one thing that says what it was for, ` [FAILED]` when its result was an
+  error), plans (the edited text when there is one) with how they were
+  answered, answered questions, and marks for a stop, an error and a merged
+  branch. The header names the chat's docs (markdown files it wrote, not
+  its notes or an agent's plan file), and `doc` reads one. Left out: tool
+  output, thinking, a subagent's own steps, messages taken back.
+  **Why this shape** (tested on real chats, with Claude and GPT reading):
+  tool output is about 90% of a saved chat and little of its meaning, so
+  the rest is small (most chats under 10,000 tokens). The one-line tool
+  calls stay because a tried-and-dropped attempt shows there and often
+  nowhere else: without them GPT agreed with a wrong premise 4 times of 4.
+  An outline or only the last turns missed decisions.
+- **A long chat** comes in parts: the newest turns that fit 60,000
+  characters, and the header says how to get earlier ones (`upto_turn`). A
+  single turn over that has its middle cut.
+- **The search index** is `chat_text`, an FTS5 table (porter stemming; the
+  bundled SQLite has FTS5): one row per user message, per piece of the
+  agent's own text and per title. `append_event` and the three title writes
+  keep it current; a message taken back and a purged chat leave it. It is
+  built once from saved history when a build with it first opens the store
+  (`build_chat_index`, marked by the `chat_index` setting): 0.1 s and 3 MB
+  on 98 chats. **Ranking**: by how many of the query's words a chat holds,
+  a word in the title counting three times; then by its three best
+  messages; then by last use. Summing every matching message was tried
+  first and put long chats that mention common words often above the chat
+  named for the thing.
+- **Telling the agent.** When to look is said in three places, because each
+  agent hears a different one late in a chat:
+  - `chats::INSTRUCTION`, with the other app tools' lines. Claude Code gets
+    it in its system prompt on every launch; Cursor only when a conversation
+    starts. It is the same on every launch.
+  - The tool descriptions, which Cursor sees on every turn. (Claude Code
+    loads app tools late, with ToolSearch.) In a test with ten unrelated
+    turns first, Cursor's Composer missed a reference with the guidance
+    only in the first message and found it with it in the descriptions.
+  - A new chat's first message ends with the project's 15 latest chats
+    (`chats::titles_note`, added in `send_inner` when the chat is created),
+    so a passing mention is easy to spot. Not in the instructions: those
+    are sent again on every start, and a list that changes would make a
+    resumed chat pay for its history anew. After the user's words, not
+    before, for Cursor's titles (next item).
+- **Cursor's first prompt** now has the user's message first and the app's
+  intro last (`acp.rs`). Cursor titles a chat from the start of its first
+  prompt, and with the intro first chats were being titled "Harness Agent"
+  and "Panel Tools Guide".
+- **Cursor's tool calls are saved fuller** (`acp.rs`):
+  - A call is shown when it starts, often before Cursor has sent its input,
+    and nothing later was saved (`Grep {"pattern": null}`). Now a new saved
+    event, `tool_input {tool_id, name, input, parent_tool_id}`, follows when
+    a started call's name or input changed (`refresh_tool`); the window and
+    `render` put it in place of the first.
+  - Cursor reports an app tool's call as only `{"success": true}`. The app
+    keeps its own answers (`recording`, `take_served`: matched by tool and
+    input) and saves the answer as the call's result.
+- **In the chat** (`tools.ts`, `WorkRun.svelte`): the calls sit in the
+  folded run like any tool, worded "searched chats for “…”", "read chat
+  “Title”" (the title is kept from the read's first line). Opened, a search
+  lists the chats it found (`chatLines` reads the tool's own lines, so
+  `chat_line` in `chats.rs` and it must agree): a title opens that chat,
+  and "use this" sends the agent "Use the chat “Title” (id …) instead.", an
+  ordinary message, so mid-work it is taken in at the next step.
+- **@ in the message box** (`Composer.svelte`): typed at the start of a
+  word, it lists the project's other chats, narrowed by what follows; up,
+  down, Enter or Tab, Escape. A picked chat is kept like a dropped file
+  (`Chat.addDraftChat`): the word `[@Title]` with the path `chat:<id>`, so
+  it is one thing in the box, comes back with a message taken back, is sent
+  as `[@Title](<chat:ID>)` (which the agent is told to read by that ID),
+  and a click opens the chat (`Chat.onOpenChat`, set by `AppState`).
+- **Tested**: Rust tests (render, tool lines, index, ranking, IDs, the
+  first-message note, the Cursor fixes); the preview page (the lines, the
+  opened search, @: list, keys, pick, send, click); and a test copy of the
+  app on a copy of the real chats, with Claude Code, GPT and Composer: a
+  passing mention ("same deal as the panel tabs") was looked up, "my last
+  chat" read the newest, a question that stood alone looked nothing up, and
+  a Claude chat read a Cursor chat.
+- **To keep an eye on: an agent reading many chats for one message.**
+  Nothing limits how many chats an agent reads in a row; one read is at most
+  about 15,000 tokens, a search lists 8 chats, and what is read stays in the
+  chat for its later turns. In testing agents sometimes read four or five
+  where one would have done (20,000 to 40,000 tokens). It would matter most
+  on a model with a small context window, in a project with many chats on
+  one topic, and near a usage limit. No limit was added (2026-11-17, the
+  user's call): some requests need many chats ("what's still open across
+  this week's chats"), and the chat's line shows every chat read. If it
+  becomes a problem, first tell the agent in the `read` description to
+  start with the best match and read more only when that one doesn't
+  answer; a hard limit only after that.
+- **Not covered:** search by meaning (the agent retries wordings instead),
+  shared memory across agents, tool output from an old chat, chats of other
+  projects. Not tested yet: a chat long enough to come in parts in real
+  use, and a chat whose context was squeezed.
 
 ### If the approval channel breaks
 

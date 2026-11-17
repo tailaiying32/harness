@@ -15,6 +15,7 @@
 
   let {
     chat,
+    chats = [],
     ready,
     home,
     models,
@@ -25,6 +26,8 @@
     onModel,
   }: {
     chat: Chat;
+    /** The project's other chats, newest first, to pick one with @. */
+    chats?: { id: string; title: string }[];
     ready: boolean;
     home: string;
     /** What the menu offers: for Cursor, the models picked in Settings. */
@@ -377,6 +380,7 @@
   $effect(() => {
     const moved = () => {
       if (!pressing) snap();
+      findMention();
     };
     const released = () => {
       if (!pressing) return;
@@ -391,6 +395,66 @@
       window.removeEventListener("pointerup", released);
     };
   });
+
+  // ---- Picking a chat with @ ----
+  // Typing @ at the start of a word lists the project's other chats, newest
+  // first, narrowed by what is typed after it. A picked chat becomes a word,
+  // `[@Title]`, kept like a dropped file's: it is one thing in the box, a
+  // click opens the chat, and the agent is sent the chat's ID to read it by.
+
+  /** The @ being typed: where it and the cursor are, and the row the keys are on. */
+  let mention = $state<{ at: number; end: number; row: number } | null>(null);
+  /** An @ whose list was closed with Escape: it stays closed. */
+  let dismissed = -1;
+
+  const mentioned = $derived.by(() => {
+    if (!mention) return [];
+    const typed = chat.draft.slice(mention.at + 1, mention.end).toLowerCase();
+    return chats.filter((c) => c.title.toLowerCase().includes(typed)).slice(0, 8);
+  });
+
+  /** Looks for an @ being typed just before the cursor. */
+  function findMention() {
+    const at = box && document.activeElement === box && box.selectionStart === box.selectionEnd ? box.selectionStart : -1;
+    // After a space or at the start, so an address like me@example.com isn't one.
+    const typed = at < 0 || !chats.length ? null : chat.draft.slice(0, at).match(/(?:^|\s)@((?:\S[^\n@[\]]{0,39})?)$/);
+    if (!typed) {
+      mention = null;
+      dismissed = -1;
+      return;
+    }
+    const start = at - typed[1].length - 1;
+    if (start === dismissed) mention = null;
+    else if (mention?.at !== start || mention.end !== at) mention = { at: start, end: at, row: 0 };
+  }
+
+  /** Puts the picked chat's word where the @ and what was typed after it are. */
+  async function pick(picked: { id: string; title: string }) {
+    if (!mention) return;
+    const { at, end } = mention;
+    mention = null;
+    const insert = chat.addDraftChat(picked.id, picked.title) + " ";
+    await apply({ from: at, to: end, insert, selStart: at + insert.length, selEnd: at + insert.length });
+  }
+
+  /** The keys the open list takes: up and down, Enter or Tab to pick, Escape to close. */
+  function mentionKey(e: KeyboardEvent): boolean {
+    if (!mention || !mentioned.length) return false;
+    const rows = mentioned.length;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      mention.row = (Math.min(mention.row, rows - 1) + (e.key === "ArrowDown" ? 1 : rows - 1)) % rows;
+    } else if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
+      void pick(mentioned[Math.min(mention.row, rows - 1)]);
+    } else if (e.key === "Escape") {
+      dismissed = mention.at;
+      mention = null;
+      e.stopPropagation();
+    } else {
+      return false;
+    }
+    e.preventDefault();
+    return true;
+  }
 
   async function send() {
     const text = chat.draft;
@@ -422,6 +486,7 @@
   // list starts the next item. Enter alone still sends.
   function onKey(e: KeyboardEvent) {
     if (e.isComposing) return;
+    if (mentionKey(e)) return;
     const { selectionStart: start, selectionEnd: end } = box;
     // Backspace just after a word, or Delete just before one, removes all of it.
     if ((e.key === "Backspace" || e.key === "Delete") && start === end && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -462,7 +527,11 @@
           bind:this={box}
           bind:value={chat.draft}
           class:see-through={!!pieces}
-          oninput={grow}
+          oninput={() => {
+            grow();
+            findMention();
+          }}
+          onblur={() => (mention = null)}
           onkeydown={onKey}
           onpaste={onPaste}
           onclick={onClick}
@@ -474,6 +543,17 @@
           rows="1"
           placeholder={`Message ${agentLabel(chat.agent)}`}
         ></textarea>
+        {#if mention && mentioned.length}
+          {@const on = Math.min(mention.row, mentioned.length - 1)}
+          <!-- Pressing a row keeps the cursor in the box: the pick is typed in there. -->
+          <div class="menu left mention" role="listbox" aria-label="Chats in this project">
+            {#each mentioned as row, i (row.id)}
+              <button role="option" aria-selected={i === on} class:on={i === on} onpointerdown={(e) => { e.preventDefault(); void pick(row); }}>
+                {row.title}
+              </button>
+            {/each}
+          </div>
+        {/if}
       </div>
       {#if chat.busy}
         <button class="stop" onclick={() => chat.stop()}>stop</button>
@@ -714,6 +794,19 @@
   .menu.left {
     right: auto;
     left: 0;
+  }
+  /* The chats to pick from after an @, above the box. */
+  .menu.mention {
+    max-width: 100%;
+  }
+  .mention button {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .mention button:hover {
+    color: var(--fg);
   }
   .menu .row {
     display: flex;

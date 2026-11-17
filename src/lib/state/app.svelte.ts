@@ -113,6 +113,12 @@ export class AppState {
   private adopt(chat: Chat): void {
     this.chats.set(chat.sessionId, chat);
     chat.onSent = () => void this.refresh();
+    // A chat named in another (found by its agent, or picked with @) opens by
+    // its ID or the start of it: agents are shown the first 8 characters.
+    chat.onOpenChat = (id) => {
+      const session = this.projects.flatMap((p) => p.sessions).find((s) => s.id.startsWith(id));
+      if (session) void this.open(session.id);
+    };
   }
 
   /** Every event from the core comes through here. */

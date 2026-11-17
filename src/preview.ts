@@ -308,6 +308,18 @@ const imagesChat: AgentEvent[] = [
   },
   { kind: "session_started", agent_session_id: "agent-images", model: "claude-opus-5-5", mode: "default" },
   text("i1", "I see it: the list stops at Tokyo Night and there's no way to scroll. Checking the layout."),
+  // A look at earlier chats: a search (opened, it lists the chats found) and a read.
+  tool("ic1", "mcp__harness_chats__search", { query: "settings list height" }),
+  result(
+    "ic1",
+    "looks  3 days ago  Move the idle timer to the core  (Claude Code, 4 turns, PR #31 draft)\n" +
+      "    turn 2: …the settings list keeps a fixed height so the footer stays put…\n" +
+      "saved  2 hours ago  Add a sidebar with saved chats  (Cursor, 9 turns, PR #28 open)\n" +
+      "    turn 5: …height of the list follows the window…\n" +
+      "(2 more matches not shown)\n",
+  ),
+  tool("ic2", "mcp__harness_chats__read", { id: "looks" }),
+  result("ic2", "# Move the idle timer to the core · Claude Code · last used 3 days ago · 4 turns · PR #31 draft\n\n## Turn 1 of 4\n\n### User\n\n…"),
   tool("it1", "Read", { file_path: `${home}/code/harness/src/lib/Settings.svelte` }),
   result("it1", "…"),
   text("i2", "The list had a fixed height taller than the window. It now fills the space left and scrolls. Here's the page after the change:"),

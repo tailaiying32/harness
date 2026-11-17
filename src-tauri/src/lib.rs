@@ -1,5 +1,6 @@
 mod agent;
 mod browser;
+mod chats;
 mod docs;
 mod events;
 mod github;
@@ -840,6 +841,7 @@ pub fn run() {
                 let browsers = browsers.clone();
                 let terminals = terminals.clone();
                 let skills = sessions.skills().clone();
+                let chats = chats::Chats::new(store.clone());
                 sessions.set_app_tools(Arc::new(move |chat_id: &str, project: &str| {
                     let browser_tools = {
                         let browsers = browsers.clone();
@@ -869,7 +871,24 @@ pub fn run() {
                             }),
                         }
                     };
-                    let mut tools = vec![browser_tools, terminal_tools];
+                    // Every chat's agent can look up the project's earlier chats.
+                    let chats_tools = {
+                        let chats = chats.clone();
+                        let chat_id = chat_id.to_string();
+                        let project = project.to_string();
+                        AppTools {
+                            server: chats::SERVER,
+                            instruction: chats::INSTRUCTION.into(),
+                            list: chats::tools(),
+                            call: Arc::new(move |tool, args| {
+                                let chats = chats.clone();
+                                let chat_id = chat_id.clone();
+                                let project = project.clone();
+                                Box::pin(async move { chats.call(&chat_id, &project, &tool, &args).await })
+                            }),
+                        }
+                    };
+                    let mut tools = vec![browser_tools, terminal_tools, chats_tools];
                     // Read on every start, so a new chat sees the skills
                     // imported since; none means no skills tool at all.
                     let list = skills.list();

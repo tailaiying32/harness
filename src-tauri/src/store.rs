@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
-use crate::events::AgentEvent;
+use crate::events::{AgentEvent, Block};
 use crate::worktree::{PrInfo, Worktree};
 
 /// A chat's title is its first message, cut to this many characters.
@@ -230,6 +230,116 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// The search index over what was said in every chat (`chat_text`): one row
+/// per user message, per piece of the agent's own text (a subagent's is left
+/// out) and per chat title (`role` "user", "agent" or "title"; a title's
+/// `event_id` is 0). Tool calls and their output are not in it.
+///
+/// Filled once from the saved history, the first time a build with the index
+/// opens the store; `append_event` and the title writes keep it current.
+fn build_chat_index(conn: &Connection) -> Result<(), String> {
+    let built: Option<String> = conn
+        .query_row("SELECT value FROM settings WHERE key = 'chat_index'", [], |r| r.get(0))
+        .optional()
+        .map_err(err)?;
+    if built.is_some() {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "BEGIN;
+         DELETE FROM chat_text;
+         INSERT INTO chat_text (body, session_id, event_id, role)
+             SELECT json_extract(payload, '$.text'), session_id, id, 'user' FROM events
+             WHERE json_extract(payload, '$.kind') = 'user_message';
+         INSERT INTO chat_text (body, session_id, event_id, role)
+             SELECT json_extract(payload, '$.block.text'), session_id, id, 'agent' FROM events
+             WHERE json_extract(payload, '$.kind') = 'assistant_block'
+               AND json_extract(payload, '$.block.type') = 'text'
+               AND json_extract(payload, '$.parent_tool_id') IS NULL;
+         DELETE FROM chat_text WHERE role = 'user' AND event_id IN (
+             SELECT e.id FROM events w JOIN events e ON e.session_id = w.session_id
+             WHERE json_extract(w.payload, '$.kind') = 'message_withdrawn'
+               AND json_extract(e.payload, '$.kind') = 'user_message'
+               AND json_extract(e.payload, '$.id') = json_extract(w.payload, '$.id'));
+         INSERT INTO chat_text (body, session_id, event_id, role)
+             SELECT title, id, 0, 'title' FROM sessions;
+         INSERT INTO settings (key, value) VALUES ('chat_index', '1');
+         COMMIT;",
+    )
+    .map_err(err)
+}
+
+/// Puts a chat's title in the search index, in place of the one there.
+fn index_title(conn: &Connection, session_id: &str, title: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM chat_text WHERE session_id = ?1 AND role = 'title'",
+        [session_id],
+    )?;
+    conn.execute(
+        "INSERT INTO chat_text (body, session_id, event_id, role) VALUES (?1, ?2, 0, 'title')",
+        params![title, session_id],
+    )?;
+    Ok(())
+}
+
+/// The words of a search, as the index matches them: lowercase, letters and
+/// digits only, no one-letter words, no repeats, twelve at most.
+pub fn search_words(query: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    for word in query.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+        if word.chars().count() >= 2 && !words.iter().any(|w| w == word) {
+            words.push(word.to_string());
+        }
+    }
+    words.truncate(12);
+    words
+}
+
+/// A search for rows holding every word (`AND`) or any of them (`OR`).
+fn match_text(words: &[String], joiner: &str) -> String {
+    let quoted: Vec<String> = words.iter().map(|w| format!("\"{w}\"")).collect();
+    quoted.join(joiner)
+}
+
+/// A chat a search found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatHit {
+    pub session: SessionRow,
+    /// How many messages the user sent in it.
+    pub turns: usize,
+    /// A few words around the best match in what was said; empty when only
+    /// the title matched.
+    pub snippet: String,
+    /// The turn that match is in, counted from 1.
+    pub snippet_turn: usize,
+}
+
+/// One match inside a chat.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnHit {
+    /// Counted from 1.
+    pub turn: usize,
+    /// "user" or "agent".
+    pub role: String,
+    pub snippet: String,
+}
+
+/// How many chats a search hands back; the rest are only counted.
+const SEARCH_CHATS: usize = 8;
+
+/// How many of a chat's messages the user sent up to an event (all of them
+/// with `upto` None), not counting ones taken back. Counted from the search
+/// index, which has one row for each: reading a long chat's saved events for
+/// this took 30 times as long, and a search asks it for every chat it lists.
+fn turns_upto(conn: &Connection, session_id: &str, upto: Option<i64>) -> rusqlite::Result<usize> {
+    conn.query_row(
+        "SELECT count(*) FROM chat_text WHERE session_id = ?1 AND role = 'user' AND event_id <= ?2",
+        params![session_id, upto.unwrap_or(i64::MAX)],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n as usize)
+}
+
 impl Store {
     /// Opens (or creates) the store in `dir`.
     pub fn open(dir: &Path) -> Result<Self, String> {
@@ -283,10 +393,15 @@ impl Store {
                  position INTEGER NOT NULL,
                  output BLOB NOT NULL,
                  saved_at INTEGER NOT NULL
+             );
+             CREATE VIRTUAL TABLE IF NOT EXISTS chat_text USING fts5(
+                 body, session_id UNINDEXED, event_id UNINDEXED, role UNINDEXED,
+                 tokenize = 'porter unicode61'
              );",
         )
         .map_err(err)?;
         migrate(&conn)?;
+        build_chat_index(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -414,13 +529,17 @@ impl Store {
             .map_err(err)?
             .is_none();
         // A chat stays in the folder it started in; later sends don't move it.
+        let title = title_from(first_message);
         tx.execute(
             "INSERT INTO sessions (id, project_id, title, mode, model, created_at, last_used_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
              ON CONFLICT(id) DO UPDATE SET mode = ?4, model = ?5, last_used_at = ?6",
-            params![session_id, project_id, title_from(first_message), mode, model, now],
+            params![session_id, project_id, title, mode, model, now],
         )
         .map_err(err)?;
+        if created {
+            index_title(&tx, session_id, &title).map_err(err)?;
+        }
         tx.commit().map_err(err)?;
         Ok(created)
     }
@@ -442,16 +561,19 @@ impl Store {
         if title.is_empty() {
             return Ok(false);
         }
-        self.conn
-            .lock()
-            .unwrap()
+        let conn = self.conn.lock().unwrap();
+        let changed = conn
             .execute(
                 "UPDATE sessions SET title = ?2, title_source = 'generated'
                  WHERE id = ?1 AND title_source = 'auto'",
                 params![session_id, title],
             )
-            .map(|changed| changed > 0)
-            .map_err(err)
+            .map_err(err)?
+            > 0;
+        if changed {
+            index_title(&conn, session_id, &title).map_err(err)?;
+        }
+        Ok(changed)
     }
 
     /// Chats in the trash, most recently trashed first.
@@ -636,16 +758,244 @@ impl Store {
     /// while its process was still talking) is skipped quietly.
     pub fn append_event(&self, session_id: &str, event: &AgentEvent) -> Result<(), String> {
         let payload = serde_json::to_string(event).map_err(|e| e.to_string())?;
-        self.conn
-            .lock()
-            .unwrap()
+        let conn = self.conn.lock().unwrap();
+        let saved = conn
             .execute(
                 "INSERT INTO events (session_id, payload, created_at)
                  SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ?1)",
                 params![session_id, payload, now_ms()],
             )
-            .map(|_| ())
-            .map_err(err)
+            .map_err(err)?
+            == 1;
+        if !saved {
+            return Ok(());
+        }
+        // What was said goes in the search index too (see `build_chat_index`).
+        let said = match event {
+            AgentEvent::UserMessage { text, .. } => Some(("user", text)),
+            AgentEvent::AssistantBlock { block: Block::Text { text }, parent_tool_id: None, .. } => {
+                Some(("agent", text))
+            }
+            _ => None,
+        };
+        if let Some((role, text)) = said {
+            conn.execute(
+                "INSERT INTO chat_text (body, session_id, event_id, role) VALUES (?1, ?2, ?3, ?4)",
+                params![text, session_id, conn.last_insert_rowid(), role],
+            )
+            .map_err(err)?;
+        }
+        // A message taken back leaves the index, as it leaves the chat.
+        if let AgentEvent::MessageWithdrawn { id, ok: true } = event {
+            conn.execute(
+                "DELETE FROM chat_text WHERE session_id = ?1 AND role = 'user' AND event_id IN (
+                     SELECT id FROM events WHERE session_id = ?1
+                       AND json_extract(payload, '$.kind') = 'user_message'
+                       AND json_extract(payload, '$.id') = ?2)",
+                params![session_id, id],
+            )
+            .map_err(err)?;
+        }
+        Ok(())
+    }
+
+    /// The one chat in a project whose ID starts with `id`, the trash and the
+    /// asking chat (`asking`) left out. Agents are shown the first 8
+    /// characters of an ID, so a start is enough.
+    pub fn find_chat(&self, project_path: &str, id: &str, asking: &str) -> Result<SessionRow, String> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err("Give the chat's id.".into());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut found: Vec<SessionRow> = conn
+            .prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id
+                 WHERE p.path = ?1 AND s.trashed_at IS NULL AND substr(s.id, 1, length(?2)) = ?2"
+            ))
+            .map_err(err)?
+            .query_map(params![project_path, id], session_from)
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        if found.len() == 1 && found[0].id == asking {
+            return Err("That is this chat.".into());
+        }
+        found.retain(|s| s.id != asking);
+        match found.len() {
+            0 => Err("No chat with that id in this project.".into()),
+            1 => Ok(found.remove(0)),
+            _ => Err("More than one chat's id starts with that. Give more of the id.".into()),
+        }
+    }
+
+    /// A project's latest chats, newest first, the trash and the asking chat
+    /// left out.
+    pub fn recent_chats(&self, project_path: &str, asking: &str, limit: usize) -> Result<Vec<SessionRow>, String> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id
+                 WHERE p.path = ?1 AND s.trashed_at IS NULL AND s.id <> ?2
+                 ORDER BY s.last_used_at DESC LIMIT ?3"
+            ))
+            .map_err(err)?
+            .query_map(params![project_path, asking, limit as i64], session_from)
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err);
+        rows
+    }
+
+    /// How many messages the user sent in a chat, not counting ones taken back.
+    pub fn turn_count(&self, session_id: &str) -> Result<usize, String> {
+        turns_upto(&self.conn.lock().unwrap(), session_id, None).map_err(err)
+    }
+
+    /// The project's chats that match the words, best first, and how many
+    /// more matched than are handed back. The trash and the asking chat are
+    /// left out.
+    ///
+    /// A chat ranks by how many of the words it holds, with a word in its
+    /// title counting three times: that is what tells the chat about a thing
+    /// from a long chat that happens to mention each word often. Chats that
+    /// tie are ordered by their three best-matching messages, then by which
+    /// was used last.
+    pub fn search_chats(
+        &self,
+        project_path: &str,
+        asking: &str,
+        words: &[String],
+    ) -> Result<(Vec<ChatHit>, usize), String> {
+        if words.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        let conn = self.conn.lock().unwrap();
+
+        #[derive(Default)]
+        struct Found {
+            /// How many of the words it holds, a title word counted three times.
+            weight: usize,
+            /// Its matching messages' ranks (bm25: negative, lower is better).
+            ranks: Vec<f64>,
+            /// The best matching message: its rank, event and snippet.
+            best: Option<(f64, i64, String)>,
+        }
+        let mut found: std::collections::HashMap<String, Found> = std::collections::HashMap::new();
+
+        // Which chats hold each word, and whether in the title.
+        let mut holders = conn
+            .prepare(
+                "SELECT chat_text.session_id, max(chat_text.role = 'title') FROM chat_text
+                 JOIN sessions s ON s.id = chat_text.session_id
+                 JOIN projects p ON p.id = s.project_id
+                 WHERE chat_text MATCH ?1 AND p.path = ?2 AND s.trashed_at IS NULL AND s.id <> ?3
+                 GROUP BY chat_text.session_id",
+            )
+            .map_err(err)?;
+        for word in words {
+            let rows: Vec<(String, bool)> = holders
+                .query_map(params![format!("\"{word}\""), project_path, asking], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(err)?
+                .collect::<Result<_, _>>()
+                .map_err(err)?;
+            for (id, in_title) in rows {
+                found.entry(id).or_default().weight += if in_title { 3 } else { 1 };
+            }
+        }
+
+        // The messages that match, for the order among equals and the snippet.
+        let any: Vec<(String, i64, f64, String)> = conn
+            .prepare(
+                "SELECT chat_text.session_id, chat_text.event_id, bm25(chat_text),
+                        snippet(chat_text, 0, '', '', '…', 16)
+                 FROM chat_text
+                 JOIN sessions s ON s.id = chat_text.session_id
+                 JOIN projects p ON p.id = s.project_id
+                 WHERE chat_text MATCH ?1 AND chat_text.role <> 'title'
+                   AND p.path = ?2 AND s.trashed_at IS NULL AND s.id <> ?3
+                 ORDER BY bm25(chat_text) LIMIT 500",
+            )
+            .map_err(err)?
+            .query_map(params![match_text(words, " OR "), project_path, asking], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        for (id, event_id, rank, snippet) in any {
+            let chat = found.entry(id).or_default();
+            // Best first, so the first three are the three best.
+            if chat.ranks.len() < 3 {
+                chat.ranks.push(rank);
+            }
+            if chat.best.is_none() {
+                chat.best = Some((rank, event_id, snippet));
+            }
+        }
+
+        let mut hits: Vec<(String, Found, SessionRow)> = Vec::new();
+        for (id, chat) in found {
+            let row = conn
+                .query_row(
+                    &format!(
+                        "SELECT {SESSION_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id
+                         WHERE s.id = ?1"
+                    ),
+                    [&id],
+                    session_from,
+                )
+                .map_err(err)?;
+            hits.push((id, chat, row));
+        }
+        let score = |chat: &Found| -> f64 { chat.ranks.iter().map(|rank| -rank).sum() };
+        hits.sort_by(|(_, a, a_row), (_, b, b_row)| {
+            b.weight
+                .cmp(&a.weight)
+                .then(score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal))
+                .then(b_row.last_used_at.cmp(&a_row.last_used_at))
+        });
+        let more = hits.len().saturating_sub(SEARCH_CHATS);
+        hits.truncate(SEARCH_CHATS);
+        let mut out = Vec::new();
+        for (id, chat, session) in hits {
+            let turns = turns_upto(&conn, &id, None).map_err(err)?;
+            let (snippet, snippet_turn) = match chat.best {
+                Some((_, event_id, snippet)) => (snippet, turns_upto(&conn, &id, Some(event_id)).map_err(err)?),
+                None => (String::new(), 0),
+            };
+            out.push(ChatHit { session, turns, snippet, snippet_turn });
+        }
+        Ok((out, more))
+    }
+
+    /// The places in one chat that match any of the words: the ten best,
+    /// newest first.
+    pub fn search_in_chat(&self, session_id: &str, words: &[String]) -> Result<Vec<TurnHit>, String> {
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut rows: Vec<(String, i64, String)> = conn
+            .prepare(
+                "SELECT role, event_id, snippet(chat_text, 0, '', '', '…', 24) FROM chat_text
+                 WHERE chat_text MATCH ?1 AND session_id = ?2 AND role <> 'title'
+                 ORDER BY bm25(chat_text) LIMIT 10",
+            )
+            .map_err(err)?
+            .query_map(params![match_text(words, " OR "), session_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        rows.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut out = Vec::new();
+        for (role, event_id, snippet) in rows {
+            let turn = turns_upto(&conn, session_id, Some(event_id)).map_err(err)?;
+            out.push(TurnHit { turn, role, snippet });
+        }
+        Ok(out)
     }
 
     /// A chat's history in order. Entries this version can't read are skipped,
@@ -684,6 +1034,8 @@ impl Store {
         let tx = conn.transaction().map_err(err)?;
         tx.execute("DELETE FROM sessions WHERE id = ?1", [session_id])
             .map_err(err)?;
+        tx.execute("DELETE FROM chat_text WHERE session_id = ?1", [session_id])
+            .map_err(err)?;
         tx.execute(
             "DELETE FROM projects WHERE id NOT IN (SELECT project_id FROM sessions)",
             [],
@@ -698,15 +1050,17 @@ impl Store {
         if title.is_empty() {
             return Err("A chat needs a name".into());
         }
-        self.conn
-            .lock()
-            .unwrap()
+        let conn = self.conn.lock().unwrap();
+        let changed = conn
             .execute(
                 "UPDATE sessions SET title = ?2, title_source = 'user' WHERE id = ?1",
                 params![session_id, title],
             )
-            .map(|_| ())
-            .map_err(err)
+            .map_err(err)?;
+        if changed > 0 {
+            index_title(&conn, session_id, title).map_err(err)?;
+        }
+        Ok(())
     }
 
     pub fn setting(&self, key: &str) -> Option<String> {
@@ -1007,5 +1361,213 @@ mod tests {
         store.set_setting("idle_seconds", "120").unwrap();
         store.set_setting("idle_seconds", "300").unwrap();
         assert_eq!(store.setting("idle_seconds").as_deref(), Some("300"));
+    }
+
+    fn said(text: &str) -> AgentEvent {
+        AgentEvent::AssistantBlock { message_id: "m".into(), block: Block::Text { text: text.into() }, parent_tool_id: None }
+    }
+
+    fn words(query: &str) -> Vec<String> {
+        search_words(query)
+    }
+
+    fn found(store: &Store, asking: &str, query: &str) -> Vec<String> {
+        let (hits, _) = store.search_chats("/p", asking, &words(query)).unwrap();
+        hits.into_iter().map(|h| h.session.id).collect()
+    }
+
+    #[test]
+    fn a_search_is_cut_into_plain_words() {
+        assert_eq!(words("Tab-reordering, the TABS & a b!"), ["tab", "reordering", "the", "tabs"]);
+        assert!(words(" . ").is_empty());
+        assert_eq!(words(&"w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14").len(), 12);
+    }
+
+    #[test]
+    fn chats_are_found_by_what_was_said_and_by_title() {
+        let store = Store::in_memory();
+        store.touch_session("title", "/p", "Reordering side panel tabs", "default", "default").unwrap();
+        store.append_event("title", &user("let people drag them")).unwrap();
+        store.touch_session("body", "/p", "Browser work", "default", "default").unwrap();
+        store.append_event("body", &user("first message")).unwrap();
+        store.append_event("body", &said("ok")).unwrap();
+        store.append_event("body", &user("we reordered the tabs in the panel yesterday")).unwrap();
+        store.touch_session("some", "/p", "Other things", "default", "default").unwrap();
+        store.append_event("some", &said("The tabs are fine.")).unwrap();
+        store.touch_session("none", "/p", "Unrelated", "default", "default").unwrap();
+        store.append_event("none", &user("nothing here")).unwrap();
+        store.touch_session("asking", "/p", "Reorder tabs again", "default", "default").unwrap();
+        store.touch_session("gone", "/p", "Reorder tabs, trashed", "default", "default").unwrap();
+        store.set_trashed("gone", Some(1)).unwrap();
+        store.touch_session("far", "/elsewhere", "Reorder tabs elsewhere", "default", "default").unwrap();
+
+        // A word matches its other forms. A word in the title counts most; a
+        // chat with every word comes before one with only some. The asking
+        // chat, the trash and other projects stay out.
+        assert_eq!(found(&store, "asking", "reorder tabs"), ["title", "body", "some"]);
+
+        let (hits, more) = store.search_chats("/p", "asking", &words("reorder tabs")).unwrap();
+        assert_eq!(more, 0);
+        assert_eq!((hits[0].turns, hits[0].snippet.as_str(), hits[0].snippet_turn), (1, "", 0));
+        assert_eq!((hits[1].turns, hits[1].snippet_turn), (2, 2));
+        assert!(hits[1].snippet.contains("reordered the tabs"), "{}", hits[1].snippet);
+
+        assert!(found(&store, "asking", "zebra").is_empty());
+        assert!(store.search_chats("/p", "asking", &[]).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn the_chat_about_a_thing_beats_a_long_chat_that_mentions_it_often() {
+        let store = Store::in_memory();
+        store.touch_session("long", "/p", "Backslash commands", "default", "default").unwrap();
+        for _ in 0..40 {
+            store.append_event("long", &said("The side panel has tabs. The panel's rules for a tab in the side panel.")).unwrap();
+        }
+        store.touch_session("right", "/p", "Reordering side panel tabs", "default", "default").unwrap();
+        store.append_event("right", &user("let people drag them")).unwrap();
+        // Both hold most of the words; the one named for them comes first.
+        assert_eq!(found(&store, "x", "reordering tabs in the side panel rules"), ["right", "long"]);
+    }
+
+    #[test]
+    fn a_search_hands_back_the_best_few_and_counts_the_rest() {
+        let store = Store::in_memory();
+        for n in 0..11 {
+            store.touch_session(&format!("c{n}"), "/p", "A chat", "default", "default").unwrap();
+            store.append_event(&format!("c{n}"), &user("about zebras")).unwrap();
+        }
+        let (hits, more) = store.search_chats("/p", "c0", &words("zebra")).unwrap();
+        assert_eq!((hits.len(), more), (SEARCH_CHATS, 2));
+    }
+
+    #[test]
+    fn only_what_the_user_and_the_agent_said_is_searchable() {
+        let store = Store::in_memory();
+        store.touch_session("s1", "/p", "A chat", "default", "default").unwrap();
+        store.append_event("s1", &user("about apples")).unwrap();
+        store
+            .append_event(
+                "s1",
+                &AgentEvent::AssistantBlock {
+                    message_id: "m".into(),
+                    block: Block::Text { text: "subagent bananas".into() },
+                    parent_tool_id: Some("t1".into()),
+                },
+            )
+            .unwrap();
+        store
+            .append_event(
+                "s1",
+                &AgentEvent::ToolResult {
+                    tool_id: "t1".into(),
+                    content: serde_json::json!("cherries"),
+                    is_error: false,
+                    parent_tool_id: None,
+                },
+            )
+            .unwrap();
+        store
+            .append_event("s1", &AgentEvent::UserMessage { text: "about dates".into(), id: Some("u2".into()), images: vec![] })
+            .unwrap();
+        assert_eq!(found(&store, "x", "apples"), ["s1"]);
+        assert_eq!(found(&store, "x", "dates"), ["s1"]);
+        assert!(found(&store, "x", "bananas").is_empty());
+        assert!(found(&store, "x", "cherries").is_empty());
+
+        // A message taken back leaves the search, and isn't counted as a turn.
+        store.append_event("s1", &AgentEvent::MessageWithdrawn { id: "u2".into(), ok: true }).unwrap();
+        assert!(found(&store, "x", "dates").is_empty());
+        assert_eq!(store.turn_count("s1").unwrap(), 1);
+
+        // An event for a chat that isn't there is not indexed either.
+        store.append_event("nope", &user("about elderberries")).unwrap();
+        assert!(found(&store, "x", "elderberries").is_empty());
+    }
+
+    #[test]
+    fn the_search_index_is_built_from_history_saved_before_it() {
+        let store = Store::in_memory();
+        store.touch_session("s1", "/p", "Old chat", "default", "default").unwrap();
+        store
+            .append_event("s1", &AgentEvent::UserMessage { text: "about figs".into(), id: Some("u1".into()), images: vec![] })
+            .unwrap();
+        store.append_event("s1", &said("Figs it is.")).unwrap();
+        store
+            .append_event("s1", &AgentEvent::UserMessage { text: "about grapes".into(), id: Some("u2".into()), images: vec![] })
+            .unwrap();
+        store.append_event("s1", &AgentEvent::MessageWithdrawn { id: "u2".into(), ok: true }).unwrap();
+        {
+            // As an older build left it: history, and no index.
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch("DELETE FROM chat_text; DELETE FROM settings WHERE key = 'chat_index';").unwrap();
+            build_chat_index(&conn).unwrap();
+            // A second open leaves it alone.
+            build_chat_index(&conn).unwrap();
+            let rows: i64 = conn.query_row("SELECT count(*) FROM chat_text", [], |r| r.get(0)).unwrap();
+            assert_eq!(rows, 3);
+        }
+        assert_eq!(found(&store, "x", "figs"), ["s1"]);
+        assert_eq!(found(&store, "x", "old"), ["s1"]);
+        assert!(found(&store, "x", "grapes").is_empty());
+    }
+
+    #[test]
+    fn a_new_title_replaces_the_old_one_in_the_search() {
+        let store = Store::in_memory();
+        store.touch_session("s1", "/p", "about kiwis", "default", "default").unwrap();
+        assert_eq!(found(&store, "x", "kiwis"), ["s1"]);
+        assert!(store.set_generated_title("s1", "Lemon Notes").unwrap());
+        assert!(found(&store, "x", "kiwis").is_empty());
+        assert_eq!(found(&store, "x", "lemon"), ["s1"]);
+        store.rename_session("s1", "Mango plans").unwrap();
+        assert!(found(&store, "x", "lemon").is_empty());
+        assert_eq!(found(&store, "x", "mango"), ["s1"]);
+
+        // A deleted chat leaves nothing behind.
+        store.append_event("s1", &user("about nectarines")).unwrap();
+        store.delete_session("s1").unwrap();
+        let rows: i64 = store.conn.lock().unwrap().query_row("SELECT count(*) FROM chat_text", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn a_chat_is_found_by_the_start_of_its_id() {
+        let store = Store::in_memory();
+        store.touch_session("abcd-1", "/p", "One", "default", "default").unwrap();
+        store.touch_session("abcd-2", "/p", "Two", "default", "default").unwrap();
+        store.touch_session("ef01-3", "/p", "Three", "default", "default").unwrap();
+        store.touch_session("9999-4", "/elsewhere", "Four", "default", "default").unwrap();
+        store.touch_session("7777-5", "/p", "Five", "default", "default").unwrap();
+        store.set_trashed("7777-5", Some(1)).unwrap();
+
+        assert_eq!(store.find_chat("/p", "ef01", "x").unwrap().title, "Three");
+        assert_eq!(store.find_chat("/p", " abcd-2 ", "x").unwrap().title, "Two");
+        assert!(store.find_chat("/p", "abcd", "x").unwrap_err().contains("Give more of the id"));
+        // With the asking chat set aside, the start names one chat.
+        assert_eq!(store.find_chat("/p", "abcd", "abcd-1").unwrap().title, "Two");
+        assert_eq!(store.find_chat("/p", "ef01", "ef01-3").unwrap_err(), "That is this chat.");
+        for missing in ["9999", "7777", "zzzz", "%"] {
+            assert_eq!(store.find_chat("/p", missing, "x").unwrap_err(), "No chat with that id in this project.");
+        }
+        assert_eq!(store.find_chat("/p", " ", "x").unwrap_err(), "Give the chat's id.");
+
+        let recent: Vec<String> = store.recent_chats("/p", "abcd-1", 2).unwrap().into_iter().map(|c| c.title).collect();
+        assert_eq!(recent.len(), 2);
+        assert!(!recent.contains(&"One".to_string()) && !recent.contains(&"Five".to_string()));
+    }
+
+    #[test]
+    fn one_chat_can_be_searched_for_its_matching_turns() {
+        let store = Store::in_memory();
+        store.touch_session("s1", "/p", "Plums", "default", "default").unwrap();
+        store.append_event("s1", &user("first, about plums")).unwrap();
+        store.append_event("s1", &said("Plums noted.")).unwrap();
+        store.append_event("s1", &user("second, about something else")).unwrap();
+        store.append_event("s1", &user("third, plums again")).unwrap();
+        let hits = store.search_in_chat("s1", &words("plum")).unwrap();
+        let places: Vec<(usize, &str)> = hits.iter().map(|h| (h.turn, h.role.as_str())).collect();
+        // Newest first, and the title is not a turn.
+        assert_eq!(places, [(3, "user"), (1, "agent"), (1, "user")]);
+        assert!(store.search_in_chat("s1", &words("zebra")).unwrap().is_empty());
     }
 }

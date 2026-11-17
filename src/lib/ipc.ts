@@ -37,6 +37,8 @@ export type AgentEvent =
   | { kind: "text_delta"; message_id: string; block_index: number; text: string }
   | { kind: "assistant_block"; message_id: string; block: Block; parent_tool_id: string | null }
   | { kind: "tool_result"; tool_id: string; content: unknown; is_error: boolean; parent_tool_id: string | null }
+  /** A tool call's name and input, when they came after it was first shown (Cursor). */
+  | { kind: "tool_input"; tool_id: string; name: string; input: unknown; parent_tool_id: string | null }
   | {
       kind: "approval_request";
       request_id: string;

@@ -1625,6 +1625,32 @@ mod tests {
     }
 
     #[test]
+    fn the_earlier_chats_tools_are_allowed_and_explained() {
+        let chats = AppTools {
+            server: crate::chats::SERVER,
+            instruction: crate::chats::INSTRUCTION.into(),
+            list: crate::chats::tools(),
+            call: echo_tools().call,
+        };
+        let args = launch_args(&SpawnOptions {
+            binary: "claude".into(),
+            project_path: "/work".into(),
+            resume_id: None,
+            mode: None,
+            model: None,
+            effort: None,
+            side: None,
+            tools: vec![chats],
+            notes: None,
+        });
+        let at = args.iter().position(|a| a == "--settings").unwrap();
+        let settings: Value = serde_json::from_str(&args[at + 1]).unwrap();
+        assert_eq!(settings["permissions"]["allow"], json!(["mcp__harness_chats"]));
+        let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
+        assert!(args[at + 1].ends_with("read that chat by its ID."));
+    }
+
+    #[test]
     fn a_chat_and_its_side_chat_may_read_the_notes() {
         let opts = |side: Option<SideOptions>| SpawnOptions {
             binary: "claude".into(),
