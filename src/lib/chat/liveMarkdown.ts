@@ -1,15 +1,17 @@
 // A markdown editor that shows its text formatted while you write in it, like
 // Obsidian's live preview: headings, bold, code and links look as they do when
 // read, and their marks (`**`, `[`…`](…)`) show only on the bit the cursor
-// is in or touching (a heading's `##`: anywhere on its line). The text itself is never rewritten, so the file holds exactly
-// what was typed. Loaded on demand (see LiveMarkdown.svelte): CodeMirror is
+// is in or touching (a heading's `##`: anywhere on its line). A table shows
+// as a table until the cursor is in it, then as its source. The text itself
+// is never rewritten, so the file holds exactly what was typed. Loaded on demand (see LiveMarkdown.svelte): CodeMirror is
 // the biggest library in the window, and only notes and plans use it.
 
 import { defaultKeymap, history, historyKeymap, insertNewline } from "@codemirror/commands";
 import { defineLanguageFacet, Language, LanguageSupport, syntaxTree } from "@codemirror/language";
 import { GFM, parser as markdownParser } from "@lezer/markdown";
 import { indent, newLine, outdent, renumbered, type Edit } from "./editing";
-import { EditorState, type Range } from "@codemirror/state";
+import { renderMarkdown } from "../markdown";
+import { EditorState, type Range, StateEffect, StateField } from "@codemirror/state";
 import {
   Decoration,
   type DecorationSet,
@@ -18,6 +20,7 @@ import {
   placeholder as placeholderText,
   ViewPlugin,
   type ViewUpdate,
+  WidgetType,
 } from "@codemirror/view";
 
 export type LiveOptions = {
@@ -151,6 +154,7 @@ function decorate(view: EditorView): DecorationSet {
           }
           case "QuoteMark":
           case "TaskMarker":
+          case "TableDelimiter":
           case "CodeInfo":
           case "HorizontalRule":
             out.push(mark("cm-md-mark").range(node.from, node.to));
@@ -207,6 +211,126 @@ const livePreview = ViewPlugin.fromClass(
   },
 );
 
+// ---- Tables ----
+// A table is drawn as a table, the way the chat draws one, until the cursor
+// is in it; then its source shows for editing. It replaces whole lines, which
+// CodeMirror only allows from a state field, not from the view plugin above,
+// so the field keeps its own note of focus.
+
+const setFocus = StateEffect.define<boolean>();
+const hasFocus = StateField.define<boolean>({
+  create: () => false,
+  update: (value, tr) => tr.effects.reduce((v, e) => (e.is(setFocus) ? e.value : v), value),
+});
+
+/** Where a click on a table's cell puts the cursor: the start of that cell's text in the source. */
+function cellPosition(state: EditorState, tableFrom: number, target: HTMLElement): number {
+  const cell = target.closest("th, td") as HTMLTableCellElement | null;
+  const row = cell?.parentElement as HTMLTableRowElement | null;
+  if (!cell || !row) return tableFrom;
+  // The header is the first line; the |---| line comes next, then the body rows.
+  const offset = row.parentElement?.tagName === "THEAD" ? 0 : row.sectionRowIndex + 2;
+  const first = state.doc.lineAt(tableFrom).number;
+  if (first + offset > state.doc.lines) return tableFrom;
+  const line = state.doc.line(first + offset);
+  const text = line.text;
+  // Step over the leading pipe, then past one unescaped pipe per earlier cell.
+  let i = 0;
+  while (text[i] === " ") i++;
+  if (text[i] === "|") i++;
+  for (let n = 0; n < cell.cellIndex && i < text.length; i++) {
+    if (text[i] === "\\") i++;
+    else if (text[i] === "|") n++;
+  }
+  while (text[i] === " ") i++;
+  return line.from + Math.min(i, text.length);
+}
+
+class TableWidget extends WidgetType {
+  constructor(readonly source: string) {
+    super();
+  }
+  eq(other: TableWidget) {
+    return other.source === this.source;
+  }
+  toDOM(view: EditorView) {
+    const box = document.createElement("div");
+    box.className = "md cm-md-table";
+    // Safe: see the note at the top of markdown.ts.
+    box.innerHTML = renderMarkdown(this.source);
+    box.addEventListener("mousedown", (event) => {
+      const target = event.target as HTMLElement;
+      // A link is followed by the panel's click handling, not edited.
+      if (target.closest("a")) return;
+      event.preventDefault();
+      view.dispatch({ selection: { anchor: cellPosition(view.state, view.posAtDOM(box), target) } });
+      view.focus();
+    });
+    return box;
+  }
+  ignoreEvent() {
+    return true;
+  }
+}
+
+function tableDecorations(state: EditorState): DecorationSet {
+  const out: Range<Decoration>[] = [];
+  const focused = state.field(hasFocus);
+  const doc = state.doc;
+  syntaxTree(state).iterate({
+    enter: (node) => {
+      if (node.name !== "Table") return /^(Paragraph|FencedCode|CodeBlock|ATXHeading\d|HTMLBlock)$/.test(node.name) ? false : undefined;
+      const editing = focused && state.selection.ranges.some((r) => r.from <= node.to && r.to >= node.from);
+      // Only a table on whole lines: one in a quote or list stays as source.
+      const whole = doc.lineAt(node.from).from === node.from && doc.lineAt(node.to).to === node.to;
+      if (!editing && whole) {
+        const widget = new TableWidget(doc.sliceString(node.from, node.to));
+        out.push(Decoration.replace({ widget, block: true }).range(node.from, node.to));
+      }
+      return false;
+    },
+  });
+  return Decoration.set(out);
+}
+
+const tables = StateField.define<DecorationSet>({
+  create: tableDecorations,
+  update(value, tr) {
+    const redo =
+      tr.docChanged ||
+      tr.selection ||
+      tr.effects.some((e) => e.is(setFocus)) ||
+      syntaxTree(tr.state) !== syntaxTree(tr.startState);
+    return redo ? tableDecorations(tr.state) : value;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
+/**
+ * Up or Down from next to a drawn table would jump the whole table, so it
+ * could only be reached with the mouse. Land in it instead: on its first line
+ * going down, its last going up, where its source then shows.
+ */
+function intoTable(forward: boolean) {
+  return (view: EditorView): boolean => {
+    const sel = view.state.selection.main;
+    if (!sel.empty) return false;
+    const next = view.moveVertically(sel, forward).head;
+    let land = -1;
+    view.state.field(tables).between(Math.min(sel.head, next), Math.max(sel.head, next), (from, to) => {
+      if (forward && from > sel.head && from <= next) land = from;
+      else if (!forward && to < sel.head && to >= next) land = view.state.doc.lineAt(to).from;
+      else return;
+      return false;
+    });
+    if (land < 0) return false;
+    view.dispatch({ selection: { anchor: land }, scrollIntoView: true, userEvent: "select" });
+    return true;
+  };
+}
+
+const tablePreview = [hasFocus, tables, EditorView.focusChangeEffect.of((_state, focusing) => setFocus.of(focusing))];
+
 /** Colours and spacing from the app's theme, matching formatted markdown (`.md` in app.css). */
 const look = EditorView.theme({
   "&": { color: "var(--fg)", backgroundColor: "transparent" },
@@ -228,6 +352,9 @@ const look = EditorView.theme({
   ".cm-md-link": { textDecoration: "underline", textUnderlineOffset: "2px", cursor: "pointer" },
   ".cm-md-quote": { color: "var(--dim)", borderLeft: "1px solid var(--dim)", paddingLeft: "2ch !important" },
   ".cm-md-codeblock": { backgroundColor: "var(--panel)", paddingLeft: "1ch !important" },
+  // Words stay whole (the editor's wrapping would split them); a table too
+  // wide for the panel scrolls on its own instead.
+  ".cm-md-table": { whiteSpace: "normal", wordBreak: "normal", overflowWrap: "normal", overflowX: "auto", cursor: "text" },
 });
 
 /**
@@ -270,6 +397,8 @@ export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): Edi
           },
           { key: "Enter", run: (view) => listCommand(newLine)(view) || insertNewline(view) },
           { key: "Tab", run: listCommand(indent) },
+          { key: "ArrowDown", run: intoTable(true) },
+          { key: "ArrowUp", run: intoTable(false) },
           { key: "Shift-Tab", run: (view) => listCommand(outdent)(view) || true },
           ...historyKeymap,
           ...defaultKeymap,
@@ -278,6 +407,7 @@ export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): Edi
         EditorView.lineWrapping,
         placeholderText(options.placeholder ?? ""),
         livePreview,
+        tablePreview,
         look,
         EditorView.updateListener.of((u) => {
           if (u.docChanged) options.onchange(u.state.doc.toString());
