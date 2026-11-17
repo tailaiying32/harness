@@ -17,6 +17,9 @@ function emit(session_id: string, event: AgentEvent) {
   callbacks.get(channel)?.({ message: { session_id, event }, index: index++ });
 }
 
+/** The user's preferences file. */
+let preferences = "# Working preferences\n\n- Be brief.\n- Ask before anything hard to undo.\n";
+
 // Each chat's browser tabs, as the core keeps them.
 type PreviewTabs = { tabs: { id: string; url: string; title: string; loading: boolean }[]; shown: string | null; next: number };
 const browsers = new Map<string, PreviewTabs>([
@@ -896,6 +899,8 @@ const commands: Record<string, (args: Args) => unknown> = {
     );
   },
   write_doc: (args: Args) => void docsByPath.set(String(args.path), String(args.text)),
+  read_preferences: () => preferences,
+  write_preferences: (args: Args) => void (preferences = String(args.text)),
   relocate_project: (args: Args) => {
     const at = projects.findIndex((p) => p.path === args.from);
     if (at < 0) throw "That folder isn't one of the projects.";
