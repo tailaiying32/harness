@@ -1,5 +1,7 @@
 //! Markdown files shown as side panel tabs: ones the chat wrote and ones a
-//! link opened. The user edits them in the tab, saved as they type.
+//! link opened. The user edits them in the tab, saved as they type. A doc an
+//! agent wrote in the chat's own folder can be saved to the project, which
+//! moves it into the project's `docs/` folder.
 
 use std::collections::HashSet;
 use std::fs;
@@ -63,6 +65,56 @@ impl Docs {
         }
         saved.map_err(|e| e.to_string())
     }
+}
+
+/// Where saved docs go in a project.
+const PROJECT_DOCS: &str = "docs";
+
+/// Moves a doc from the chat's folder into `<project>/docs/`, keeping its name,
+/// or adding `-2`, `-3`... when that is taken: nothing is overwritten. Copied
+/// then removed, since a rename can't cross disks. Only a markdown file inside
+/// the chat's folder, and never the chat's notes. Returns the new path.
+pub fn save_to_project(chat_folder: &Path, notes: &Path, from: &Path, project: &Path) -> Result<PathBuf, String> {
+    let bytes = read_bytes(from)?;
+    let folder = fs::canonicalize(chat_folder).map_err(|e| e.to_string())?;
+    let source = fs::canonicalize(from).map_err(|e| e.to_string())?;
+    if !source.starts_with(&folder) || source == folder {
+        return Err("Only a doc from this chat's folder can be saved to the project.".into());
+    }
+    if fs::canonicalize(notes).is_ok_and(|n| n == source) {
+        return Err("The notes stay with the chat.".into());
+    }
+    if !project.is_dir() {
+        return Err(format!("Not a folder: {}", project.display()));
+    }
+    let docs = project.join(PROJECT_DOCS);
+    fs::create_dir_all(&docs).map_err(|e| e.to_string())?;
+    let name = source.file_name().ok_or("That isn't a file.")?;
+    let (stem, ext) = {
+        let as_path = Path::new(name);
+        let stem = as_path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let ext = as_path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+        (stem, ext)
+    };
+    for n in 1..1000 {
+        let file = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") };
+        let target = docs.join(file);
+        // `create_new` fails if the file is there, so a race can't overwrite.
+        match fs::OpenOptions::new().write(true).create_new(true).open(&target) {
+            Ok(mut out) => {
+                use std::io::Write;
+                if let Err(e) = out.write_all(&bytes) {
+                    let _ = fs::remove_file(&target);
+                    return Err(e.to_string());
+                }
+                fs::remove_file(&source).map_err(|e| e.to_string())?;
+                return Ok(target);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err("Too many docs with that name in the project.".into())
 }
 
 /// A markdown file's bytes. Only absolute paths ending in `.md` or
@@ -159,6 +211,34 @@ mod tests {
         assert_eq!(fs::read_to_string(&real).unwrap(), "two");
         assert_eq!(fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_chat_doc_moves_into_the_project() {
+        let chat = folder("chat");
+        let project = folder("project");
+        let notes = chat.join("notes.md");
+        fs::write(&notes, "mine").unwrap();
+        let doc = chat.join("ideas.md");
+        fs::write(&doc, "# Ideas").unwrap();
+        fs::create_dir_all(project.join("docs")).unwrap();
+        fs::write(project.join("docs/ideas.md"), "older").unwrap();
+
+        let saved = save_to_project(&chat, &notes, &doc, &project).unwrap();
+        assert_eq!(saved, project.join("docs/ideas-2.md"), "an existing doc isn't overwritten");
+        assert_eq!(fs::read_to_string(&saved).unwrap(), "# Ideas");
+        assert_eq!(fs::read_to_string(project.join("docs/ideas.md")).unwrap(), "older");
+        assert!(!doc.exists());
+
+        assert!(save_to_project(&chat, &notes, &notes, &project).is_err(), "notes stay");
+        let txt = chat.join("a.txt");
+        fs::write(&txt, "x").unwrap();
+        assert!(save_to_project(&chat, &notes, &txt, &project).is_err(), "markdown only");
+        let outside = project.join("docs/ideas.md");
+        assert!(save_to_project(&chat, &notes, &outside, &project).is_err(), "only from the chat folder");
+
+        fs::remove_dir_all(&chat).unwrap();
+        fs::remove_dir_all(&project).unwrap();
     }
 
     #[test]

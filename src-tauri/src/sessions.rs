@@ -75,6 +75,16 @@ pub fn configured_idle(store: &Store) -> Option<Duration> {
     (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
+/// The text the agent gets: the window's notes first, marked as the app's,
+/// then the user's message.
+fn with_app_notes(notes: &[String], text: &str) -> String {
+    let notes: Vec<&str> = notes.iter().map(|n| n.trim()).filter(|n| !n.is_empty()).collect();
+    if notes.is_empty() {
+        return text.to_string();
+    }
+    format!("(From the app, not the user: {})\n\n{text}", notes.join(" "))
+}
+
 /// The chat's notes file, its folder made so the agent can be pointed at it.
 /// None if the folder can't be made: the chat runs without notes.
 pub fn notes_for(notes: &Notes, chat: &str) -> Option<PathBuf> {
@@ -285,8 +295,11 @@ impl SessionManager {
         text: &str,
         images: &[u32],
         message_id: &str,
+        // Things the window tells the agent with this message (a doc the user
+        // moved, say); not shown or saved.
+        app_notes: &[String],
     ) -> Result<(), String> {
-        self.send_inner(session_id, agent, project_path, mode, model, effort, text, images, message_id, true)
+        self.send_inner(session_id, agent, project_path, mode, model, effort, text, images, message_id, true, app_notes)
             .await
     }
 
@@ -307,6 +320,7 @@ impl SessionManager {
         images: &[u32],
         message_id: &str,
         show: bool,
+        app_notes: &[String],
     ) -> Result<(), String> {
         let inner = &self.0;
 
@@ -446,7 +460,8 @@ impl SessionManager {
         // A typed `/name` for one of the app's skills goes to the agent with
         // the skill attached; the chat keeps what the user typed.
         let expanded = if show { inner.skills.expand(text) } else { None };
-        agent.send_user_message(expanded.as_deref().unwrap_or(text), &payloads, message_id)
+        let text = with_app_notes(app_notes, expanded.as_deref().unwrap_or(text));
+        agent.send_user_message(&text, &payloads, message_id)
     }
 
     /// The user wrote while Claude waited on a question (a plan, a tool, the
@@ -1051,7 +1066,7 @@ mod tests {
     impl Rig {
         async fn send(&self, text: &str) {
             self.manager
-                .send_message("s1", crate::agent::CLAUDE, "/work".into(), Some("plan".into()), None, None, text, &[], "m1")
+                .send_message("s1", crate::agent::CLAUDE, "/work".into(), Some("plan".into()), None, None, text, &[], "m1", &[])
                 .await
                 .unwrap();
         }
@@ -1112,7 +1127,7 @@ mod tests {
         images.save("s1", "image/png", b"one").unwrap();
         images.save("s1", "image/jpeg", b"two").unwrap();
         rig.manager
-            .send_message("s1", crate::agent::CLAUDE, "/work".into(), None, None, None, "[image 2] [image 1]", &[2, 1], "m1")
+            .send_message("s1", crate::agent::CLAUDE, "/work".into(), None, None, None, "[image 2] [image 1]", &[2, 1], "m1", &[])
             .await
             .unwrap();
         assert_eq!(rig.told(), vec!["say [image 2] [image 1] +image/jpeg:dHdv +image/png:b25l"]);
@@ -1129,11 +1144,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_notes_reach_the_agent_but_not_the_saved_message() {
+        let rig = rig(LONG);
+        let notes = vec!["The doc moved.".to_string(), " ".to_string()];
+        rig.manager
+            .send_message("s1", crate::agent::CLAUDE, "/work".into(), None, None, None, "change it", &[], "m1", &notes)
+            .await
+            .unwrap();
+        assert_eq!(rig.told(), vec!["say (From the app, not the user: The doc moved.)\n\nchange it"]);
+        let AgentEvent::UserMessage { text, .. } = &rig.store.events("s1").unwrap()[0] else {
+            panic!("not a user message");
+        };
+        assert_eq!(text, "change it");
+    }
+
+    #[tokio::test]
     async fn a_missing_image_fails_the_send_before_anything_is_saved() {
         let rig = rig(LONG);
         let sent = rig
             .manager
-            .send_message("s1", crate::agent::CLAUDE, "/work".into(), None, None, None, "[image 4]", &[4], "m1")
+            .send_message("s1", crate::agent::CLAUDE, "/work".into(), None, None, None, "[image 4]", &[4], "m1", &[])
             .await;
         assert!(sent.is_err());
         assert!(rig.told().is_empty());
@@ -1417,7 +1447,7 @@ mod tests {
     impl Rig {
         async fn send_at(&self, folder: &Path, mode: &str, text: &str) {
             self.manager
-                .send_message("s1", crate::agent::CLAUDE, folder.into(), Some(mode.into()), None, None, text, &[], "m")
+                .send_message("s1", crate::agent::CLAUDE, folder.into(), Some(mode.into()), None, None, text, &[], "m", &[])
                 .await
                 .unwrap();
         }
@@ -1705,7 +1735,7 @@ mod tests {
         // Cursor isn't installed here: a new chat on it can't start, and nothing is saved.
         let err = rig
             .manager
-            .send_message("c1", crate::agent::CURSOR, "/work".into(), None, None, None, "hi", &[], "m0")
+            .send_message("c1", crate::agent::CURSOR, "/work".into(), None, None, None, "hi", &[], "m0", &[])
             .await
             .unwrap_err();
         assert!(err.contains("Unknown agent"), "{err}");
@@ -1716,7 +1746,7 @@ mod tests {
         rig.turn_ends();
         // A later send naming another agent still goes to the chat's own.
         rig.manager
-            .send_message("s1", crate::agent::CURSOR, "/work".into(), None, None, None, "again", &[], "m2")
+            .send_message("s1", crate::agent::CURSOR, "/work".into(), None, None, None, "again", &[], "m2", &[])
             .await
             .unwrap();
         assert_eq!(rig.store.session("s1").unwrap().unwrap().agent, crate::agent::CLAUDE);
@@ -1729,7 +1759,7 @@ mod tests {
         rig.background(1);
         rig.turn_ends();
         rig.manager
-            .send_message("s2", crate::agent::CLAUDE, "/work".into(), None, None, None, "hi", &[], "m2")
+            .send_message("s2", crate::agent::CLAUDE, "/work".into(), None, None, None, "hi", &[], "m2", &[])
             .await
             .unwrap();
         rig.agent_says(AgentEvent::TurnEnded {

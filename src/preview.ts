@@ -398,7 +398,8 @@ const savedChat: AgentEvent[] = [
 // A chat in plan mode: it wrote two documents, then presented a plan that is
 // still waiting for an answer. For the side panel.
 const notesPath = `${home}/code/harness/docs/memory-notes.md`;
-const testPlanPath = `${home}/code/harness/docs/test-plan.md`;
+// In the chat's own folder, so its tab has the save-to-project button.
+const testPlanPath = `${home}/Library/Application Support/com.harness.app/notes/planning/test-plan.md`;
 const planPath = `${home}/.claude/plans/idle-timeout.md`;
 const notesText =
   "# Memory per chat\n\nWhat each part of the app holds, measured on this Mac with a release build and the window hidden.\n\n## Readings\n\n- A waiting chat's process holds about 260 MB.\n- After a few turns it rises to about 310 MB.\n- The app alone, with a short chat open: 105 to 160 MB.\n\n## Takeaway\n\nFour idle chats cost over 1 GB today. With `IDLE_TIMEOUT` at five minutes they cost nothing.\n\n| Part | Memory |\n|---|---|\n| App alone | 105 to 160 MB |\n| One chat's process | 260 to 310 MB |\n";
@@ -784,6 +785,13 @@ const commands: Record<string, (args: Args) => unknown> = {
     );
   },
   write_doc: (args: Args) => void docsByPath.set(String(args.path), String(args.text)),
+  save_doc_to_project: (args: Args) => {
+    const from = String(args.path);
+    const to = `${String(args.project)}/docs/${from.split("/").pop()}`;
+    docsByPath.set(to, docsByPath.get(from) ?? "");
+    docsByPath.delete(from);
+    return to;
+  },
 };
 
 // ---- The terminal: a pretend shell that echoes and answers a few commands ----

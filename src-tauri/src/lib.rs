@@ -161,6 +161,8 @@ async fn send_message(
     // Numbers of the chat's saved images to send with it.
     images: Option<Vec<u32>>,
     message_id: String,
+    // Things the window tells the agent with this message; not shown or saved.
+    app_notes: Option<Vec<String>>,
 ) -> Result<(), String> {
     let project_path = PathBuf::from(project_path);
     if !project_path.is_dir() {
@@ -171,7 +173,7 @@ async fn send_message(
     // The manager is cloned so nothing borrowed from `state` is held while waiting.
     let sessions = state.sessions.clone();
     sessions
-        .send_message(&session_id, &agent, project_path, mode, model, effort, &text, &images.unwrap_or_default(), &message_id)
+        .send_message(&session_id, &agent, project_path, mode, model, effort, &text, &images.unwrap_or_default(), &message_id, &app_notes.unwrap_or_default())
         .await
 }
 
@@ -438,6 +440,23 @@ async fn write_doc(state: State<'_, AppState>, path: String, text: String) -> Re
     tauri::async_runtime::spawn_blocking(move || docs.write(Path::new(&path), &text))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// Moves a doc from the chat's folder into the project's `docs/` folder
+/// (`project` is the chat's worktree when it has one). Returns the new path,
+/// which the panel may then save to like any doc it shows.
+#[tauri::command]
+async fn save_doc_to_project(state: State<'_, AppState>, chat_id: String, path: String, project: String) -> Result<String, String> {
+    let sessions = state.sessions.clone();
+    let docs = state.docs.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let notes = sessions.notes();
+        let saved = docs::save_to_project(&notes.folder(&chat_id)?, &notes.path(&chat_id)?, Path::new(&path), Path::new(&project))?;
+        docs.read(&saved)?;
+        Ok(saved.display().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// The user typed an address in a chat's browser: into `tab`, else the tab
@@ -908,6 +927,7 @@ pub fn run() {
             close_session,
             read_doc,
             write_doc,
+            save_doc_to_project,
             read_notes,
             write_notes,
             browser_navigate,

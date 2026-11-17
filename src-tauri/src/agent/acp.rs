@@ -1432,6 +1432,25 @@ impl Drop for AcpProcess {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_new_conversation_is_told_where_docs_go() {
+        let opts = SpawnOptions {
+            binary: "agent".into(),
+            project_path: "/work".into(),
+            resume_id: None,
+            mode: None,
+            model: None,
+            effort: None,
+            side: None,
+            tools: Vec::new(),
+            notes: Some("/data/notes/chat-1/notes.md".into()),
+        };
+        let told = instructions(&opts).unwrap();
+        assert!(told.contains("That folder, /data/notes/chat-1, is this chat's own"));
+        assert!(told.contains("\"put it in the docs\" means write it here"));
+        assert!(!told.contains("Claude Docs"), "only Claude has that connector");
+    }
+
     /// A connection with no process: what it writes and what it reports are kept.
     fn rig() -> (Arc<Shared>, mpsc::UnboundedReceiver<Out>, Arc<Mutex<Vec<AgentEvent>>>) {
         let (tx, rx) = mpsc::unbounded_channel();

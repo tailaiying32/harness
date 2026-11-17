@@ -199,7 +199,9 @@ export const sendMessage = (
   messageId: string,
   /** Numbers of the chat's saved images to send with the text. */
   images: number[] = [],
-) => invoke<void>("send_message", { sessionId, agent, projectPath, mode, model, effort, text, images, messageId });
+  /** Things the app tells the agent with this message; not shown or saved. */
+  appNotes: string[] = [],
+) => invoke<void>("send_message", { sessionId, agent, projectPath, mode, model, effort, text, images, messageId, appNotes });
 
 export const answerApproval = (
   sessionId: string,
@@ -359,6 +361,10 @@ export const clipboardFiles = () => invoke<string[]>("clipboard_files");
 export const readDoc = (path: string) => invoke<string>("read_doc", { path });
 /** Saves the user's edit to a markdown file the panel has read. */
 export const writeDoc = (path: string, text: string) => invoke<void>("write_doc", { path, text });
+
+/** Moves a doc from the chat's folder into `<project>/docs/`; the new path. */
+export const saveDocToProject = (chatId: string, path: string, project: string) =>
+  invoke<string>("save_doc_to_project", { chatId, path, project });
 
 // ---- The side panel's browser (tabs per chat, localhost pages only) ----
 

@@ -132,6 +132,20 @@ button:disabled {
   cursor: default;
 }
 
+/* The one strong button (Approve plan, Allow, Sign in, Save to project...):
+   accent behind, background colour on top, the same everywhere. Hover leaves
+   it as it is; turned off, it goes grey. Other buttons' hover rules skip it
+   with :not(.primary). */
+button.primary {
+  background: var(--accent);
+  color: var(--bg);
+  padding: 0 1ch;
+}
+button.primary:disabled {
+  background: var(--line);
+  color: var(--faint);
+}
+
 /* While the side panel's edge is dragged: the resize cursor everywhere, and
    no text gets selected on the way. */
 :root.resizing,

@@ -71,17 +71,24 @@
     saveTimer = setTimeout(flush, 400);
   }
 
-  function flush() {
+  function flush(): Promise<void> | undefined {
     clearTimeout(saveTimer);
     const edit = unsaved;
     unsaved = null;
     // Claude wrote the file since this was typed: its text is on disk and in
     // the editor now, so saving this would quietly undo it.
     if (!edit || edit.text !== shownText(edit.tab)) return;
-    void (edit.tab === NOTES_TAB ? chat.saveNotes(edit.text) : chat.saveDoc(edit.tab, edit.text));
+    return edit.tab === NOTES_TAB ? chat.saveNotes(edit.text) : chat.saveDoc(edit.tab, edit.text);
   }
 
-  onDestroy(flush);
+  onDestroy(() => void flush());
+
+  /** Typing is saved first, so the doc moves as it stands. */
+  async function saveToProject() {
+    const tab = active;
+    await flush();
+    await chat.saveToProject(tab);
+  }
 
   /** The waiting plan as it stands: the user's edit, or Claude's text. */
   const planText = $derived(plan ? (chat.planDraft ?? planOf(plan.input).text) : "");
@@ -280,6 +287,14 @@
     </div>
   {/key}
 
+  {#if chat.isChatDoc(active)}
+    <!-- A doc in the chat's folder goes with the chat unless saved to the project. -->
+    <div class="foot">
+      <div class="actions">
+        <button class="primary" disabled={chat.busy} onclick={saveToProject}>Save to project</button>
+      </div>
+    </div>
+  {/if}
   {#if active === PLAN_TAB && plan}
     <div class="foot">
       {#if chat.planPending}
@@ -407,16 +422,13 @@
     gap: 0 3ch;
     margin-top: var(--foot-gap);
   }
-  .actions button:hover {
+  .actions button:not(.primary):hover {
     color: var(--bright);
   }
-  .primary {
-    background: var(--accent);
-    color: var(--bg);
-    padding: 0 1ch;
-  }
-  .actions .primary:hover {
-    color: var(--bg);
+  /* Alone in its foot (a doc's save button): no gap under the line beyond the
+     foot's own, as the plan's first row sits. */
+  .foot > .actions:first-child {
+    margin-top: 0;
   }
   .faint {
     color: var(--faint);

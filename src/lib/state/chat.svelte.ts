@@ -12,6 +12,7 @@ import {
   chooseWorktree,
   interrupt,
   readDoc,
+  saveDocToProject,
   readNotes,
   sendMessage,
   sideEnd,
@@ -252,6 +253,9 @@ export class Chat {
     chat.replaying = true;
     for (const event of events) chat.handle(event);
     chat.replaying = false;
+    // Docs in the chat's folder are read as they are now; one that was saved
+    // to the project (or deleted) since loses its tab.
+    for (const doc of chat.docs) if (chat.isChatDoc(doc.path)) void chat.refreshDoc(doc.path);
     chat.mode = row.mode as Mode;
     chat.modelChoice = row.model;
     chat.effortChoice = row.effort ?? "default";
@@ -614,6 +618,40 @@ export class Chat {
     return path.replace(/\\/g, "/").endsWith(`/notes/${this.sessionId}/notes.md`);
   }
 
+  /**
+   * A doc in the chat's own folder, where agents write docs (next to the
+   * notes, kept by the core in `notes/<chat id>/`). Its tab follows the file
+   * on disk, whatever the agent's tool said, and it can be saved to the project.
+   */
+  isChatDoc(path: string): boolean {
+    const p = path.replace(/\\/g, "/");
+    return p.includes(`/notes/${this.sessionId}/`) && /\.(md|markdown)$/i.test(p) && !this.isNotes(path);
+  }
+
+  /** Said to the agent with the next message the user sends, then dropped. */
+  private appNotes: string[] = [];
+
+  /**
+   * Moves a doc from the chat's folder into the project's docs/ folder (the
+   * worktree's, if the chat has one). Its tab follows it, and the agent is
+   * told with the next message, so it edits the new file.
+   */
+  async saveToProject(path: string): Promise<void> {
+    if (this.owner) return this.owner.saveToProject(path);
+    let saved: string;
+    try {
+      saved = await saveDocToProject(this.sessionId, path, this.root);
+    } catch (e) {
+      this.showError(`Couldn't save it to the project: ${e}`);
+      return;
+    }
+    const doc = this.docs.find((d) => d.path === path);
+    if (doc) doc.path = saved;
+    if (this.panelTab === path) this.panelTab = saved;
+    this.appNotes.push(`The user saved the doc ${path} to the project; it is now ${saved}, so edit it there.`);
+    void this.refreshDoc(saved);
+  }
+
   /** Keeps the notes as typed and saves them. */
   async saveNotes(text: string): Promise<void> {
     this.notes = text;
@@ -726,11 +764,29 @@ export class Chat {
     }
     const doc = this.docs.find((d) => d.path === path);
     const text = textAfter(tool, doc?.text);
-    if (text === null) return;
+    if (text === null) {
+      // The edit doesn't say what the file holds now (Cursor's tools never
+      // do), but a doc in the chat's folder is read from disk.
+      if (!this.isChatDoc(path)) return;
+      if (!doc) this.docs.push({ path, text: "" });
+      if (!this.replaying) void this.refreshDoc(path);
+      this.showNewChatDoc(path, !doc);
+      return;
+    }
     if (doc) doc.text = text;
     else this.docs.push({ path, text });
     // Then the file itself: the user may have edited it since Claude read it.
     if (!this.replaying) void this.refreshDoc(path);
+    this.showNewChatDoc(path, !doc);
+  }
+
+  /**
+   * A doc the agent just made in the chat's folder was written for the user
+   * to read, so its tab opens at once, as a plan does. Other markdown files
+   * (a repo's README, say) only get a tab; later edits don't switch to it.
+   */
+  private showNewChatDoc(path: string, isNew: boolean): void {
+    if (isNew && !this.replaying && this.isChatDoc(path)) this.openPanel(path);
   }
 
   /** Reads a document's tab again from its file. Left as shown if it can't be read. */
@@ -740,7 +796,11 @@ export class Chat {
     let text: string;
     try {
       text = await readDoc(path);
-    } catch {
+    } catch (e) {
+      // A doc in the chat's folder that is gone was moved or deleted: its tab goes.
+      if (this.isChatDoc(path) && String(e).includes("doesn't exist")) {
+        this.docs = this.docs.filter((d) => d.path !== path);
+      }
       return;
     }
     const doc = this.docs.find((d) => d.path === path);
@@ -1028,7 +1088,7 @@ export class Chat {
         // Claude may have written the notes or a document some other way (a
         // shell command, Cursor's tools).
         void this.refreshNotes();
-        for (const doc of this.openDocs) void this.refreshDoc(doc.path);
+        for (const doc of this.docs) if (!doc.closed || this.isChatDoc(doc.path)) void this.refreshDoc(doc.path);
         this.onTurnEnd?.();
         break;
 
@@ -1138,7 +1198,9 @@ export class Chat {
           message,
           messageId,
           images.map((i) => i.n),
+          this.appNotes,
         );
+        this.appNotes = [];
         this.onSent?.();
       }
     } catch (e) {

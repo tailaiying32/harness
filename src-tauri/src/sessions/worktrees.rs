@@ -390,6 +390,7 @@ impl SessionManager {
             &[],
             &message_id,
             false,
+            &[],
         )
         .await
     }
