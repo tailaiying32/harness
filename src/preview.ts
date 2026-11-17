@@ -758,6 +758,14 @@ const commands: Record<string, (args: Args) => unknown> = {
     if (pages.shown === args.tab) pages.shown = pages.tabs[Math.min(at, pages.tabs.length - 1)]?.id ?? null;
     emitBrowser(String(args.chatId));
   },
+  browser_move: (args: Args) => {
+    const pages = browserOf(String(args.chatId));
+    const at = pages.tabs.findIndex((t) => t.id === args.tab);
+    if (at < 0) return;
+    const [tab] = pages.tabs.splice(at, 1);
+    pages.tabs.splice(Number(args.to), 0, tab);
+    emitBrowser(String(args.chatId));
+  },
   browser_reload: () => {},
   browser_place: () => {},
   browser_close: (args: Args) => {
@@ -906,6 +914,15 @@ Object.assign(commands, {
     const at = termTabs.findIndex((t) => t.id === args.tab);
     if (at < 0) return;
     const [tab] = termTabs.splice(at, 1);
+    termTabsChanged(tab.project);
+  },
+  terminal_move: (args: Args) => {
+    const tab = termTabs.find((t) => t.id === args.tab);
+    if (!tab) return;
+    const others = termTabs.filter((t) => t !== tab && t.project === tab.project);
+    termTabs.splice(termTabs.indexOf(tab), 1);
+    const next = others[Number(args.to)];
+    termTabs.splice(next ? termTabs.indexOf(next) : termTabs.length, 0, tab);
     termTabsChanged(tab.project);
   },
   terminal_text: (args: Args) => termOutput.get(String(args.tab)) ?? "",

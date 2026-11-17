@@ -484,6 +484,12 @@ fn browser_pick(state: State<'_, AppState>, chat_id: String, tab: String) -> Res
     state.browsers.pick(&chat_id, &tab)
 }
 
+/// A tab dragged to place `to` in its row.
+#[tauri::command]
+fn browser_move(state: State<'_, AppState>, chat_id: String, tab: String, to: usize) -> Result<(), String> {
+    state.browsers.move_tab(&chat_id, &tab, to)
+}
+
 #[tauri::command]
 fn browser_close_tab(state: State<'_, AppState>, chat_id: String, tab: String) -> Result<(), String> {
     state.browsers.close_tab(&chat_id, &tab)
@@ -570,6 +576,12 @@ async fn terminal_running(state: State<'_, AppState>, tab: String) -> Result<Opt
     tauri::async_runtime::spawn_blocking(move || terminals.running(&tab))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// A tab dragged to place `to` among its project's tabs.
+#[tauri::command]
+fn terminal_move(state: State<'_, AppState>, tab: String, to: usize) {
+    state.terminals.move_tab(&tab, to);
 }
 
 #[tauri::command]
@@ -925,6 +937,7 @@ pub fn run() {
             browser_new_tab,
             browser_pick,
             browser_close_tab,
+            browser_move,
             browser_current,
             terminal_tabs,
             terminal_new,
@@ -934,6 +947,7 @@ pub fn run() {
             terminal_place,
             terminal_running,
             terminal_close,
+            terminal_move,
             terminal_text,
             close_window,
             save_image,

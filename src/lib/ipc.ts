@@ -381,6 +381,8 @@ export const browserReload = (chatId: string, tab: string) => invoke<void>("brow
 export const browserNewTab = (chatId: string) => invoke<string>("browser_new_tab", { chatId });
 export const browserPick = (chatId: string, tab: string) => invoke<void>("browser_pick", { chatId, tab });
 export const browserCloseTab = (chatId: string, tab: string) => invoke<void>("browser_close_tab", { chatId, tab });
+/** A tab dragged to place `to` in its row. */
+export const browserMove = (chatId: string, tab: string, to: number) => invoke<void>("browser_move", { chatId, tab, to });
 /** Puts the browser over the panel's body, or parks it out of sight. */
 export const browserPlace = (chatId: string, rect: BrowserRect, visible: boolean) =>
   invoke<void>("browser_place", { chatId, rect, visible });
@@ -425,6 +427,8 @@ export const terminalPlace = (tab: string | null, visible: boolean) => invoke<vo
 /** What runs in a tab besides its shell, checked now. */
 export const terminalRunning = (tab: string) => invoke<string | null>("terminal_running", { tab });
 export const terminalClose = (tab: string) => invoke<void>("terminal_close", { tab });
+/** A tab dragged to place `to` among its project's tabs. */
+export const terminalMove = (tab: string, to: number) => invoke<void>("terminal_move", { tab, to });
 /** A tab's output as plain text, as Claude reads it (for the self-test). */
 export const terminalText = (tab: string, lines: number) => invoke<string>("terminal_text", { tab, lines });
 /** Closes the window, as Cmd+W does outside a terminal. */

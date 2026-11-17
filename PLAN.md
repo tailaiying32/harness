@@ -1163,6 +1163,21 @@ Mocked up on the same board:
   `@endside`): answers from the copied chat, a file read, idle close then
   resume with its history, the saved copy deleted on end, the main chat
   untouched, and a plan arriving while in side chat.
+- **Drag tabs to reorder (2026-11-16).** In the docs, side chat, browser and
+  terminal rows, a tab can be dragged along its own row (never to another
+  view). Press and move 4 px to start; the other tabs make room as it passes
+  their middles; letting go leaves it there, Escape puts it back, and the
+  click that ends a drag doesn't pick the tab (`panel/tabDrag.svelte.ts`).
+  Notes and plan stay first. Each store moves the tab at once, so it doesn't
+  jump back while the core answers. Where order lives: browser tabs in the
+  core (`browser_move`); terminal tabs in the core (`terminal_move`), shared by
+  every chat of the project and saved at quit; side chats and documents in
+  the window only, so a reloaded chat lists documents in the order first
+  written again (as it already brings closed ones back). Same-named terminal
+  and side chat tabs are numbered by when they opened, not by place, so a
+  dragged "harness 2" keeps its name. **Tested** in the preview (browser and
+  terminal rows: move, Escape, click after drag) and with core unit tests;
+  not yet checked by eye in the built app.
 - **Top bar: built** (2026-11-14). On a Mac the window draws into its own
   title bar (`titleBarStyle: Overlay`, `hiddenTitle`, `trafficLightPosition`
   in `tauri.conf.json`); the window buttons sit at the top of the sidebar and

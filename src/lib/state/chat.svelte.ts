@@ -3,6 +3,7 @@
 import {
   answerApproval,
   browserCloseTab,
+  browserMove,
   browserNavigate,
   browserNewTab,
   browserPick,
@@ -334,6 +335,9 @@ export class Chat {
   panelView = $state<PanelView>("docs");
   /** The side chats (`/btw`, or the side view's +), one per tab. Never saved. */
   sides = $state<Chat[]>([]);
+  /** Side chats started so far; each side's `born` is its count, so two with one name keep their " 2" when dragged past each other. */
+  private sidesMade = 0;
+  born = 0;
   /** The side chat tab picked; the last one if it is gone. */
   sideShown = $state<string | null>(null);
   /** The side chat on show, if there are any. */
@@ -405,8 +409,13 @@ export class Chat {
     return this.panelOpen && this.panelView === "browser";
   }
 
-  /** Opens the browser view: the tab on show if there is one, an empty address line if not. */
+  /** Opens the browser view: the tab on show, or a new empty tab if there is none. */
   openBrowser(): void {
+    this.showBrowser();
+    if (this.browserTabs.length === 0) void this.newBrowserTab();
+  }
+
+  private showBrowser(): void {
     this.browserOn = true;
     this.panelView = "browser";
     this.panelOpen = true;
@@ -414,7 +423,7 @@ export class Chat {
 
   /** + or Cmd+T: a new empty tab, with the cursor in the address box. */
   async newBrowserTab(): Promise<void> {
-    this.openBrowser();
+    this.showBrowser();
     try {
       this.browserShownTab = await browserNewTab(this.sessionId);
       this.focusAddress++;
@@ -426,6 +435,12 @@ export class Chat {
   pickBrowserTab(id: string): void {
     this.browserShownTab = id;
     void browserPick(this.sessionId, id).catch(() => {});
+  }
+
+  /** A tab dragged to place `to` in the row. Moved here at once, so it doesn't jump back while the core answers. */
+  moveBrowserTab(id: string, to: number): void {
+    this.browserTabs = moved(this.browserTabs, (t) => t.id === id, to);
+    void browserMove(this.sessionId, id, to).catch(() => {});
   }
 
   /** The tab before or after the one on show, wrapping round. */
@@ -456,7 +471,7 @@ export class Chat {
   /** From a page line in the chat: shows the tab on that address, or opens it in a new tab. */
   async showPage(url: string): Promise<void> {
     if (this.owner) return this.owner.showPage(url);
-    this.openBrowser();
+    this.showBrowser();
     const same = (a: string) => {
       try {
         return new URL(a).href === new URL(url).href;
@@ -528,6 +543,22 @@ export class Chat {
   /** Documents whose tab is showing. */
   get openDocs(): DocTab[] {
     return this.docs.filter((doc) => !doc.closed);
+  }
+
+  /**
+   * A document's tab dragged to place `to` among the open ones (after notes
+   * and plan, which stay put). Not saved: a reloaded chat lists them in the
+   * order first written again, as it brings closed ones back.
+   */
+  moveDoc(path: string, to: number): void {
+    const doc = this.docs.find((d) => d.path === path);
+    if (!doc) return;
+    const open = this.openDocs.filter((d) => d !== doc);
+    const rest = this.docs.filter((d) => d !== doc);
+    const next = open[to];
+    const at = next ? rest.indexOf(next) : open.length ? rest.indexOf(open[open.length - 1]) + 1 : rest.length;
+    rest.splice(at, 0, doc);
+    this.docs = rest;
   }
 
   /** The notes tab is always there, so docs is never empty. */
@@ -1255,6 +1286,7 @@ export class Chat {
   newSide(): Chat {
     // Random, not counted: a reloaded window must not reuse an id the core may still know.
     const side = new Chat(`${this.sessionId}#side-${crypto.randomUUID().slice(0, 8)}`, this);
+    side.born = ++this.sidesMade;
     side.projectPath = this.projectPath;
     side.workPath = this.workPath;
     this.sides.push(side);
@@ -1277,6 +1309,11 @@ export class Chat {
 
   pickSide(id: string): void {
     this.sideShown = id;
+  }
+
+  /** A side chat's tab dragged to place `to` in the row. */
+  moveSide(id: string, to: number): void {
+    this.sides = moved(this.sides, (s) => s.sessionId === id, to);
   }
 
   /** The tab before or after the one on show, wrapping round. */
@@ -1385,4 +1422,13 @@ export class Chat {
       // No live process: the mode is passed along with the next message instead.
     }
   }
+}
+
+/** `list` with the first item that `is` picks moved to place `to` (clamped to the end). */
+function moved<T>(list: T[], is: (item: T) => boolean, to: number): T[] {
+  const at = list.findIndex(is);
+  if (at < 0) return list;
+  const rest = list.filter((_, i) => i !== at);
+  rest.splice(Math.min(to, rest.length), 0, list[at]);
+  return rest;
 }
