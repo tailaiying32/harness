@@ -92,9 +92,33 @@ then change only what they asked for and keep the rest of their text."
     } else {
         "Read it when they mention their notes. Don't write to it."
     };
-    format!(
+    let notes_line = format!(
         "The user keeps notes for this chat in {} (markdown; it may not exist yet). {rule}",
         notes.display()
+    );
+    match notes.parent().filter(|_| writable) {
+        Some(folder) => format!("{notes_line} {}", docs_rule(folder)),
+        None => notes_line,
+    }
+}
+
+/// Where docs go: markdown files in the chat's folder, which the side panel
+/// shows as tabs (`trackDocument` in the window; read from disk for this
+/// folder, so any agent's edits show). Told to every agent that can write.
+fn docs_rule(folder: &Path) -> String {
+    format!(
+        "That folder, {}, is this chat's own and sits outside the project. When you write something \
+for the user to read or keep (notes, a write-up, a summary, a draft, a report, a doc), write it there as \
+a new markdown file named for what it holds (say, project-notes.md) instead of in the chat. It opens by itself as a tab \
+in the app's docs panel. Reply with one short line that links the file by its full path, written as \
+[name](<full path>) so spaces work; clicking it shows the tab. Never put such a write-up in \
+notes.md, even when the user calls it notes: notes.md is only for when they say to put something in \
+their notes (\"my notes\", \"your notes\" meaning theirs). In this app \"docs\", \"the docs\" and \"the docs panel\" mean these tabs, never an online docs \
+service, so \"put it in the docs\" means write it here. Answers, discussion and status updates stay in \
+the chat. Change a doc later with your edit tool, not shell commands. These files need no worktree. \
+When the user asks to save a doc to the project, write it into the project's docs/ folder (or wherever \
+the project clearly keeps docs), delete the old file, and keep editing the new one.",
+        folder.display()
     )
 }
 

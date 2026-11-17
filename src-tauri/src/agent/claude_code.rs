@@ -74,22 +74,45 @@ and do this before your first change, however you'd make it (edit tools or shell
 user approves or declines. Don't call it for a tiny one-off change, for questions, reviews or \
 planning, or once this chat already works in a worktree.";
 
+/// The claude.ai connector for Claude Docs, by its server name. Its own
+/// instructions tell Claude to make docs there, "not a local file, even when
+/// coding", so in this app it is turned off: docs are markdown files in the
+/// chat's folder, shown in the side panel. Only these chats' processes get
+/// this; Claude Code elsewhere keeps the connector.
+const CLAUDE_DOCS_SERVER: &str = "claude.ai Claude Docs";
+/// Its tools, and the skill that sends Claude to it. A skill can't be taken
+/// off the list, but calling it is refused.
+const CLAUDE_DOCS_DENY: [&str; 2] = ["mcp__claude_ai_Claude_Docs", "Skill(anthropic-skills:docs)"];
+
+/// Added to a main chat's instructions, with the chat folder's line: the skill
+/// is still listed, and this says it won't work here.
+const CLAUDE_DOCS_INSTRUCTION: &str = "Claude Docs isn't available in this app.";
+
 /// Settings for every main chat launch. Makes Claude Code's own worktree tool
 /// always ask, in every mode, so the request reaches the app instead of Claude
 /// Code making a worktree inside the repo by itself (tested on CLI 2.1.322:
 /// without this it doesn't ask). The app's own tools, if any, never ask, nor
-/// do writes to the chat's notes file: `Edit(//<absolute path>)` covers Write
-/// and Edit (tested on CLI 2.1.322 in default mode, path with a space).
+/// do writes to the chat's folder (its notes and docs): `Edit(//<absolute
+/// path>/**)` covers Write and Edit (tested on CLI 2.1.322 in default mode,
+/// path with a space, for the notes file alone). Claude Docs is turned off:
+/// `deniedMcpServers` drops the server, its tools and its instructions, while
+/// other claude.ai connectors stay; a deny rule alone hid the tools but left
+/// the instructions (tested on CLI 2.1.325; the connectors load after the
+/// first message).
 fn launch_settings(tools: &[AppTools], notes: Option<&Path>) -> String {
-    let mut permissions = json!({ "ask": ["EnterWorktree"] });
+    let mut permissions = json!({ "ask": ["EnterWorktree"], "deny": CLAUDE_DOCS_DENY });
     let mut allow: Vec<String> = tools.iter().map(|t| format!("mcp__{}", t.server)).collect();
-    if let Some(notes) = notes {
-        allow.push(format!("Edit(/{})", notes.display()));
+    if let Some(folder) = notes.and_then(Path::parent) {
+        allow.push(format!("Edit(/{}/**)", folder.display()));
     }
     if !allow.is_empty() {
         permissions["allow"] = json!(allow);
     }
-    json!({ "permissions": permissions }).to_string()
+    json!({
+        "permissions": permissions,
+        "deniedMcpServers": [{ "serverName": CLAUDE_DOCS_SERVER }],
+    })
+    .to_string()
 }
 
 /// Declares the app's own tools as an in-process ("sdk") MCP server: Claude
@@ -164,6 +187,8 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
         args.extend(notes_access(notes));
         instructions.push_str("\n\n");
         instructions.push_str(&notes_instruction(notes, true));
+        instructions.push(' ');
+        instructions.push_str(CLAUDE_DOCS_INSTRUCTION);
     }
     // Per launch: a resumed session does not remember it.
     args.extend(["--append-system-prompt".to_string(), instructions]);
@@ -1586,12 +1611,29 @@ mod tests {
 
         let main = launch_args(&opts(None));
         let settings: Value = serde_json::from_str(&arg_after(&main, "--settings").unwrap()).unwrap();
-        assert_eq!(settings["permissions"]["allow"], json!(["Edit(//data/notes/chat-1/notes.md)"]));
-        assert!(arg_after(&main, "--append-system-prompt").unwrap().contains("Write to it when they ask"));
+        assert_eq!(settings["permissions"]["allow"], json!(["Edit(//data/notes/chat-1/**)"]));
+        let prompt = arg_after(&main, "--append-system-prompt").unwrap();
+        assert!(prompt.contains("Write to it when they ask"));
+        assert!(prompt.contains("That folder, /data/notes/chat-1, is this chat's own"));
+        assert!(prompt.contains("\"put it in the docs\" means write it here"));
+        assert!(prompt.contains(CLAUDE_DOCS_INSTRUCTION));
 
         let side = launch_args(&opts(Some(SideOptions::default())));
         assert!(arg_after(&side, "--settings").is_none());
-        assert!(arg_after(&side, "--append-system-prompt").unwrap().contains("Don't write to it."));
+        let prompt = arg_after(&side, "--append-system-prompt").unwrap();
+        assert!(prompt.contains("Don't write to it."));
+        assert!(!prompt.contains("That folder"), "a side chat can't write docs");
+        assert!(!prompt.contains(CLAUDE_DOCS_INSTRUCTION));
+    }
+
+    #[test]
+    fn claude_docs_is_off_in_every_main_chat() {
+        for (tools, notes) in [(Vec::new(), None), (vec![echo_tools()], Some(Path::new("/data/notes/c/notes.md")))] {
+            let settings: Value = serde_json::from_str(&launch_settings(&tools, notes)).unwrap();
+            assert_eq!(settings["deniedMcpServers"], json!([{ "serverName": "claude.ai Claude Docs" }]));
+            assert_eq!(settings["permissions"]["deny"], json!(CLAUDE_DOCS_DENY));
+            assert_eq!(settings["permissions"]["ask"], json!(["EnterWorktree"]));
+        }
     }
 
     #[test]

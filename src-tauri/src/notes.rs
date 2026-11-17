@@ -1,7 +1,9 @@
 //! Each chat's notes: a markdown file the user writes in the side panel, kept
 //! next to the chat's images in the app's data folder (never in the repo). The
 //! agent is told where it is and may read it (see `SpawnOptions::notes`); it
-//! goes to the trash with its chat and is deleted with it for good.
+//! goes to the trash with its chat and is deleted with it for good. The same
+//! folder holds the docs agents write for the chat (see `docs_rule`), which
+//! go with it too unless saved to the project (`docs::save_to_project`).
 
 use std::collections::HashSet;
 use std::path::PathBuf;

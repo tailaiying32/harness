@@ -1521,6 +1521,54 @@ read-only.
   Code) and marks the model as picked: since new chats take the project's
   last pick, tests had been running on Cursor.
 
+**Docs in the chat folder** (2026-11-16, branch `harness/docs-in-harness-98cbdf`).
+Asking for notes, a write-up or "put it in the docs" used to make a Claude
+Doc on claude.ai: its connector tells Claude to make docs there "not a local
+file, even when coding", and Harness said nothing about its own panel.
+
+- **Every agent is told** (`docs_rule` in `agent/mod.rs`, part of the
+  writable `notes_instruction`, so Claude and Cursor get the same words):
+  write-ups go as a new markdown file in the chat's folder
+  (`notes/<chat id>/`, beside notes.md), named for what they hold, with a
+  one-line reply linking the file as `[name](<full path>)` (angle brackets so
+  the space in "Application Support" works; markdown-it encodes it and the
+  link opens the tab); never into notes.md unless the user says "my notes";
+  "docs" means these tabs, never an online service; edit with the edit tool;
+  no worktree needed; "save it to the project" means write it into the
+  project's `docs/`, delete the old file and keep editing the new one.
+  Answers and discussion stay in the chat.
+- **Claude Docs is off in Harness only** (`launch_settings`):
+  `deniedMcpServers: [{serverName: "claude.ai Claude Docs"}]` drops the
+  server, its tools and its instructions, while other claude.ai connectors
+  stay. A permission deny alone hid the tools but left the instructions
+  (tested on CLI 2.1.325; connectors load after the first message, so
+  probes need two turns). The docs skill can't be taken off the list;
+  `Skill(anthropic-skills:docs)` in `deny` refuses it, and Claude is told
+  "Claude Docs isn't available in this app."
+- **No card for the folder**: the allow rule is now `Edit(//<folder>/**)`
+  (was the notes file alone). Tested live (CLI 2.1.325, default mode,
+  folder with a space): docs and notes written with no prompt.
+- **A new chat-folder doc opens its tab at once** (`showNewChatDoc`), like
+  a plan; later edits to it, and markdown files elsewhere, don't switch tabs.
+- **Tabs from disk** (`Chat.isChatDoc`): an edit that doesn't carry the
+  text (Cursor's tools) still opens a tab for a chat-folder doc, read from
+  disk; turn end and reopening read them again, and one that is gone (saved
+  to the project, deleted) loses its tab.
+- **Save to project**: a chat-folder doc's tab has a "Save to project"
+  button at its foot, styled like Approve plan (grey while the agent works; one shared `button.primary` rule in `app.css` for every accent button). `save_doc_to_project`
+  (`docs::save_to_project`) copies it into `<chat root>/docs/` (the
+  worktree's when the chat has one), adding `-2`, `-3`… rather than
+  overwriting, and removes the original; never notes.md. The tab follows
+  the new path, and the agent is told with the next message.
+- **App notes**: things the window tells the agent with the next message
+  (`appNotes` → `send_message` → `with_app_notes` in `sessions.rs`), put in
+  front of the agent's text as "(From the app, not the user: …)". Not shown
+  or saved; lost if the app quits before the next message.
+- **Tested**: Rust tests; a live Claude run with the real launch args:
+  "write some short notes" made project-notes.md, "put X in my notes" went
+  to notes.md, "make it a Claude Doc" was turned down. Not tested live: the
+  button in the real window, Cursor's tab from disk.
+
 ### Terminal (`terminal.rs`, built 2026-11-15)
 
 Real shells in the side panel, for scratch work (finding things, a quick

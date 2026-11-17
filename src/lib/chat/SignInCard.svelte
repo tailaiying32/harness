@@ -57,9 +57,4 @@
     gap: 3ch;
     margin-top: 0.4em;
   }
-  .primary {
-    background: var(--accent);
-    color: var(--bg);
-    padding: 0 1ch;
-  }
 </style>

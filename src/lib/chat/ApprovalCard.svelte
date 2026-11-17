@@ -255,7 +255,7 @@
     gap: 0 3ch;
     margin-top: 0.4em;
   }
-  .actions button:hover {
+  .actions button:not(.primary):hover {
     color: var(--bright);
   }
   /* A rule can be long; keep it to one line. */
@@ -264,21 +264,5 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .primary {
-    background: var(--accent);
-    color: var(--bg);
-    padding: 0 1ch;
-  }
-  .actions .primary:hover {
-    color: var(--bg);
-  }
-  .primary:disabled {
-    background: var(--line);
-    color: var(--faint);
-    cursor: default;
-  }
-  .actions .primary:disabled:hover {
-    color: var(--faint);
   }
 </style>
