@@ -777,6 +777,10 @@ fn instructions(opts: &SpawnOptions) -> Option<String> {
     if let Some(notes) = &opts.notes {
         lines.push(super::notes_instruction(notes, opts.project_docs.as_deref(), true));
     }
+    // Cursor keeps no memory of its own, so it is told about the project's.
+    if let Some(memory) = &opts.memory {
+        lines.push(super::memory_instruction(memory));
+    }
     let lines: Vec<String> = lines.into_iter().filter(|l| !l.trim().is_empty()).collect();
     (!lines.is_empty()).then(|| format!("(Notes from the app you run in, not from the user.)\n{}", lines.join("\n")))
 }
@@ -1582,12 +1586,45 @@ mod tests {
             tools: Vec::new(),
             notes: Some("/data/notes/chat-1/notes.md".into()),
             project_docs: Some("/home/projects/-work/docs".into()),
+            memory: None,
         };
         let told = instructions(&opts).unwrap();
         assert!(told.contains("That folder, /data/notes/chat-1, is this chat's own"));
         assert!(told.contains("\"put it in the docs\" means write it here"));
         assert!(told.contains("write it into the project's docs folder, /home/projects/-work/docs,"));
         assert!(!told.contains("Claude Docs"), "only Claude has that connector");
+    }
+
+    #[test]
+    fn a_new_conversation_is_told_about_the_projects_memory() {
+        let dir = std::env::temp_dir().join(format!("harness-acp-memory-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index: String = (1..=250).map(|n| format!("- [Note {n}](n{n}.md) — fact {n}\n")).collect();
+        std::fs::write(dir.join("MEMORY.md"), index).unwrap();
+        let opts = |memory: Option<PathBuf>| SpawnOptions {
+            binary: "agent".into(),
+            project_path: "/work".into(),
+            resume_id: None,
+            mode: None,
+            model: None,
+            effort: None,
+            side: None,
+            tools: Vec::new(),
+            notes: None,
+            project_docs: None,
+            memory,
+        };
+        let told = instructions(&opts(Some(dir.clone()))).unwrap();
+        assert!(told.contains(&format!("This project has a shared memory in {}", dir.display())));
+        assert!(told.contains("frontmatter (`name`, `description`, and `metadata.type`"));
+        // The index as it is now, cut where Claude Code cuts its own.
+        assert!(told.contains("- [Note 200](n200.md) — fact 200") && !told.contains("Note 201"));
+
+        // No index yet: said so. No memory folder: nothing about memory.
+        std::fs::remove_file(dir.join("MEMORY.md")).unwrap();
+        assert!(instructions(&opts(Some(dir.clone()))).unwrap().ends_with("The index now:\n(empty)"));
+        assert!(instructions(&opts(None)).is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A connection with no process: what it writes and what it reports are kept.

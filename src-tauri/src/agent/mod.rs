@@ -84,6 +84,35 @@ pub struct SpawnOptions {
     /// The agent is told where it is and may read it, and a main chat may
     /// write it too.
     pub project_docs: Option<PathBuf>,
+    /// The memory folder of the chat's project, in the app's home folder:
+    /// one memory for every agent that works on the project. An agent with a
+    /// memory of its own is made to keep it there; one without is told where
+    /// it is and how a note is written (`memory_instruction`).
+    pub memory: Option<PathBuf>,
+}
+
+/// How many lines of the memory's index an agent is given.
+const MEMORY_INDEX_LINES: usize = 200;
+
+/// For an agent with no memory of its own: where the project's memory is,
+/// how a note is written, and what the index holds now. The format is the one
+/// Claude Code keeps, since it writes to the same folder.
+pub fn memory_instruction(folder: &Path) -> String {
+    let index = std::fs::read_to_string(folder.join("MEMORY.md")).unwrap_or_default();
+    let index: Vec<&str> = index.lines().take(MEMORY_INDEX_LINES).collect();
+    let index = match index.join("\n").trim() {
+        "" => "(empty)".to_string(),
+        text => text.to_string(),
+    };
+    format!(
+        "This project has a shared memory in {}, used by every agent that works on it. MEMORY.md there is \
+the index: one line per note, `- [Title](file.md) — what it's about`. Each note is one markdown file with \
+frontmatter (`name`, `description`, and `metadata.type`: user, feedback, project or reference) and then the \
+fact. When the user asks you to remember something, or you learn something that will matter in later chats, \
+write or update a note there and keep its line in MEMORY.md; look for a note that already covers it before \
+making a new one. Read a note when its line looks relevant. The index now:\n{index}",
+        folder.display()
+    )
 }
 
 /// Where the chat's notes are, for the agent's instructions. Read only when the

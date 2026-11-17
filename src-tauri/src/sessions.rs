@@ -469,6 +469,7 @@ impl SessionManager {
                         .unwrap_or_default(),
                     notes: notes_for(&inner.notes, session_id),
                     project_docs: project_docs_for(&inner.notes, session_id),
+                    memory: inner.notes.project_memory(session_id),
                 },
                 self.sink(session_id, run),
             );

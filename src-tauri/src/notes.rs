@@ -57,6 +57,12 @@ impl Notes {
         (self.project_of)(chat).map(|project| self.home.project_docs(&project))
     }
 
+    /// The memory folder of the chat's project, made and filled as
+    /// `Home::ensure_memory` does. None for a chat that doesn't exist yet.
+    pub fn project_memory(&self, chat: &str) -> Option<PathBuf> {
+        (self.project_of)(chat).and_then(|project| self.home.ensure_memory(&project))
+    }
+
     /// The chat's notes file. It may not exist yet.
     pub fn path(&self, chat: &str) -> Result<PathBuf, String> {
         Ok(self.folder(chat)?.join(FILE))

@@ -7,6 +7,7 @@
 //! ```text
 //! ~/.harness/
 //!   projects/<key>/docs/              the project's docs
+//!   projects/<key>/memory/            the project's memory, for every agent
 //!   projects/<key>/chats/<chat id>/   that chat's notes and its own docs
 //!   unsent/<chat id>/                 notes typed before a chat's first message
 //! ```
@@ -27,24 +28,38 @@ pub fn user_home() -> Option<PathBuf> {
 #[derive(Clone, Debug)]
 pub struct Home {
     root: PathBuf,
+    /// Claude Code's own project folders (`~/.claude/projects`), which hold
+    /// the memory it kept before the app gave it a place here. None in tests.
+    claude_projects: Option<PathBuf>,
 }
 
 impl Home {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self { root, claude_projects: None }
+    }
+
+    /// With Claude Code's own project folders at `dir`.
+    pub fn with_claude_projects(mut self, dir: PathBuf) -> Self {
+        self.claude_projects = Some(dir);
+        self
     }
 
     /// The folder to use: `HARNESS_HOME` when set; else, when the data folder
     /// was set by `HARNESS_DATA_DIR`, a folder inside it, so a test or a test
     /// copy of the app never touches the real one; else `~/.harness`.
     pub fn resolve(data_dir: &Path) -> Self {
-        if let Some(root) = std::env::var_os("HARNESS_HOME") {
-            return Self::new(PathBuf::from(root));
-        }
         let own_data = std::env::var_os("HARNESS_DATA_DIR").is_some();
-        match user_home().filter(|_| !own_data) {
-            Some(home) => Self::new(home.join(".harness")),
-            None => Self::new(data_dir.join("home")),
+        let home = match (std::env::var_os("HARNESS_HOME"), user_home().filter(|_| !own_data)) {
+            (Some(root), _) => Self::new(PathBuf::from(root)),
+            (None, Some(home)) => Self::new(home.join(".harness")),
+            (None, None) => Self::new(data_dir.join("home")),
+        };
+        let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| user_home().map(|home| home.join(".claude")));
+        match claude {
+            Some(claude) => home.with_claude_projects(claude.join("projects")),
+            None => home,
         }
     }
 
@@ -63,6 +78,31 @@ impl Home {
     /// The project's docs, shared by all its chats.
     pub fn project_docs(&self, project_path: &str) -> PathBuf {
         self.project(project_path).join("docs")
+    }
+
+    /// The project's memory: notes every agent that works on it keeps and
+    /// reads, one markdown file each, with `MEMORY.md` as the index.
+    pub fn project_memory(&self, project_path: &str) -> PathBuf {
+        self.project(project_path).join("memory")
+    }
+
+    /// Makes the project's memory folder and, the first time, fills it with
+    /// what Claude Code remembered for the project in its own folder
+    /// (`~/.claude/projects/<key>/memory`, the same key). Copied, never
+    /// moved, so Claude Code run outside the app keeps its own. Skipped once
+    /// the folder here has an index, so it is safe at every start of a chat.
+    pub fn ensure_memory(&self, project_path: &str) -> Option<PathBuf> {
+        let memory = self.project_memory(project_path);
+        std::fs::create_dir_all(&memory).ok()?;
+        if !memory.join("MEMORY.md").exists() {
+            let from = self.claude_projects.as_ref().map(|dir| dir.join(Self::key(project_path)).join("memory"));
+            if let Some(from) = from.filter(|from| from.join("MEMORY.md").is_file()) {
+                if let Err(e) = copy_folder(&from, &memory) {
+                    eprintln!("harness: couldn't copy the memory in {}: {e}", from.display());
+                }
+            }
+        }
+        Some(memory)
     }
 
     /// A chat's own folder: its notes and the docs written for it.
@@ -94,6 +134,22 @@ impl Home {
     }
 }
 
+/// Copies a folder's files and folders into another, which exists. A file
+/// already there is left as it is.
+fn copy_folder(from: &Path, to: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            copy_folder(&entry.path(), &target)?;
+        } else if !target.exists() {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +167,38 @@ mod tests {
         assert_eq!(home.project_docs("/w/app"), PathBuf::from("/h/projects/-w-app/docs"));
         assert_eq!(home.chat("/w/app", "c1"), PathBuf::from("/h/projects/-w-app/chats/c1"));
         assert_eq!(home.unsent("c1"), PathBuf::from("/h/unsent/c1"));
+        assert_eq!(home.project_memory("/w/app"), PathBuf::from("/h/projects/-w-app/memory"));
+    }
+
+    #[test]
+    fn a_projects_memory_starts_as_a_copy_of_what_claude_code_kept() {
+        let dir = std::env::temp_dir().join(format!("harness-home-test-{}", uuid::Uuid::new_v4()));
+        let theirs = dir.join("claude/projects/-w-app/memory");
+        std::fs::create_dir_all(theirs.join("more")).unwrap();
+        std::fs::write(theirs.join("MEMORY.md"), "- [A](a.md) — a fact").unwrap();
+        std::fs::write(theirs.join("a.md"), "the fact").unwrap();
+        std::fs::write(theirs.join("more/b.md"), "deeper").unwrap();
+        let home = Home::new(dir.join("home")).with_claude_projects(dir.join("claude/projects"));
+
+        let ours = home.ensure_memory("/w/app").unwrap();
+        assert_eq!(ours, dir.join("home/projects/-w-app/memory"));
+        assert_eq!(std::fs::read_to_string(ours.join("a.md")).unwrap(), "the fact");
+        assert_eq!(std::fs::read_to_string(ours.join("more/b.md")).unwrap(), "deeper");
+        // Copied, not moved.
+        assert!(theirs.join("a.md").is_file());
+
+        // Once there is an index here, theirs is not looked at again.
+        std::fs::write(ours.join("MEMORY.md"), "- [Ours](ours.md) — changed here").unwrap();
+        std::fs::write(theirs.join("later.md"), "written outside the app").unwrap();
+        home.ensure_memory("/w/app").unwrap();
+        assert_eq!(std::fs::read_to_string(ours.join("MEMORY.md")).unwrap(), "- [Ours](ours.md) — changed here");
+        assert!(!ours.join("later.md").exists());
+
+        // A project Claude Code kept nothing for gets an empty folder.
+        let empty = home.ensure_memory("/w/other").unwrap();
+        assert!(empty.is_dir() && std::fs::read_dir(&empty).unwrap().next().is_none());
+        // And with nowhere to look, the same.
+        assert!(Home::new(dir.join("bare")).ensure_memory("/w/app").unwrap().is_dir());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -155,6 +155,7 @@ impl SideChats {
                         tools: Vec::new(),
                         notes: notes_for(&self.0.notes, chat_id),
                         project_docs: project_docs_for(&self.0.notes, chat_id),
+                        memory: self.0.notes.project_memory(chat_id),
                     },
                     self.sink(side_id, run),
                 )?);

@@ -1713,9 +1713,38 @@ existed only on that worktree's branch.
   project has no tab until its link is clicked (Cursor's edits carry no
   text, and only chat-folder docs are read from disk for a tab). The Save to
   project button moves the tab for both agents.
+- **Project memory, for every agent** (2026-11-17, branch
+  `harness/home-memory-2cc4f2`): `projects/<key>/memory/`, one memory per
+  project (its main folder names it, so worktrees share it). Before this,
+  what Claude Code remembered was in its own folder and Cursor never saw it.
+  - **Claude Code keeps its own memory, moved.** `launch_settings` adds
+    `"autoMemoryDirectory": "<folder>"` to the JSON passed with `--settings`,
+    and an `Edit(//<folder>/**)` allow rule so a save shows no card. Nothing
+    is turned off and nothing is said in its instructions: it saves quietly
+    and loads `MEMORY.md` as before. A side chat gets the same setting
+    (`memory_settings`). Tested on CLI 2.1.326: a new chat read the index
+    there, saved a note there, and a resumed chat followed the setting.
+  - **Cursor has no memory of its own**, so a fresh conversation's intro
+    carries `memory_instruction` (`agent/mod.rs`): where the folder is, that
+    `MEMORY.md` is the index (one line per note), that a note is one
+    markdown file with frontmatter (`name`, `description`,
+    `metadata.type`), when to write one, and the index as it is now (its
+    first 200 lines, as Claude Code cuts its own). Any other agent without
+    a memory can be told the same way; one that lets its memory be moved
+    should be pointed at the folder instead.
+  - **What Claude Code already remembered is copied in once**
+    (`Home::ensure_memory`, when a chat's process starts): from
+    `~/.claude/projects/<key>/memory/` (the same key) when the folder here
+    has no `MEMORY.md` yet. Copied, never moved, so Claude Code run outside
+    the app keeps its own, and from then on the two differ.
+  - **Tested** in a test copy: Claude Code saved a fact and a new Claude
+    chat recalled it; a Cursor (GPT) chat recalled it, then saved another as
+    a note with frontmatter and an index line; a Claude chat started after
+    that recalled both.
 - **Not covered yet:** a project folder that is moved or renamed keeps its
-  old `<key>`; shared memory and preferences (planned next, in this folder);
-  a list of a project's docs in the app; syncing between machines.
+  old `<key>`; preferences for every agent (planned next, in this folder);
+  a list of a project's docs or a view of its memory in the app; memory
+  shared across projects; syncing between machines.
 
 ### Terminal (`terminal.rs`, built 2026-11-15)
 
