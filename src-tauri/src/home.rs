@@ -131,6 +131,64 @@ impl Home {
         Some(memory)
     }
 
+    /// A project's folder moved or was renamed: what is kept for it here
+    /// goes to its new name. When that name already holds a project (the
+    /// user had started chats in the new folder), the two are merged: chat
+    /// folders move across, docs move across with `-2`, `-3`... on a name
+    /// clash, and a memory that can't simply move in is kept whole as
+    /// `memory/from-<old key>/` with one line in the index pointing at it.
+    pub fn move_project(&self, from: &str, to: &str) {
+        let (old, new) = (self.project(from), self.project(to));
+        if old == new || !old.is_dir() {
+            return;
+        }
+        if !new.exists() {
+            if let Some(parent) = new.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if std::fs::rename(&old, &new).is_ok() {
+                return;
+            }
+        }
+        let entries = |dir: PathBuf| -> Vec<PathBuf> {
+            std::fs::read_dir(dir).map(|found| found.flatten().map(|e| e.path()).collect()).unwrap_or_default()
+        };
+        let _ = std::fs::create_dir_all(new.join("chats"));
+        for chat in entries(old.join("chats")) {
+            if let Some(name) = chat.file_name() {
+                let _ = std::fs::rename(&chat, new.join("chats").join(name));
+            }
+        }
+        let _ = std::fs::create_dir_all(new.join("docs"));
+        for doc in entries(old.join("docs")) {
+            let _ = std::fs::rename(&doc, free_name(&new.join("docs"), &doc));
+        }
+        let (theirs, ours) = (old.join("memory"), new.join("memory"));
+        if theirs.is_dir() {
+            if entries(ours.clone()).is_empty() {
+                let _ = std::fs::remove_dir(&ours);
+                let _ = std::fs::rename(&theirs, &ours);
+            } else {
+                let kept = format!("from{}", Self::key(from));
+                if std::fs::rename(&theirs, ours.join(&kept)).is_ok() {
+                    let line = format!(
+                        "- [Memory from the old folder]({kept}/MEMORY.md) — notes saved before the project moved\n"
+                    );
+                    let mut index = std::fs::read_to_string(ours.join("MEMORY.md")).unwrap_or_default();
+                    if !index.is_empty() && !index.ends_with('\n') {
+                        index.push('\n');
+                    }
+                    let _ = std::fs::write(ours.join("MEMORY.md"), index + &line);
+                }
+            }
+        }
+        // Whatever is left is empty folders; anything else stays where it is.
+        for folder in ["chats", "docs", "memory"] {
+            let _ = std::fs::remove_dir(old.join(folder));
+        }
+        let _ = std::fs::remove_dir(&old);
+    }
+
     /// A chat's own folder: its notes and the docs written for it.
     pub fn chat(&self, project_path: &str, chat: &str) -> PathBuf {
         self.project(project_path).join("chats").join(chat)
@@ -158,6 +216,17 @@ impl Home {
             .filter_map(|path| Some((path.file_name()?.to_string_lossy().into_owned(), path)))
             .collect()
     }
+}
+
+/// Where `file` can go in `folder` without replacing anything: under its own
+/// name, or with `-2`, `-3`... before the extension.
+fn free_name(folder: &Path, file: &Path) -> PathBuf {
+    let stem = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = file.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    (1..)
+        .map(|n| folder.join(if n == 1 { format!("{stem}{ext}") } else { format!("{stem}-{n}{ext}") }))
+        .find(|path| !path.exists())
+        .expect("an unused name")
 }
 
 /// Copies a folder's files and folders into another, which exists. A file
@@ -194,6 +263,50 @@ mod tests {
         assert_eq!(home.chat("/w/app", "c1"), PathBuf::from("/h/projects/-w-app/chats/c1"));
         assert_eq!(home.unsent("c1"), PathBuf::from("/h/unsent/c1"));
         assert_eq!(home.project_memory("/w/app"), PathBuf::from("/h/projects/-w-app/memory"));
+    }
+
+    #[test]
+    fn what_is_kept_for_a_project_follows_its_folder() {
+        let dir = std::env::temp_dir().join(format!("harness-home-test-{}", uuid::Uuid::new_v4()));
+        let home = Home::new(dir.clone());
+        let put = |path: PathBuf, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let read = |path: PathBuf| std::fs::read_to_string(path).unwrap();
+        put(home.chat("/w/old", "c1").join("notes.md"), "c1 notes");
+        put(home.project_docs("/w/old").join("plan.md"), "old plan");
+        put(home.project_memory("/w/old").join("MEMORY.md"), "- [A](a.md) — old fact\n");
+
+        // A plain move: the folder is renamed.
+        home.move_project("/w/old", "/w/new");
+        assert!(!home.project("/w/old").exists());
+        assert_eq!(read(home.chat("/w/new", "c1").join("notes.md")), "c1 notes");
+        assert_eq!(read(home.project_docs("/w/new").join("plan.md")), "old plan");
+        assert_eq!(read(home.project_memory("/w/new").join("MEMORY.md")), "- [A](a.md) — old fact\n");
+
+        // Onto a project that is already there: the two are merged.
+        put(home.chat("/w/new", "c2").join("notes.md"), "c2 notes");
+        put(home.project_docs("/w/merged").join("plan.md"), "their plan");
+        put(home.project_memory("/w/merged").join("MEMORY.md"), "- [B](b.md) — their fact");
+        put(home.chat("/w/merged", "c3").join("notes.md"), "c3 notes");
+        home.move_project("/w/new", "/w/merged");
+        assert!(!home.project("/w/new").exists());
+        for (chat, notes) in [("c1", "c1 notes"), ("c2", "c2 notes"), ("c3", "c3 notes")] {
+            assert_eq!(read(home.chat("/w/merged", chat).join("notes.md")), notes);
+        }
+        let docs = home.project_docs("/w/merged");
+        assert_eq!((read(docs.join("plan.md")), read(docs.join("plan-2.md"))), ("their plan".into(), "old plan".into()));
+        let memory = home.project_memory("/w/merged");
+        assert_eq!(
+            read(memory.join("MEMORY.md")),
+            "- [B](b.md) — their fact\n- [Memory from the old folder](from-w-new/MEMORY.md) — notes saved before the project moved\n"
+        );
+        assert_eq!(read(memory.join("from-w-new/MEMORY.md")), "- [A](a.md) — old fact\n");
+
+        // Nothing kept for the old folder: nothing to do.
+        home.move_project("/w/never", "/w/merged");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

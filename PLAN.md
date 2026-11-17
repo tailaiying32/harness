@@ -26,7 +26,9 @@ Added 2026-11-17 (branch `harness/harness-home-2cc4f2`): what chats write
 for the user to read lives in one folder in the home directory, `~/.harness`,
 split by project: each project's docs, shared by all its chats and
 worktrees, and each chat's own notes and docs. Nothing is saved into a repo
-unless the user asks for exactly that. See "The home folder".
+unless the user asks for exactly that. The same folder holds each project's
+memory and the user's preferences, for every agent, and all of it follows a
+project whose folder is moved or renamed. See "The home folder".
 
 Status, 2026-11-13: steps 1 to 5 of "Order of work" are built. Images
 (paste, drop, tool images, a full-space image view) were added 2026-11-14;
@@ -1772,10 +1774,85 @@ existed only on that worktree's branch.
     the word pineapple"): Claude Code and Cursor (GPT) both followed it on
     every message, and Cursor's chat title was still about the user's
     message.
-- **Not covered yet:** a project folder that is moved or renamed keeps its
-  old `<key>`; a list of a project's docs, a view of its memory or a
-  preferences editor in the app; memory shared across projects; syncing
-  between machines.
+- **A project folder that moved or was renamed** (2026-11-17, branch
+  `harness/home-moved-project-2cc4f2`). Before this, everything a project
+  kept was tied to its folder's path as text, nothing could change that
+  path, and a message to a chat of a missing folder failed with "Not a
+  folder".
+  - **What is tied to the path:** `projects.path` (chats point at the
+    project by id, so they follow); `terminals.project` and `.folder` and the
+    live tabs; each chat's saved worktree (`repo_root`, `subpath`) and git's
+    own links between the repo and its worktrees; `~/.harness/projects/<key>`;
+    the window's `foldedProjects`, `projectOrder` and `projectModels`; and
+    paths inside saved events, which are history and are not rewritten.
+  - **Noticing.** The `sidebar` command marks a project `missing` when its
+    folder is gone (`sessions::folder_gone`: not a folder, and not on a
+    `/Volumes/<name>` that isn't connected, which shows as it always did).
+    The sidebar draws a missing project faint with a `locate` text button
+    where `+` was; its chats still open.
+  - **The move** (`SessionManager::relocate_project(from, to)`, command
+    `relocate_project`). Refused when the two are the same, `to` isn't a
+    folder, `from` is still there, or `from` isn't a project. Then, in
+    order: the store, in one transaction (`Store::relocate_project`: rename
+    the project row, or when `to` is already a project move the chats to it
+    and delete the old row; add `from` to `projects.former_paths`; re-point
+    the terminal tabs, after the target's own when merging; rewrite each
+    chat's saved worktree for the new repo root; leave every chat the
+    pending note "This project's folder moved from … to …"); close each
+    chat's process and wait for it (it resumes on the next message); forget
+    cached repo roots; `git worktree repair` in the new root, which relinks
+    every worktree (a failure is logged, and such a chat falls back to the
+    main folder as before); drop the folder's GitHub cache
+    (`github::forget_under`); `Home::move_project`; re-key live terminal
+    tabs (`Terminals::project_moved`; running shells are left alone). The
+    command also ends the moved chats' side chats.
+  - **The home folder follows** (`Home::move_project`): a rename when the
+    new key has no folder. Otherwise a merge: chat folders move across, docs
+    move with `-2`… on a name clash, and memory moves in whole when the
+    target has none, else as `memory/from<old key>/` with one line added to
+    the target's `MEMORY.md`.
+  - **By hand:** `locate` opens the folder picker at the old folder's parent
+    and calls the command; an error shows in the sidebar's problem line.
+  - **By itself, when certain** (`find_moved`, in `send_inner` for a first
+    message in a folder the store has never seen): a missing project matches
+    when the newest of its chats with a `start_commit` names a commit that
+    exists in the new folder (`worktree::has_commit`, `git cat-file -e`).
+    Exactly one match is followed, and the new chat records `ProjectMoved
+    { from, to }`, drawn as a faint line. None or several: nothing happens.
+    Projects on an unconnected drive are never candidates. It costs nothing
+    unless some project is missing.
+  - **The window.** `moveProjectPrefs` swaps the old path for the new in the
+    three saved settings before the sidebar prunes paths it no longer sees.
+    An open chat takes its row's new `project_path` on the next refresh.
+    `SessionRow.former_paths` lets `Chat.currentPath` map a path under an
+    old project folder to the same file under the new one, so doc tabs
+    rebuilt from history and links in old messages open. Worktree chats'
+    paths are under the worktree folder, which doesn't move.
+  - **Tested:** Rust tests on real git repos (a renamed repo with a chat in
+    a worktree: chats, terminals, home folder and worktree all follow and
+    git works in the worktree; following by itself; two missing clones of
+    one repo and a folder that isn't a repo are not followed; a merge; an
+    unconnected drive), and the preview page (the missing row, `locate`,
+    the saved order). In a test copy, on a scratch repo with three chats
+    (Claude Code in the main folder, Cursor (GPT), Claude Code in a
+    worktree) that was then renamed: a new chat in the renamed folder
+    brought the project along by itself, and each old chat, sent a message,
+    carried on its own conversation (it recalled a word from before the
+    rename) from the new folder or its worktree; the terminal tab, the docs,
+    the memory and the chat folders were under the new path. Claude Code
+    finds a conversation by its id whatever folder it was started in (CLI
+    2.1.326). Not tried in the real window: the `locate` button itself.
+  - **The cleanup pass leaves a missing repo alone** (`sweep`): a chat whose
+    worktree's repo isn't a folder is skipped. Found in that test: with the
+    repo gone every git question fails, and for a put-away worktree a
+    failure was read as "its branch was deleted outside the app", so the
+    chat forgot its branch and could not bring its folder back once the
+    project was pointed at. The same held for a repo on an unplugged drive.
+- **Not covered yet:** following a moved folder that isn't a git repo
+  without a click (there is nothing to recognise it by); noticing a move
+  the moment it happens (it is seen the next time projects are listed); a
+  list of a project's docs, a view of its memory or a preferences editor in
+  the app; memory shared across projects; syncing between machines.
 
 ### Terminal (`terminal.rs`, built 2026-11-15)
 

@@ -9,6 +9,8 @@ import {
   keepAwakeState,
   listTrash,
   loadSession,
+  pickFolder,
+  relocateProject,
   renameSession,
   restoreChat,
   sidebar,
@@ -20,7 +22,7 @@ import {
   type SessionState,
 } from "../ipc";
 import { loadCachedModels, modeFor, startingModel } from "../models";
-import { loadPrefs, savePrefs } from "../themes";
+import { loadPrefs, moveProjectPrefs, savePrefs } from "../themes";
 import { Chat } from "./chat.svelte";
 import { CLAUDE, type AgentId } from "../ipc";
 
@@ -141,6 +143,8 @@ export class AppState {
       this.keepAwake = event.mode && event.ends_at ? { mode: event.mode, ends_at: event.ends_at } : null;
       return;
     }
+    // A chat started in a moved project's new folder brought the project along.
+    if (event.kind === "project_moved") this.projectMoved(event.from, event.to);
     // A side chat's events belong to it alone: no sidebar mark, no usage reading.
     const side = id.indexOf("#side-");
     if (side > 0) {
@@ -208,6 +212,35 @@ export class AppState {
     for (const row of [...this.projects.flatMap((p) => p.sessions), ...this.trash]) {
       this.chats.get(row.id)?.syncRow(row);
     }
+  }
+
+  /** The last project whose folder moved, for the sidebar to swap what it keeps by path. */
+  moved = $state<{ from: string; to: string } | null>(null);
+
+  /** A project's folder moved: what the window keeps by its path follows. */
+  private projectMoved(from: string, to: string): void {
+    moveProjectPrefs(from, to);
+    this.moved = { from, to };
+    // A new chat not sent yet has no row to follow; saved ones do at the next refresh.
+    for (const chat of this.chats.values()) if (chat.projectPath.trim() === from) chat.projectPath = to;
+  }
+
+  /**
+   * A project's folder is gone (moved or renamed): asks where it is now, and
+   * has everything kept for it follow.
+   */
+  async locate(from: string): Promise<void> {
+    const picked = await pickFolder(from.replace(/[\\/][^\\/]*[\\/]?$/, "") || undefined);
+    if (!picked) return;
+    this.problem = "";
+    try {
+      await relocateProject(from, picked);
+    } catch (e) {
+      this.problem = String(e);
+      return;
+    }
+    this.projectMoved(from, picked);
+    await this.refresh();
   }
 
   /**

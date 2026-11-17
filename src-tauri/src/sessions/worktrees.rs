@@ -552,6 +552,12 @@ impl SessionManager {
             let (Some(wt), Some(status)) = (followed.or(row.worktree.clone()), row.status.clone()) else {
                 continue;
             };
+            // A repo that isn't there (its folder moved, or its drive is
+            // unplugged) says nothing about the branch. Leave the chat as it
+            // is for when the repo is back.
+            if !wt.repo_root.is_dir() {
+                continue;
+            }
             // Not while a message is starting this chat (it may be restoring).
             let _starting = self.0.start_lock.lock().await;
             if self.is_live(&id) {

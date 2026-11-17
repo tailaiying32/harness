@@ -146,6 +146,13 @@ let projects: ProjectRow[] = [
       row("long", `${home}/code/a-rather-long-folder-name/website`, "A very long chat (300 turns)", 3000),
     ],
   },
+  // A project whose folder was moved or renamed: dim, with "locate" to point at where it is now.
+  {
+    id: "p3",
+    path: `${home}/code/old-notes-app`,
+    missing: true,
+    sessions: [row("moved", `${home}/code/old-notes-app`, "Sync notes between devices", 9000)],
+  },
 ];
 
 const text = (message_id: string, body: string): AgentEvent => ({
@@ -753,7 +760,9 @@ const commands: Record<string, (args: Args) => unknown> = {
   autotest: () => null,
   "plugin:path|resolve_directory": () => home,
   // Only the skill file picker answers, so the folder picker stays a cancel.
-  "plugin:dialog|open": (args) => (args.options?.filters ? "/Users/you/Downloads/pr-to-video.zip" : null),
+  // A zip for an import; a folder for "locate" (the only folder picker asked for one from a start folder).
+  "plugin:dialog|open": (args) =>
+    args.options?.filters ? "/Users/you/Downloads/pr-to-video.zip" : args.options?.directory ? `${home}/code/notes-app` : null,
   "plugin:opener|open_url": () => undefined,
   "plugin:opener|reveal_item_in_dir": () => undefined,
   // Dropped files. `__drop([...paths])` in the console stands in for a drop.
@@ -846,6 +855,18 @@ const commands: Record<string, (args: Args) => unknown> = {
     );
   },
   write_doc: (args: Args) => void docsByPath.set(String(args.path), String(args.text)),
+  relocate_project: (args: Args) => {
+    const at = projects.findIndex((p) => p.path === args.from);
+    if (at < 0) throw "That folder isn't one of the projects.";
+    // New rows, as the core's next listing would be: the window's own copy is
+    // left alone until it asks again.
+    const sessions = projects[at].sessions.map((session) => ({
+      ...session,
+      former_paths: [...(session.former_paths ?? []), String(args.from)],
+      project_path: String(args.to),
+    }));
+    projects = projects.map((p, i) => (i === at ? { ...p, path: String(args.to), missing: false, sessions } : p));
+  },
   save_doc_to_project: (args: Args) => {
     const from = String(args.path);
     const to = `${projectHome(String(args.project))}/docs/${from.split("/").pop()}`;

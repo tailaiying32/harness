@@ -356,6 +356,9 @@ export class Chat {
   }
   /** Takes the saved row's worktree details (they change outside the chat's events). */
   syncRow(row: SessionRow): void {
+    // The project's folder may have been moved or renamed since.
+    if (row.project_path) this.projectPath = row.project_path;
+    this.formerPaths = row.former_paths ?? [];
     this.agent = row.agent ?? CLAUDE;
     this.workPath = row.work_path;
     this.branch = row.branch;
@@ -660,6 +663,12 @@ export class Chat {
    */
   private folder = "";
 
+  /**
+   * Where the project's folder used to be, when it was moved or renamed.
+   * The chat's history may still name files there.
+   */
+  private formerPaths: string[] = [];
+
   /** Whether a path is in the chat's own folder, as named now or before it moved. */
   private inOwnFolder(path: string): boolean {
     const p = path.replace(/\\/g, "/");
@@ -732,6 +741,14 @@ export class Chat {
   private currentPath(path: string): string {
     const old = path.replace(/\\/g, "/").split(`/notes/${this.sessionId}/`);
     if (this.folder && old.length > 1 && !path.startsWith(this.folder)) path = `${this.folder}/${old.slice(1).join(`/notes/${this.sessionId}/`)}`;
+    // A file in the project's folder before it moved is in the folder now.
+    for (const former of this.formerPaths) {
+      const rest = path.startsWith(former) ? path.slice(former.length) : null;
+      if (rest !== null && (rest === "" || /^[\\/]/.test(rest))) {
+        path = this.projectPath.replace(/[\\/]+$/, "") + rest;
+        break;
+      }
+    }
     for (let i = 0; i < 10 && this.savedTo.has(path); i++) path = this.savedTo.get(path)!;
     return path;
   }
@@ -1166,6 +1183,10 @@ export class Chat {
 
       case "worktree_changed":
         this.push({ type: "note", text: worktreeNote(event.status, event.branch) });
+        break;
+
+      case "project_moved":
+        this.push({ type: "note", text: `this project's folder moved here from ${event.from}; its chats and docs came along` });
         break;
 
       case "prs_changed":

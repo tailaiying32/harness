@@ -588,6 +588,7 @@ mod tests {
             prs: Vec::new(),
             trashed_at: None,
             agent: "claude-code".into(),
+            former_paths: Vec::new(),
         }
     }
 

@@ -48,6 +48,9 @@ pub struct SessionRow {
     /// The agent the chat runs on ("claude-code", "cursor"). Set when the
     /// chat is made and never changed.
     pub agent: String,
+    /// Where the project's folder used to be, oldest first, when it was moved
+    /// or renamed: paths in the chat's history may still name these.
+    pub former_paths: Vec<String>,
 }
 
 /// Everything about a chat's git state, for the session manager and the sweep.
@@ -96,6 +99,9 @@ pub struct ProjectRow {
     pub id: String,
     pub path: String,
     pub sessions: Vec<SessionRow>,
+    /// The folder is gone: moved, renamed or on a drive that isn't there.
+    /// The store doesn't look; the command that lists projects fills it in.
+    pub missing: bool,
 }
 
 pub fn now_ms() -> i64 {
@@ -134,7 +140,7 @@ fn title_from(text: &str) -> String {
 }
 
 const SESSION_COLUMNS: &str = "s.id, p.path, s.title, s.mode, s.model, s.agent_session_id, \
-     s.last_used_at, s.wt, s.wt_status, s.prs, s.trashed_at, s.effort, s.agent";
+     s.last_used_at, s.wt, s.wt_status, s.prs, s.trashed_at, s.effort, s.agent, p.former_paths";
 
 /// A JSON column read leniently: unreadable means absent.
 fn json_col<T: serde::de::DeserializeOwned>(row: &rusqlite::Row, i: usize) -> rusqlite::Result<Option<T>> {
@@ -161,6 +167,7 @@ fn session_from(row: &rusqlite::Row) -> rusqlite::Result<SessionRow> {
         trashed_at: row.get(10)?,
         effort: row.get(11)?,
         agent: row.get(12)?,
+        former_paths: json_col(row, 13)?.unwrap_or_default(),
     })
 }
 
@@ -230,7 +237,25 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             }
         }
     }
+    // Where a project's folder used to be: a JSON list of paths, oldest first.
+    let has_former: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('projects') WHERE name = 'former_paths'")
+        .map_err(err)?
+        .exists([])
+        .map_err(err)?;
+    if !has_former {
+        conn.execute_batch("ALTER TABLE projects ADD COLUMN former_paths TEXT")
+            .map_err(err)?;
+    }
     Ok(())
+}
+
+/// `path` with the folder `from` at its start swapped for `to`: the same file
+/// after its folder moved. None when it isn't in that folder.
+pub fn swap_root(path: &str, from: &str, to: &str) -> Option<String> {
+    let from = from.trim_end_matches(['/', '\\']);
+    let rest = path.strip_prefix(from)?;
+    (rest.is_empty() || rest.starts_with(['/', '\\'])).then(|| format!("{}{rest}", to.trim_end_matches(['/', '\\'])))
 }
 
 /// The search index over what was said in every chat (`chat_text`): one row
@@ -464,6 +489,7 @@ impl Store {
                     id: row.get(0)?,
                     path: row.get(1)?,
                     sessions: Vec::new(),
+                    missing: false,
                 })
             })
             .map_err(err)?
@@ -628,6 +654,133 @@ impl Store {
             .collect::<Result<_, _>>()
             .map_err(err);
         rows
+    }
+
+    /// Whether a folder is a project already.
+    pub fn has_project(&self, path: &str) -> Result<bool, String> {
+        self.conn
+            .lock()
+            .unwrap()
+            .prepare("SELECT 1 FROM projects WHERE path = ?1")
+            .map_err(err)?
+            .exists([path])
+            .map_err(err)
+    }
+
+    /// Every project's folder, with the commit its repo was on when the
+    /// newest of its chats that noted one began. A folder holding that commit
+    /// is the same repo: how a moved project is recognised.
+    pub fn project_commits(&self) -> Result<Vec<(String, Option<String>)>, String> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .prepare(
+                "SELECT p.path, (SELECT s.start_commit FROM sessions s
+                                 WHERE s.project_id = p.id AND s.start_commit IS NOT NULL
+                                 ORDER BY s.last_used_at DESC LIMIT 1)
+                 FROM projects p",
+            )
+            .map_err(err)?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err);
+        rows
+    }
+
+    /// Re-points a project whose folder moved from `from` to `to`, and
+    /// everything kept by that path: its chats (by joining the project
+    /// already at `to`, if there is one), its saved terminal tabs, and each
+    /// chat's worktree record (`repo`: the repo `to` is in and its place in
+    /// it, when it is in one). `from` is added to the folders the project
+    /// used to be at, and each chat's agent is left a note for its next
+    /// message. Returns the moved chats' IDs.
+    pub fn relocate_project(&self, from: &str, to: &str, repo: Option<(&Path, &str)>) -> Result<Vec<String>, String> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction().map_err(err)?;
+        let found = |path: &str| -> Result<Option<(String, Vec<String>)>, String> {
+            tx.query_row("SELECT id, former_paths FROM projects WHERE path = ?1", [path], |row| {
+                Ok((row.get::<_, String>(0)?, json_col::<Vec<String>>(row, 1)?.unwrap_or_default()))
+            })
+            .optional()
+            .map_err(err)
+        };
+        let (from_id, mut former) = found(from)?.ok_or("That folder isn't one of the projects.")?;
+        former.push(from.to_string());
+        let chats: Vec<(String, Option<Worktree>)> = tx
+            .prepare("SELECT id, wt FROM sessions WHERE project_id = ?1")
+            .map_err(err)?
+            .query_map([&from_id], |row| Ok((row.get(0)?, json_col(row, 1)?)))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+
+        // The project: renamed, or folded into the one already at the new place.
+        let kept = match found(to)? {
+            Some((to_id, mut theirs)) => {
+                tx.execute("UPDATE sessions SET project_id = ?1 WHERE project_id = ?2", params![to_id, from_id])
+                    .map_err(err)?;
+                tx.execute("DELETE FROM projects WHERE id = ?1", [&from_id]).map_err(err)?;
+                theirs.extend(former);
+                former = theirs;
+                to_id
+            }
+            None => {
+                tx.execute("UPDATE projects SET path = ?1 WHERE id = ?2", params![to, from_id])
+                    .map_err(err)?;
+                from_id
+            }
+        };
+        former.retain(|path| path != to);
+        former.dedup();
+        tx.execute(
+            "UPDATE projects SET former_paths = ?1, last_used_at = ?2 WHERE id = ?3",
+            params![serde_json::to_string(&former).map_err(|e| e.to_string())?, now_ms(), kept],
+        )
+        .map_err(err)?;
+
+        // Its terminal tabs, after any the new place already has.
+        let next: i64 = tx
+            .query_row("SELECT coalesce(max(position) + 1, 0) FROM terminals WHERE project = ?1", [to], |r| r.get(0))
+            .map_err(err)?;
+        let tabs: Vec<(String, String)> = tx
+            .prepare("SELECT id, folder FROM terminals WHERE project = ?1 ORDER BY position")
+            .map_err(err)?
+            .query_map([from], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(err)?
+            .collect::<Result<_, _>>()
+            .map_err(err)?;
+        for (at, (id, folder)) in tabs.iter().enumerate() {
+            let folder = swap_root(folder, from, to).unwrap_or_else(|| folder.clone());
+            tx.execute(
+                "UPDATE terminals SET project = ?1, folder = ?2, position = ?3 WHERE id = ?4",
+                params![to, folder, next + at as i64, id],
+            )
+            .map_err(err)?;
+        }
+
+        // Each chat: its worktree's repo, and a word for its agent.
+        let note = format!(
+            "This project's folder moved from {from} to {to}. Paths under the old folder are now under the new one."
+        );
+        for (id, worktree) in &chats {
+            if let (Some(mut worktree), Some((root, subpath))) = (worktree.clone(), repo) {
+                worktree.repo_root = root.to_path_buf();
+                worktree.subpath = subpath.to_string();
+                let json = serde_json::to_string(&worktree).map_err(|e| e.to_string())?;
+                tx.execute("UPDATE sessions SET wt = ?2 WHERE id = ?1", params![id, json])
+                    .map_err(err)?;
+            }
+            tx.execute(
+                "UPDATE sessions SET pending_note = CASE
+                     WHEN pending_note IS NULL OR pending_note = '' THEN ?2
+                     ELSE pending_note || char(10) || char(10) || ?2 END
+                 WHERE id = ?1",
+                params![id, note],
+            )
+            .map_err(err)?;
+        }
+        tx.commit().map_err(err)?;
+        Ok(chats.into_iter().map(|(id, _)| id).collect())
     }
 
     /// Leaves something for the chat's agent to be told with the chat's next
@@ -1396,6 +1549,48 @@ mod tests {
         assert_eq!(store.take_pending_note("s1").unwrap().as_deref(), Some("The folder moved.\n\nAnd again."));
         assert_eq!(store.take_pending_note("s1").unwrap(), None);
         assert_eq!(store.take_pending_note("nope").unwrap(), None);
+    }
+
+    #[test]
+    fn a_projects_saved_terminal_tabs_follow_its_folder() {
+        let store = Store::in_memory();
+        store.touch_session("s1", "/old/app", "hi", "default", "default").unwrap();
+        store.touch_session("s2", "/new/app", "hi", "default", "default").unwrap();
+        let tab = |id: &str, project: &str, folder: &str, position: i64| SavedTerminal {
+            id: id.into(),
+            project: project.into(),
+            folder: folder.into(),
+            worktree: None,
+            label: "app".into(),
+            position,
+            output: Vec::new(),
+            saved_at: 0,
+        };
+        store
+            .save_terminals(&[
+                tab("t1", "/old/app", "/old/app", 0),
+                tab("t2", "/old/app", "/old/app/web", 1),
+                tab("t3", "/old/app", "/somewhere/else", 2),
+                tab("t4", "/new/app", "/new/app", 0),
+            ])
+            .unwrap();
+        assert_eq!(store.relocate_project("/old/app", "/new/app", None).unwrap(), ["s1"]);
+        let tabs: Vec<(String, String, String, i64)> =
+            store.load_terminals().unwrap().into_iter().map(|t| (t.id, t.project, t.folder, t.position)).collect();
+        assert_eq!(
+            tabs,
+            [
+                ("t4".into(), "/new/app".into(), "/new/app".into(), 0),
+                ("t1".into(), "/new/app".into(), "/new/app".into(), 1),
+                ("t2".into(), "/new/app".into(), "/new/app/web".into(), 2),
+                ("t3".into(), "/new/app".into(), "/somewhere/else".into(), 3),
+            ]
+        );
+        // Moved a second time, it remembers both places it has been.
+        store.relocate_project("/new/app", "/newer/app", None).unwrap();
+        assert_eq!(store.session("s1").unwrap().unwrap().former_paths, ["/old/app", "/new/app"]);
+        assert_eq!(swap_root("/old/app/x.md", "/old/app/", "/new/app"), Some("/new/app/x.md".to_string()));
+        assert_eq!(swap_root("/old/application/x.md", "/old/app", "/new/app"), None);
     }
 
     #[test]

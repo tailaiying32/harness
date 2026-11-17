@@ -36,6 +36,23 @@ pub struct TerminalHooks {
     /// A worktree folder is gone, and why ("branch merged", "chat deleted",
     /// "cleaned up").
     pub gone: Arc<dyn Fn(&Path, &str) + Send + Sync>,
+    /// A project's folder moved, from one path to another: its tabs follow.
+    pub moved: Arc<dyn Fn(&str, &str) + Send + Sync>,
+}
+
+/// Whether a project's folder is gone in the way a moved or renamed folder
+/// is: not there, while the drive it was on is. A folder on a drive that
+/// isn't connected is only out of reach, and nothing should follow it.
+pub fn folder_gone(path: &Path) -> bool {
+    if path.is_dir() {
+        return false;
+    }
+    let drive: Option<PathBuf> = if cfg!(windows) {
+        path.components().next().map(|prefix| Path::new(prefix.as_os_str()).join(std::path::MAIN_SEPARATOR_STR))
+    } else {
+        path.starts_with("/Volumes").then(|| path.components().take(3).collect())
+    };
+    drive.is_none_or(|drive| drive.is_dir())
 }
 
 /// How long a chat sits idle before its process is asked to exit.
@@ -396,6 +413,20 @@ impl SessionManager {
             self.wait_for_exit(session_id).await?;
         }
 
+        // A first message in a folder that isn't a project yet: it may be a
+        // project whose folder was moved or renamed, come back under a new
+        // path. Then that project follows it here, with its chats and docs.
+        let project = project_path.to_string_lossy().into_owned();
+        let mut moved_from = None;
+        if show && !inner.store.has_project(&project)? {
+            if let Some(from) = self.find_moved(&project_path).await {
+                match self.relocate_project(&from, &project).await {
+                    Ok(_) => moved_from = Some(from),
+                    Err(e) => eprintln!("harness: couldn't bring {from} along to {project}: {e}"),
+                }
+            }
+        }
+
         let _starting = inner.start_lock.lock().await;
 
         // Save the chat first, so its events have somewhere to go.
@@ -425,6 +456,10 @@ impl SessionManager {
                     images: refs,
                 },
             );
+        }
+        // Said in the chat that found it: the project's folder had moved.
+        if let Some(from) = moved_from {
+            self.record(session_id, AgentEvent::ProjectMoved { from, to: project.clone() });
         }
         if created {
             let folder = project_path.clone();
@@ -527,6 +562,90 @@ impl SessionManager {
             }
         }
         agent.send_user_message(&text, &payloads, message_id)
+    }
+
+    /// A project's folder was moved or renamed, from `from` to `to`: the
+    /// project, and everything kept by its path, is re-pointed. Its chats
+    /// follow (they belong to the project, not the path); so do its saved
+    /// terminal tabs, each chat's worktree record and the worktrees' own
+    /// links to the repo, and its docs, memory and chat folders in the home
+    /// folder. Chats running there are closed, to start again in the new
+    /// folder, and each chat's agent is told once. When `to` is a project
+    /// already, the two become one. Returns the moved chats' IDs.
+    pub async fn relocate_project(&self, from: &str, to: &str) -> Result<Vec<String>, String> {
+        if from == to {
+            return Err("That is the folder it is in.".into());
+        }
+        if !Path::new(to).is_dir() {
+            return Err(format!("Not a folder: {to}"));
+        }
+        if Path::new(from).is_dir() {
+            return Err("That project's folder is still there.".into());
+        }
+        let inner = &self.0;
+        let new_folder = PathBuf::from(to);
+        let repo = blocking(move || worktree::repo_of(&new_folder)).await;
+        let chats = inner
+            .store
+            .relocate_project(from, to, repo.as_ref().map(|(root, subpath)| (root.as_path(), subpath.as_str())))?;
+
+        // Anything still running there was started for the old folder.
+        for chat in &chats {
+            self.close(chat);
+        }
+        for chat in &chats {
+            let _ = self.wait_for_exit(chat).await;
+        }
+        {
+            let mut sessions = inner.sessions.lock().unwrap();
+            for chat in &chats {
+                if let Some(session) = sessions.get_mut(chat) {
+                    session.repo_root = None;
+                }
+            }
+        }
+        // The chats' worktrees point at the repo where it was.
+        if let Some((root, _)) = repo {
+            if let Err(e) = blocking(move || worktree::repair(&root)).await {
+                eprintln!("harness: couldn't link the moved repo's worktrees again: {e}");
+            }
+        }
+        crate::github::forget_under(Path::new(from));
+        let (home, old, new) = (inner.home.clone(), from.to_string(), to.to_string());
+        blocking(move || home.move_project(&old, &new)).await;
+        if let Some(terminal) = inner.terminal.get() {
+            (terminal.moved)(from, to);
+        }
+        Ok(chats)
+    }
+
+    /// For a folder that isn't a project yet: the one project it is, moved.
+    /// That is a project whose folder is gone and whose repo this is, going
+    /// by the commit its newest chat noted when it began. None unless
+    /// exactly one fits: a folder that isn't a repo, or two missing clones
+    /// of one repo, are left for the user to point at.
+    async fn find_moved(&self, folder: &Path) -> Option<String> {
+        let gone: Vec<(String, String)> = self
+            .0
+            .store
+            .project_commits()
+            .ok()?
+            .into_iter()
+            .filter_map(|(path, commit)| Some((path, commit?)))
+            .filter(|(path, _)| folder_gone(Path::new(path)))
+            .collect();
+        if gone.is_empty() {
+            return None;
+        }
+        let folder = folder.to_path_buf();
+        blocking(move || {
+            let mut same = gone.into_iter().filter(|(_, commit)| worktree::has_commit(&folder, commit));
+            match (same.next(), same.next()) {
+                (Some((path, _)), None) => Some(path),
+                _ => None,
+            }
+        })
+        .await
     }
 
     /// What every message reminds the agent of: the user's preferences, when
@@ -1914,6 +2033,7 @@ are there now, so use the new paths.)\n\ncarry on",
             rig.manager.set_terminal_hooks(TerminalHooks {
                 in_use: Arc::new(move |_: &Path| *shell_in.lock().unwrap()),
                 gone: Arc::new(move |root: &Path, why: &str| told.lock().unwrap().push((root.to_path_buf(), why.to_string()))),
+                moved: Arc::new(|_: &str, _: &str| {}),
             });
         }
         rig.manager.close("s1");

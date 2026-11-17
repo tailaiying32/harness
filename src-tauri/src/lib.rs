@@ -91,7 +91,24 @@ async fn on_battery() -> bool {
 /// The sidebar: every project with its chats.
 #[tauri::command]
 fn sidebar(state: State<'_, AppState>) -> Result<Vec<ProjectRow>, String> {
-    state.store.sidebar()
+    let mut projects = state.store.sidebar()?;
+    // A project whose folder was moved or renamed is marked, so the window
+    // can offer to be pointed at where it is now.
+    for project in &mut projects {
+        project.missing = !Path::new(&project.path).is_dir();
+    }
+    Ok(projects)
+}
+
+/// A project's folder moved or was renamed: the user picked where it is
+/// now. Everything kept for it follows (`SessionManager::relocate_project`).
+#[tauri::command]
+async fn relocate_project(state: State<'_, AppState>, from: String, to: String) -> Result<(), String> {
+    for chat in state.sessions.relocate_project(&from, &to).await? {
+        // A side chat is a copy made for the old folder.
+        state.side.end_chat(&chat);
+    }
+    Ok(())
 }
 
 /// A saved chat: its details, its history in order, and whether a process is
@@ -1010,6 +1027,10 @@ pub fn run() {
                 sessions.set_terminal_hooks(TerminalHooks {
                     in_use: Arc::new(move |root: &Path| a.in_worktree(root)),
                     gone: Arc::new(move |root: &Path, why: &str| b.worktree_gone(root, why)),
+                    moved: {
+                        let terminals = terminals.clone();
+                        Arc::new(move |from: &str, to: &str| terminals.project_moved(from, to))
+                    },
                 });
             }
             // Images of chats that are gone, and of new chats never sent.
@@ -1054,6 +1075,7 @@ pub fn run() {
             subscribe,
             check_setup,
             sidebar,
+            relocate_project,
             load_session,
             delete_session,
             list_trash,
