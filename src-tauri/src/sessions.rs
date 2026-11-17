@@ -536,8 +536,12 @@ impl SessionManager {
         let expanded = if show { inner.skills.expand(text) } else { None };
         // Something the app left for this chat's agent (its folder moved,
         // say) is told once, with the next message the user sends.
+        // A `/command` handed on to the agent stays exactly as typed: a note
+        // after it would be read as the command's arguments. What the app
+        // has to say waits for the next message.
+        let command = expanded.is_none() && text.trim_start().starts_with('/');
         let mut app_notes = app_notes.to_vec();
-        if show && !created {
+        if show && !created && !command {
             app_notes.extend(inner.store.take_pending_note(session_id).ok().flatten());
         }
         let mut text = with_app_notes(&app_notes, expanded.as_deref().unwrap_or(text));
@@ -547,7 +551,7 @@ impl SessionManager {
         // that changes would make a resumed chat pay for its history anew.
         // It goes after the user's words: Cursor titles a chat from the start
         // of its first message.
-        if created && show {
+        if created && show && !command {
             if let Some(note) = crate::chats::titles_note(&inner.store, &project_path.to_string_lossy(), session_id) {
                 text.push_str(&format!("\n\n(From the app, not the user: {note})"));
             }
@@ -556,7 +560,7 @@ impl SessionManager {
         // reminder rides with every message: agents drift from them in a long
         // chat, and Cursor hears its instructions only when a conversation
         // starts. After the user's words, like the note above.
-        if show {
+        if show && !command {
             if let Some(reminder) = self.reminder(&agent_id, &project_path.to_string_lossy()) {
                 text.push_str(&format!("\n\n(From the app, not the user: {reminder})"));
             }
@@ -1508,6 +1512,10 @@ are there now, so use the new paths.)\n\ncarry on",
             .collect();
         assert_eq!(saved, ["first", "second", "third"]);
 
+        // A command for the agent goes as typed: a note after it would be its arguments.
+        rig.send("/compact").await;
+        assert_eq!(rig.told()[3], "say /compact");
+
         // An agent with no memory of its own is also reminded where the project's is.
         let memory = rig.manager.home().project_memory("/work");
         assert_eq!(
@@ -1522,7 +1530,7 @@ are there now, so use the new paths.)\n\ncarry on",
         // A blank file is no preferences.
         std::fs::write(&file, "").unwrap();
         rig.send("fourth").await;
-        assert_eq!(rig.told()[3], "say fourth");
+        assert_eq!(rig.told()[4], "say fourth");
     }
 
     #[tokio::test]

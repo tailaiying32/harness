@@ -1758,7 +1758,11 @@ existed only on that worktree's branch.
     titles a chat from the start of its first prompt). Agents drift from
     the rules in a long chat, and Cursor hears its instructions only once.
     For an agent with no memory of its own the reminder also names the
-    project's memory folder. Not saved in the history, not shown.
+    project's memory folder. Not saved in the history, not shown. A
+    `/command` handed on to the agent goes exactly as typed, with no
+    reminder, recent-chats note or pending note: text after it would be
+    read as the command's arguments. A pending note waits for the next
+    message.
   - **Helper agents don't inherit them.** Claude Code hands its own
     `CLAUDE.md` to the subagents it starts, but not text added at launch
     (tested on CLI 2.1.326: the main agent followed a rule given that way
