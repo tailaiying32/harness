@@ -985,7 +985,9 @@ export class Chat {
     for (const item of this.items) {
       if (item.type === "text") item.streaming = false;
       if (item.type === "tool" && item.result === undefined) item.result = "";
-      if (item.type === "approval" && !item.answered && !item.cancelled) this.cancel(item);
+      // The worktree question outlives the turn: the agent ends its turn
+      // to wait for it, and the answer comes as its next message.
+      if (item.type === "approval" && item.approval !== "worktree" && !item.answered && !item.cancelled) this.cancel(item);
     }
     this.drafts.clear();
     this.turnStartedAt = null;

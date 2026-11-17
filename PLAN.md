@@ -622,34 +622,58 @@ them back.
 
 Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-rolling-whale.md`.
 
-- **The request.** Every launch adds a line to Claude's instructions (call
-  Claude Code's `EnterWorktree` before starting real changes in a repo; not
-  for tiny edits, questions, reviews or plans, nor once in a worktree) and
-  `--settings {"permissions":{"ask":["EnterWorktree"]}}`. Without that rule
-  the tool runs without asking and makes its own worktree under
-  `.claude/worktrees/` (tested on CLI 2.1.322); with it, the call reaches the
-  approval channel in every mode. The session manager catches it
-  (`screen_worktree_call`) and shows `WorktreeAsk`, with the name Claude gave
-  the work. The call waits in Claude Code, which has no timeout. A call from
-  a chat already in a worktree, or outside a git repo, is turned down at once
-  with the reason. An earlier version asked before the first file edit (a
-  PreToolUse hook); it was dropped 2026-11-14 because edits made with shell
-  commands slipped past it, and the user wanted Claude to judge which work
-  deserves a worktree.
-- **"Work here"**: the call is turned down with "carry on here"; Claude may
-  ask again later for other work. **"New worktree"**: the call is turned
-  down (Harness makes its own worktree, not Claude Code's), the turn
-  interrupted, the process stopped; `worktree::create` makes
-  `harness/<Claude's name for the work>-<6 hex>` at
-  `<data>/worktrees/<repo>-<6 hex>` from the latest commit of the branch the
-  main folder was on when the chat began (`start_branch`, saved on the first
-  message); then the chat resumes there (same session ID: `--resume` works
-  from any folder) with a hidden note telling Claude where it is.
-- **A message instead of a pick** (2026-11-14): the question closes as
-  "skipped" with nothing saved, and the call is turned down with "read the
-  message; ask again before any file changes if the work still needs a
-  worktree". Before, the message queued behind the open call, and a later
-  "New worktree" stopped the process and lost it.
+- **The request** (2026-11-17: one app tool for every agent). Every main
+  chat gets the app's worktree tool, `harness_worktree` / `ask` with a short
+  name for the work, built in `sessions/worktrees.rs`. When to call it (first
+  step of real work in a repo, before any file is made or changed; not for
+  tiny edits, questions, reviews or plans, nor once in a worktree) is in the
+  group's instruction and in the tool's own description: Cursor hears
+  instructions only when a conversation starts. The wording matters: a soft
+  "ask for a worktree with the harness_worktree tool" made Haiku skip it for
+  a new module with tests (2 of 2 runs, while the old "call EnterWorktree"
+  asked 2 of 2); "your first step... is to call the ask tool of the
+  harness_worktree server" asked 2 of 2 and still skipped a one-line fix.
+  The tool carries `_meta: {"anthropic/alwaysLoad": true}` so Claude Code
+  lists it up front instead of behind its tool search; other agents ignore it. Claude Code's own `EnterWorktree`/`ExitWorktree` are turned off
+  with deny rules, which take them off the model's list (tested on CLI
+  2.1.325). Before 2026-11-17 Claude Code chats asked through `EnterWorktree`
+  (an `ask` rule made it reach the app) and Cursor chats couldn't ask at all.
+  An earlier version still asked before the first file edit (a PreToolUse
+  hook); dropped 2026-11-14 because shell edits slipped past it.
+- **The call returns at once.** It puts `WorktreeAsk` on screen and tells the
+  agent to end its turn and make no changes; the answer comes as its next
+  message. Holding the call open until the answer doesn't work for every
+  agent: Cursor gives up on an app tool call after 60 seconds (MCP's default
+  request timeout; CLI 2026.11.13 has no setting for it over ACP), while
+  Claude Code waited 10+ minutes. The cost: nothing forces the agent to stop.
+  The question outlives the turn: the window doesn't cancel it when the turn
+  ends (`settle` skips it), and after an app restart the core finds it again
+  in the saved history (`load_open_ask`, once per chat per run), so it can
+  still be answered. Asked again while the question is open: no second
+  question. Asked from a chat already in a worktree, or outside a git repo:
+  the reason, no question.
+  The window folds the call under the question: the sink notes the tool's
+  latest call ID (whole from Claude Code, in a later `ToolInput` from Cursor).
+- **"Work here"**: a hidden note tells the agent to carry on here; it may ask
+  again later for other work. **"New worktree"**: the process is stopped if it
+  still runs; `worktree::create` makes `harness/<the agent's name for the
+  work>-<6 hex>` at `<data>/worktrees/<repo>-<6 hex>` from the latest commit
+  of the branch the main folder was on when the chat began (`start_branch`,
+  saved on the first message); then the chat resumes there with a hidden
+  note telling the agent where it is. Same session ID for both agents:
+  Claude Code's `--resume` and Cursor's `session/load` with the new `cwd`
+  both work from another folder (Cursor tested 2026-11-17: history kept,
+  edits and shell in the new folder).
+- **A message instead of a pick**: the question closes as "skipped" with
+  nothing saved, and the message goes with a note before it: it answers the
+  question; ask again before any file changes if the work still needs a
+  worktree.
+- **Tested live** (2026-11-17, self-test with `HARNESS_DATA_DIR`): Claude Code
+  (Haiku) and Cursor (GPT-5.3 Codex) each asked first thing for a new module
+  with tests, made no changes, and after "New worktree" carried on and
+  finished inside it (`pwd` there); the main folder kept only its README. A
+  card left open past the end of the turn, then answered by a message
+  ("never mind, do it here"), showed "skipped" and the work happened here.
 - **Ignored files** (builds, packages, `.env`) are copied from the main folder
   with `clonefile` (copy-on-write, no space until changed); off APFS, files
   are copied plainly and folders skipped. Folders holding a `.git` (nested
