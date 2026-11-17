@@ -27,16 +27,24 @@
 
   const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
-  /** What the agent did last, in the chat's words. */
+  /**
+   * The row's second line: a running agent's latest step, a failed one's
+   * error, else how much it did ("12 steps"), like the CLI's "Done (12 tool
+   * uses …)". A finished agent's last step was only what it happened to do
+   * before answering.
+   */
   function lastStep(agent: Agent): string {
-    if (agent.state === "running" && agent.live) return agent.live;
     if (agent.state === "failed" && agent.answer) return agent.answer.trim().split("\n")[0];
+    if (agent.state !== "running") {
+      const n = agent.steps.filter((s) => s.type === "tool").length;
+      return n ? `${n} step${n === 1 ? "" : "s"}` : "";
+    }
+    if (agent.live) return agent.live;
     for (let i = agent.steps.length - 1; i >= 0; i--) {
       const step = agent.steps[i];
-      if (step.type === "tool") return capital(step.result === undefined && agent.state === "running" ? present(step) : past(step));
+      if (step.type === "tool") return capital(step.result === undefined ? present(step) : past(step));
     }
-    if (agent.state === "running") return "Starting";
-    return agent.answer || agent.steps.length > 0 ? "Answered" : "";
+    return "Starting";
   }
 
   /** How long since a running agent's last step; "" once it ends, or when not known. */
@@ -104,7 +112,8 @@
             <span class="lines">
               <span class="pair">
                 <span class="name" class:live={agent.state === "running"}>{agent.name}</span>
-                <span class="faint">{runTime(agent, now)}</span>
+                <!-- Only a running agent's time: a frozen one read like a stuck timer. Its full view says "done after …". -->
+                <span class="faint">{agent.state === "running" ? runTime(agent, now) : ""}</span>
               </span>
               <span class="pair">
                 <span class="step" class:bad={agent.state === "failed"}>{lastStep(agent)}</span>
