@@ -1852,8 +1852,12 @@ that broke the terminal feel and the marks piled up in long chats.
 
 - **The page** (`InfoView.svelte`). Sections, each
   left out when empty: context (bar, "92k of 200k · 46%", then what takes
-  the room), tasks (✓ done, ● doing, ○ to do), subagents (every one, running
-  and finished: name and run time, then its last step and how long ago), and
+  the room), tasks (✓ done, ● doing, ○ to do), subagents (every one: a
+  running one shows its name and run time, then its latest step and how long
+  ago; a failed one its error; a finished one only its name and how many
+  steps it took, like the CLI's "Done (12 tool uses …)", since a frozen,
+  unlabelled run time read like a stuck timer and its last step was just what
+  it did before answering; its run time is in its full view, "done after …"), and
   in the background (commands, not agents). A running agent with no step for
   3 minutes shows "… ago" in the accent colour.
 - **A subagent, full size** (`AgentView.svelte`). Clicking its row on the
