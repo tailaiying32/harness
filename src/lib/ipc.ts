@@ -409,6 +409,11 @@ export const readDoc = (path: string) => invoke<string>("read_doc", { path });
 /** Saves the user's edit to a markdown file the panel has read. */
 export const writeDoc = (path: string, text: string) => invoke<void>("write_doc", { path, text });
 
+/** The user's working preferences file, for every agent; "" when there is none yet. */
+export const readPreferences = () => invoke<string>("read_preferences");
+/** Saves the preferences file, making it when there is none. */
+export const writePreferences = (text: string) => invoke<void>("write_preferences", { text });
+
 /** Moves a doc from the chat's folder into `<project>/docs/`; the new path. */
 export const saveDocToProject = (chatId: string, path: string, project: string) =>
   invoke<string>("save_doc_to_project", { chatId, path, project });
