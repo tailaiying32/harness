@@ -39,10 +39,9 @@
     return agent.answer || agent.steps.length > 0 ? "Answered" : "";
   }
 
-  /** How long since the last step (running) or the end (finished); "" when not known. */
+  /** How long since a running agent's last step; "" once it ends, or when not known. */
   function since(agent: Agent): string {
-    const at = agent.state === "running" ? agent.lastAt : agent.endedAt;
-    return at ? ago(now - at) : "";
+    return agent.state === "running" && agent.lastAt ? ago(now - agent.lastAt) : "";
   }
 
   const quiet = (agent: Agent) =>
@@ -85,11 +84,21 @@
       </div>
       <!-- By batch, newest first, each under a short label for what it is
            doing (the message it answers until that comes); the same
-           grouping as the top bar's ▾ menu. -->
+           grouping as the top bar's ▾ menu. Clicking the label folds the
+           batch to that one line, with its agents' marks on the right. -->
       {#each info.batches as batch (batch.batch)}
+      {@const shut = info.folded.includes(batch.batch)}
       <div class="agents">
-        <div class="ask faint" title={batch.ask.trim() || undefined}>{batchLabel(batch)}</div>
-        {#each batch.agents as agent (agent.toolId)}
+        <button class="ask pair faint" title={batch.ask.trim() || undefined} onclick={() => info.fold(batch.batch)}>
+          <span class="label">
+            <svg class="caret" class:shut viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg>
+            <span class="text">{batchLabel(batch)}</span>
+          </span>
+          {#if shut}
+            <span>{#each batch.agents as agent (agent.toolId)}<span class="mark tight {agent.state}">{MARKS[agent.state]}</span>{/each}</span>
+          {/if}
+        </button>
+        {#each shut ? [] : batch.agents as agent (agent.toolId)}
           <button class="agent" onclick={() => info.show(agent.toolId)}>
             <span class="mark {agent.state}">{MARKS[agent.state]}</span>
             <span class="lines">
@@ -216,12 +225,43 @@
   .agents + .agents {
     margin-top: calc(var(--gap) * 0.8);
   }
-  /* What a batch was for: one faint line, cut short. */
+  /* What a batch was for: one faint line, cut short; click to fold. */
   .ask {
+    width: 100%;
+    text-align: left;
+  }
+  .ask:hover .label {
+    color: var(--dim);
+  }
+  /* Left even when it is the row's only part (an open batch has no marks). */
+  .ask > .label {
+    display: flex;
+    align-items: center;
+    margin-left: 0;
+    flex-shrink: 1;
+  }
+  .text {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
+  }
+  /* In the marks' column, so the label lines up with the agents' names. */
+  .caret {
+    width: 1.4ch;
+    height: 1.4ch;
+    margin-right: 1.1ch;
+    flex-shrink: 0;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+  }
+  .caret.shut {
+    transform: rotate(-90deg);
+  }
+  /* A folded batch's marks, side by side. */
+  .mark.tight {
+    width: auto;
+    margin-left: 0.5ch;
   }
   .agent {
     display: flex;

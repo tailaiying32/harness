@@ -99,6 +99,8 @@ export class ChatInfo {
   picked = $state<string | null>(null);
   /** Written batch labels, by the batch's first subagent. */
   titles = $state<Record<string, string>>({});
+  /** Batches folded to their label on the overview page, by batch number. */
+  folded = $state<number[]>([]);
 
   /** Asks for a batch's label (see BatchTitled); set by the chat. */
   onBatch: ((toolId: string, ask: string, agents: string[]) => void) | null = null;
@@ -148,6 +150,11 @@ export class ChatInfo {
       }
     }
     return out.reverse();
+  }
+
+  /** Folds a batch to its label on the overview page, or opens it again. */
+  fold(batch: number): void {
+    this.folded = this.folded.includes(batch) ? this.folded.filter((b) => b !== batch) : [...this.folded, batch];
   }
 
   /** Shows a subagent full size, or the overview (null). */

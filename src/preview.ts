@@ -193,8 +193,20 @@ const subResult = (parent: string, tool_id: string, content: string): AgentEvent
 /** A long turn with subagents, for chat info: one finished, one failed, one
     still running (played live after the chat opens, see load_session). */
 const agentsChat: AgentEvent[] = [
-  { kind: "user_message", text: "Chats I've walked away from should stop using memory. Find every place a chat's process is closed, and measure an idle chat." },
+  // An earlier turn's batch, finished, so the page has more than one to fold.
+  { kind: "user_message", text: "Why does the app use so much memory with a lot of chats open?" },
   { kind: "session_started", agent_session_id: "agent-agents", model: "claude-fable-5-2", mode: "auto" },
+  tool("e1", "Agent", { description: "Measure memory per chat", prompt: "Open five chats and measure each process's memory." }),
+  { kind: "batch_titled", tool_id: "e1", title: "Looking into memory use" },
+  sub("e1", "e1a", "Bash", { command: "ps -o pid,rss,command | grep claude" }),
+  subResult("e1", "e1a", "4412  268144  claude --output-format stream-json"),
+  result("e1", "About 260 MB per chat, idle or not."),
+  tool("e2", "Agent", { description: "Check for leaks in the panel", prompt: "Look for listeners the side panel never removes." }),
+  sub("e2", "e2a", "Grep", { pattern: "addEventListener", path: "src/lib/panel" }),
+  subResult("e2", "e2a", "PanelBar.svelte:41  window.addEventListener(\"keydown\", onKey)"),
+  result("e2", "No leaks: every listener is removed when its view closes."),
+  ended,
+  { kind: "user_message", text: "Chats I've walked away from should stop using memory. Find every place a chat's process is closed, and measure an idle chat." },
   tool("k1", "TaskCreate", { subject: "Find where chats close", description: "" }),
   result("k1", "Task #1 created successfully: Find where chats close"),
   tool("k2", "TaskCreate", { subject: "Measure an idle chat", description: "" }),

@@ -382,7 +382,8 @@ function listCommand(make: (text: string, start: number, end: number) => Edit | 
   };
 }
 
-/** Makes the editor in `host`. Escape leaves it (blurs), as clicking away does. */
+/** Makes the editor in `host`. Escape leaves it (blurs), as clicking away does,
+    and goes on to the window, so the same press also ends a full screen panel. */
 export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): EditorView {
   const view = new EditorView({
     parent: host,
@@ -395,7 +396,7 @@ export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): Edi
             key: "Escape",
             run: (view) => {
               view.contentDOM.blur();
-              return true;
+              return false;
             },
           },
           { key: "Enter", run: (view) => listCommand(newLine)(view) || insertNewline(view) },

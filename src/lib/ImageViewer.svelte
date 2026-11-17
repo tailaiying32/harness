@@ -87,7 +87,12 @@
 
   const close = () => (chat.viewing = null);
 
+  // On the window, not the viewer, so the keys work wherever focus went (the
+  // app gives it back to the message box when the window comes back to the
+  // front). A box still being typed in (the sidebar's rename) keeps them.
   function onKey(e: KeyboardEvent) {
+    const el = document.activeElement as HTMLElement | null;
+    if (e.defaultPrevented || (el && (el.tagName === "INPUT" || el.isContentEditable))) return;
     if (e.key === "Escape") close();
     else if (e.key === "ArrowLeft") step(-1);
     else if (e.key === "ArrowRight") step(1);
@@ -103,10 +108,10 @@
   );
 </script>
 
-<svelte:window onresize={measure} />
+<svelte:window onresize={measure} onkeydown={onKey} />
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-<div class="viewer" bind:this={root} tabindex="-1" onkeydown={onKey} role="dialog" aria-label="image {image.n}">
+<div class="viewer" bind:this={root} tabindex="-1" role="dialog" aria-label="image {image.n}">
   <div class="bar">
     <span class="label">{label}</span>
     {#if list.length > 1}
