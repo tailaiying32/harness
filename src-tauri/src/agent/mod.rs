@@ -10,6 +10,8 @@ pub mod mcp_http;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+
+use crate::home::Preferences;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -89,6 +91,21 @@ pub struct SpawnOptions {
     /// memory of its own is made to keep it there; one without is told where
     /// it is and how a note is written (`memory_instruction`).
     pub memory: Option<PathBuf>,
+    /// The user's working preferences, for the agent's instructions
+    /// (`preferences_instruction`). None when the user has none.
+    pub preferences: Option<Preferences>,
+}
+
+/// The user's working preferences as an agent is told them: standing
+/// instructions that outrank its defaults, for every agent alike. An agent's
+/// own file for these (Claude Code's `CLAUDE.md`) reaches only that agent.
+pub fn preferences_instruction(preferences: &Preferences) -> String {
+    format!(
+        "The user's own standing instructions, kept in {}. Follow them exactly; where they differ from \
+your defaults, they win. Pass the ones that matter on to any helper agent you start.\n{}",
+        preferences.path.display(),
+        preferences.text
+    )
 }
 
 /// How many lines of the memory's index an agent is given.

@@ -470,6 +470,7 @@ impl SessionManager {
                     notes: notes_for(&inner.notes, session_id),
                     project_docs: project_docs_for(&inner.notes, session_id),
                     memory: inner.notes.project_memory(session_id),
+                    preferences: inner.home.preferences(),
                 },
                 self.sink(session_id, run),
             );
@@ -516,7 +517,32 @@ impl SessionManager {
                 text.push_str(&format!("\n\n(From the app, not the user: {note})"));
             }
         }
+        // The user's preferences are in each agent's instructions, and a short
+        // reminder rides with every message: agents drift from them in a long
+        // chat, and Cursor hears its instructions only when a conversation
+        // starts. After the user's words, like the note above.
+        if show {
+            if let Some(reminder) = self.reminder(&agent_id, &project_path.to_string_lossy()) {
+                text.push_str(&format!("\n\n(From the app, not the user: {reminder})"));
+            }
+        }
         agent.send_user_message(&text, &payloads, message_id)
+    }
+
+    /// What every message reminds the agent of: the user's preferences, when
+    /// there are any, and for an agent with no memory of its own, where the
+    /// project's is.
+    fn reminder(&self, agent: &str, project_path: &str) -> Option<String> {
+        let file = self.0.home.preferences_file();
+        if !std::fs::metadata(&file).is_ok_and(|m| m.is_file() && m.len() > 0) {
+            return None;
+        }
+        let mut reminder = format!("Reminder: follow the user's preferences in {}", file.display());
+        if agent != crate::agent::CLAUDE {
+            let memory = self.0.home.project_memory(project_path);
+            reminder.push_str(&format!("; the project's shared memory is in {}", memory.display()));
+        }
+        Some(reminder + ".")
     }
 
     /// The user wrote while Claude waited on a question (a plan, a tool, the
@@ -1333,6 +1359,51 @@ are there now, so use the new paths.)\n\ncarry on",
             )
         );
         assert_eq!(told[2], "say and again");
+    }
+
+    #[tokio::test]
+    async fn every_message_reminds_the_agent_of_the_users_preferences() {
+        let rig = rig(LONG);
+        // No preferences: nothing is added.
+        rig.send("first").await;
+        assert_eq!(rig.told(), vec!["say first"]);
+
+        let file = rig.manager.home().preferences_file();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "- Be brief.").unwrap();
+        rig.send("second").await;
+        rig.send("third").await;
+        let reminder = format!("(From the app, not the user: Reminder: follow the user's preferences in {}.)", file.display());
+        // After the user's words, on every message; not saved with them.
+        assert_eq!(rig.told()[1], format!("say second\n\n{reminder}"));
+        assert_eq!(rig.told()[2], format!("say third\n\n{reminder}"));
+        let saved: Vec<String> = rig
+            .store
+            .events("s1")
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::UserMessage { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(saved, ["first", "second", "third"]);
+
+        // An agent with no memory of its own is also reminded where the project's is.
+        let memory = rig.manager.home().project_memory("/work");
+        assert_eq!(
+            rig.manager.reminder(crate::agent::CURSOR, "/work").unwrap(),
+            format!(
+                "Reminder: follow the user's preferences in {}; the project's shared memory is in {}.",
+                file.display(),
+                memory.display()
+            )
+        );
+
+        // A blank file is no preferences.
+        std::fs::write(&file, "").unwrap();
+        rig.send("fourth").await;
+        assert_eq!(rig.told()[3], "say fourth");
     }
 
     #[tokio::test]

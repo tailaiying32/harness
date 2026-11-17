@@ -63,6 +63,11 @@ impl Notes {
         (self.project_of)(chat).and_then(|project| self.home.ensure_memory(&project))
     }
 
+    /// The user's working preferences, as `Home::preferences` gives them.
+    pub fn preferences(&self) -> Option<crate::home::Preferences> {
+        self.home.preferences()
+    }
+
     /// The chat's notes file. It may not exist yet.
     pub fn path(&self, chat: &str) -> Result<PathBuf, String> {
         Ok(self.folder(chat)?.join(FILE))

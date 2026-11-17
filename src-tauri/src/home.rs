@@ -6,6 +6,7 @@
 //!
 //! ```text
 //! ~/.harness/
+//!   preferences.md                    the user's working preferences, for every agent
 //!   projects/<key>/docs/              the project's docs
 //!   projects/<key>/memory/            the project's memory, for every agent
 //!   projects/<key>/chats/<chat id>/   that chat's notes and its own docs
@@ -23,6 +24,17 @@ use std::path::{Path, PathBuf};
 pub fn user_home() -> Option<PathBuf> {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(var).map(PathBuf::from)
+}
+
+/// The most of the preferences file an agent is given, in characters.
+const PREFERENCES_CHARS: usize = 20_000;
+
+/// The user's working preferences: standing instructions for every agent,
+/// whatever the project. `path` is the file they are kept in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Preferences {
+    pub path: PathBuf,
+    pub text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -68,6 +80,20 @@ impl Home {
     pub fn key(project_path: &str) -> String {
         let path = project_path.trim().trim_end_matches(['/', '\\']);
         path.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+    }
+
+    /// The file the user's working preferences are kept in.
+    pub fn preferences_file(&self) -> PathBuf {
+        self.root.join("preferences.md")
+    }
+
+    /// The user's working preferences as they are now; None when the file is
+    /// missing or blank. Read when a chat's process starts.
+    pub fn preferences(&self) -> Option<Preferences> {
+        let path = self.preferences_file();
+        let text = std::fs::read_to_string(&path).ok()?;
+        let text: String = text.trim().chars().take(PREFERENCES_CHARS).collect();
+        (!text.is_empty()).then_some(Preferences { path, text })
     }
 
     /// Everything kept for a project.
@@ -168,6 +194,22 @@ mod tests {
         assert_eq!(home.chat("/w/app", "c1"), PathBuf::from("/h/projects/-w-app/chats/c1"));
         assert_eq!(home.unsent("c1"), PathBuf::from("/h/unsent/c1"));
         assert_eq!(home.project_memory("/w/app"), PathBuf::from("/h/projects/-w-app/memory"));
+    }
+
+    #[test]
+    fn preferences_are_the_files_text_or_nothing() {
+        let dir = std::env::temp_dir().join(format!("harness-home-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let home = Home::new(dir.clone());
+        assert_eq!(home.preferences(), None);
+        std::fs::write(home.preferences_file(), " \n\n").unwrap();
+        assert_eq!(home.preferences(), None, "a blank file is no preferences");
+        std::fs::write(home.preferences_file(), "\n# Working preferences\n- Be brief.\n").unwrap();
+        let found = home.preferences().unwrap();
+        assert_eq!((found.path, found.text.as_str()), (dir.join("preferences.md"), "# Working preferences\n- Be brief."));
+        std::fs::write(home.preferences_file(), "x".repeat(PREFERENCES_CHARS + 50)).unwrap();
+        assert_eq!(home.preferences().unwrap().text.chars().count(), PREFERENCES_CHARS);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

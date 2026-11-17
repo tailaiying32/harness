@@ -156,6 +156,7 @@ impl SideChats {
                         notes: notes_for(&self.0.notes, chat_id),
                         project_docs: project_docs_for(&self.0.notes, chat_id),
                         memory: self.0.notes.project_memory(chat_id),
+                        preferences: self.0.notes.preferences(),
                     },
                     self.sink(side_id, run),
                 )?);

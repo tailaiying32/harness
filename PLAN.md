@@ -1741,10 +1741,41 @@ existed only on that worktree's branch.
     chat recalled it; a Cursor (GPT) chat recalled it, then saved another as
     a note with frontmatter and an index line; a Claude chat started after
     that recalled both.
+- **The user's preferences, for every agent** (2026-11-17, branch
+  `harness/home-preferences-2cc4f2`): `~/.harness/preferences.md`, standing
+  instructions whatever the project. Before this they were in Claude Code's
+  own `~/.claude/CLAUDE.md`, which no other agent reads.
+  - **In each agent's instructions** (`preferences_instruction`,
+    `agent/mod.rs`; the file is read when a chat's process starts, cut to
+    20,000 characters; missing or blank means none): Claude Code gets them
+    at the end of `--append-system-prompt`, main and side chat; Cursor in
+    the intro of a fresh conversation.
+  - **A reminder with every message** (`SessionManager::reminder`, added in
+    `send_inner`): "(From the app, not the user: Reminder: follow the user's
+    preferences in <file>.)", after the user's words, never before (Cursor
+    titles a chat from the start of its first prompt). Agents drift from
+    the rules in a long chat, and Cursor hears its instructions only once.
+    For an agent with no memory of its own the reminder also names the
+    project's memory folder. Not saved in the history, not shown.
+  - **Helper agents don't inherit them.** Claude Code hands its own
+    `CLAUDE.md` to the subagents it starts, but not text added at launch
+    (tested on CLI 2.1.326: the main agent followed a rule given that way
+    and its helper did not). So the instruction tells the agent to pass on
+    the ones that matter, and in a test it put them in the helper's prompt.
+  - **The switch-over is by hand, last**, once a build with this is running:
+    copy the text of `~/.claude/CLAUDE.md` to `~/.harness/preferences.md`,
+    empty that file (or Claude Code gets the text twice) and remove the
+    `UserPromptSubmit` hook in `~/.claude/settings.json` that reminds Claude
+    Code of it, each with a backup. Claude Code run outside the app then has
+    no preferences; the user accepted that.
+  - **Tested** in a test copy with a made-up rule ("end every reply with
+    the word pineapple"): Claude Code and Cursor (GPT) both followed it on
+    every message, and Cursor's chat title was still about the user's
+    message.
 - **Not covered yet:** a project folder that is moved or renamed keeps its
-  old `<key>`; preferences for every agent (planned next, in this folder);
-  a list of a project's docs or a view of its memory in the app; memory
-  shared across projects; syncing between machines.
+  old `<key>`; a list of a project's docs, a view of its memory or a
+  preferences editor in the app; memory shared across projects; syncing
+  between machines.
 
 ### Terminal (`terminal.rs`, built 2026-11-15)
 

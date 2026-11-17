@@ -781,6 +781,9 @@ fn instructions(opts: &SpawnOptions) -> Option<String> {
     if let Some(memory) = &opts.memory {
         lines.push(super::memory_instruction(memory));
     }
+    if let Some(preferences) = &opts.preferences {
+        lines.push(super::preferences_instruction(preferences));
+    }
     let lines: Vec<String> = lines.into_iter().filter(|l| !l.trim().is_empty()).collect();
     (!lines.is_empty()).then(|| format!("(Notes from the app you run in, not from the user.)\n{}", lines.join("\n")))
 }
@@ -1587,6 +1590,7 @@ mod tests {
             notes: Some("/data/notes/chat-1/notes.md".into()),
             project_docs: Some("/home/projects/-work/docs".into()),
             memory: None,
+            preferences: None,
         };
         let told = instructions(&opts).unwrap();
         assert!(told.contains("That folder, /data/notes/chat-1, is this chat's own"));
@@ -1613,12 +1617,20 @@ mod tests {
             notes: None,
             project_docs: None,
             memory,
+            preferences: None,
         };
         let told = instructions(&opts(Some(dir.clone()))).unwrap();
         assert!(told.contains(&format!("This project has a shared memory in {}", dir.display())));
         assert!(told.contains("frontmatter (`name`, `description`, and `metadata.type`"));
         // The index as it is now, cut where Claude Code cuts its own.
         assert!(told.contains("- [Note 200](n200.md) — fact 200") && !told.contains("Note 201"));
+
+        // The user's preferences come with it.
+        let mut with_preferences = opts(None);
+        with_preferences.preferences =
+            Some(crate::home::Preferences { path: "/home/preferences.md".into(), text: "- Be brief.".into() });
+        let told = instructions(&with_preferences).unwrap();
+        assert!(told.contains("standing instructions, kept in /home/preferences.md") && told.ends_with("- Be brief."));
 
         // No index yet: said so. No memory folder: nothing about memory.
         std::fs::remove_file(dir.join("MEMORY.md")).unwrap();

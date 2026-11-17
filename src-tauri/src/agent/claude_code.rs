@@ -17,7 +17,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SideOptions, SpawnOptions, notes_instruction};
+use super::{
+    AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SideOptions, SpawnOptions, notes_instruction,
+    preferences_instruction,
+};
 use crate::events::{AgentEvent, ApprovalKind, BackgroundTask, Block, ContextPart, Decision, ModelInfo, SessionState};
 
 /// How many stderr lines to keep for an error message when the process dies.
@@ -209,6 +212,10 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
         instructions.push(' ');
         instructions.push_str(CLAUDE_DOCS_INSTRUCTION);
     }
+    if let Some(preferences) = &opts.preferences {
+        instructions.push_str("\n\n");
+        instructions.push_str(&preferences_instruction(preferences));
+    }
     // Per launch: a resumed session does not remember it.
     args.extend(["--append-system-prompt".to_string(), instructions]);
     if let Some(id) = &opts.resume_id {
@@ -258,6 +265,10 @@ fn side_args(opts: &SpawnOptions, side: &SideOptions) -> Vec<String> {
         args.extend(notes_access(notes, opts.project_docs.as_deref()));
         instructions.push_str("\n\n");
         instructions.push_str(&notes_instruction(notes, opts.project_docs.as_deref(), false));
+    }
+    if let Some(preferences) = &opts.preferences {
+        instructions.push_str("\n\n");
+        instructions.push_str(&preferences_instruction(preferences));
     }
     args.extend(["--append-system-prompt".to_string(), instructions]);
     if let Some(id) = &opts.resume_id {
@@ -1541,6 +1552,7 @@ mod tests {
                 notes: None,
                 project_docs: None,
                 memory: None,
+                preferences: None,
             })
         };
         let args = with(Some("max"));
@@ -1564,6 +1576,7 @@ mod tests {
             notes: None,
             project_docs: None,
             memory: None,
+            preferences: None,
         });
         assert!(args.contains(&"--replay-user-messages".to_string()));
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
@@ -1608,6 +1621,7 @@ mod tests {
             notes: None,
             project_docs: None,
             memory: None,
+            preferences: None,
         });
         let at = args.iter().position(|a| a == "--mcp-config").unwrap();
         let config: Value = serde_json::from_str(&args[at + 1]).unwrap();
@@ -1637,6 +1651,7 @@ mod tests {
             notes: None,
             project_docs: None,
             memory: None,
+            preferences: None,
         });
         let at = args.iter().position(|a| a == "--mcp-config").unwrap();
         let config: Value = serde_json::from_str(&args[at + 1]).unwrap();
@@ -1670,6 +1685,7 @@ mod tests {
             notes: None,
             project_docs: None,
             memory: None,
+            preferences: None,
         });
         let at = args.iter().position(|a| a == "--settings").unwrap();
         let settings: Value = serde_json::from_str(&args[at + 1]).unwrap();
@@ -1692,6 +1708,7 @@ mod tests {
             notes: Some("/data/notes/chat-1/notes.md".into()),
             project_docs: None,
             memory: None,
+            preferences: None,
         };
         for args in [launch_args(&opts(None)), launch_args(&opts(Some(SideOptions::default())))] {
             assert!(args.windows(2).any(|w| w == ["--add-dir", "/data/notes/chat-1"]));
@@ -1714,6 +1731,7 @@ mod tests {
             notes: Some("/home/projects/-work/chats/chat-1/notes.md".into()),
             project_docs: Some("/home/projects/-work/docs".into()),
             memory: None,
+            preferences: None,
         };
         let arg_after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).map(|at| args[at + 1].clone());
 
@@ -1751,6 +1769,7 @@ mod tests {
             notes: Some("/data/notes/chat-1/notes.md".into()),
             project_docs: None,
             memory: None,
+            preferences: None,
         };
         let arg_after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).map(|at| args[at + 1].clone());
 
@@ -1785,6 +1804,7 @@ mod tests {
             notes: None,
             project_docs: None,
             memory: None,
+            preferences: None,
         }
     }
 
@@ -1812,6 +1832,25 @@ mod tests {
         // With no memory folder, its own is left alone.
         let plain: Value = serde_json::from_str(&arg_after(&launch_args(&bare_options()), "--settings").unwrap()).unwrap();
         assert!(plain.get("autoMemoryDirectory").is_none());
+    }
+
+    #[test]
+    fn the_users_preferences_are_in_a_chats_and_a_side_chats_instructions() {
+        let arg_after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).map(|at| args[at + 1].clone());
+        let preferences = Some(crate::home::Preferences {
+            path: "/home/preferences.md".into(),
+            text: "# Working preferences\n- Be brief.".into(),
+        });
+        let told = "The user's own standing instructions, kept in /home/preferences.md. Follow them exactly; where \
+they differ from your defaults, they win. Pass the ones that matter on to any helper agent you start.\n\
+# Working preferences\n- Be brief.";
+        let main = launch_args(&SpawnOptions { preferences: preferences.clone(), ..bare_options() });
+        assert!(arg_after(&main, "--append-system-prompt").unwrap().ends_with(told));
+        let side = launch_args(&SpawnOptions { preferences, side: Some(SideOptions::default()), ..bare_options() });
+        assert!(arg_after(&side, "--append-system-prompt").unwrap().ends_with(told));
+        // None: nothing is said.
+        let plain = arg_after(&launch_args(&bare_options()), "--append-system-prompt").unwrap();
+        assert!(!plain.contains("standing instructions"));
     }
 
     #[test]
@@ -2046,6 +2085,7 @@ mod tests {
             notes: None,
             project_docs: None,
             memory: None,
+            preferences: None,
         });
         assert!(args.contains(&"--forward-subagent-text".to_string()));
     }
@@ -2433,6 +2473,7 @@ mod tests {
                 notes: None,
                 project_docs: None,
                 memory: None,
+                preferences: None,
             })
         };
         let first = side(Some("main-1"));
