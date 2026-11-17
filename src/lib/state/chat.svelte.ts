@@ -401,8 +401,13 @@ export class Chat {
     return this.panelOpen && this.panelView === "browser";
   }
 
-  /** Opens the browser view: the tab on show if there is one, an empty address line if not. */
+  /** Opens the browser view: the tab on show, or a new empty tab if there is none. */
   openBrowser(): void {
+    this.showBrowser();
+    if (this.browserTabs.length === 0) void this.newBrowserTab();
+  }
+
+  private showBrowser(): void {
     this.browserOn = true;
     this.panelView = "browser";
     this.panelOpen = true;
@@ -410,7 +415,7 @@ export class Chat {
 
   /** + or Cmd+T: a new empty tab, with the cursor in the address box. */
   async newBrowserTab(): Promise<void> {
-    this.openBrowser();
+    this.showBrowser();
     try {
       this.browserShownTab = await browserNewTab(this.sessionId);
       this.focusAddress++;
@@ -452,7 +457,7 @@ export class Chat {
   /** From a page line in the chat: shows the tab on that address, or opens it in a new tab. */
   async showPage(url: string): Promise<void> {
     if (this.owner) return this.owner.showPage(url);
-    this.openBrowser();
+    this.showBrowser();
     const same = (a: string) => {
       try {
         return new URL(a).href === new URL(url).href;
