@@ -9,6 +9,7 @@
 import {
   terminalAttach,
   terminalClose,
+  terminalMove,
   terminalNew,
   terminalRunning,
   terminalTabs,
@@ -110,6 +111,17 @@ class Terminals {
   pick(project: string, id: string): void {
     this.active[project] = id;
     this.wantsKeys = true;
+  }
+
+  /** A tab dragged to place `to` in the row. Moved here at once, so it doesn't jump back while the core answers. */
+  move(project: string, id: string, to: number): void {
+    const tabs = this.tabs(project);
+    const tab = tabs.find((t) => t.id === id);
+    if (!tab) return;
+    const rest = tabs.filter((t) => t !== tab);
+    rest.splice(Math.min(to, rest.length), 0, tab);
+    this.byProject[project] = rest;
+    void terminalMove(id, to).catch(() => {});
   }
 
   /** The tab next to the one on show, wrapping round. */

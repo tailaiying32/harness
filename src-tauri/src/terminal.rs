@@ -112,6 +112,9 @@ struct Tab {
     size: PtySize,
     /// Output came since the last save.
     dirty: bool,
+    /// Counts tabs as they open, so two with one name keep their " 2" when
+    /// dragged past each other.
+    born: u64,
 }
 
 impl Tab {
@@ -131,6 +134,7 @@ impl Tab {
             channel: None,
             size: DEFAULT_SIZE,
             dirty: false,
+            born: 0,
         }
     }
 
@@ -162,6 +166,17 @@ struct State {
     order: Vec<String>,
     /// The tab on screen, if any.
     shown: Option<String>,
+    /// The last `Tab::born` given.
+    born: u64,
+}
+
+impl State {
+    fn add(&mut self, id: String, mut tab: Tab) {
+        self.born += 1;
+        tab.born = self.born;
+        self.order.push(id.clone());
+        self.tabs.insert(id, tab);
+    }
 }
 
 struct Inner {
@@ -226,8 +241,7 @@ impl Terminals {
             tab.tail = row.output;
             tab.push(&line_bytes(&format!("restored {}", local_time(row.saved_at)), tab.size.cols));
             tab.dirty = false;
-            state.order.push(row.id.clone());
-            state.tabs.insert(row.id, tab);
+            state.add(row.id, tab);
         }
     }
 
@@ -264,9 +278,7 @@ impl Terminals {
         let mut tab = Tab::new(project, folder, worktree, label);
         tab.size = size(cols, rows);
         {
-            let mut state = lock(&self.0.state);
-            state.order.push(id.clone());
-            state.tabs.insert(id.clone(), tab);
+            lock(&self.0.state).add(id.clone(), tab);
         }
         if let Err(e) = self.start(&id) {
             let mut state = lock(&self.0.state);
@@ -374,6 +386,32 @@ impl Terminals {
     pub fn running(&self, id: &str) -> Option<String> {
         self.check_running();
         lock(&self.0.state).tabs.get(id).and_then(|t| t.running.clone())
+    }
+
+    /// The user dragged a tab to place `to` among its project's tabs.
+    pub fn move_tab(&self, id: &str, to: usize) {
+        let project = {
+            let mut state = lock(&self.0.state);
+            let Some(project) = state.tabs.get(id).map(|t| t.project.clone()) else { return };
+            // The project's other tabs, in order; it goes before the one now at `to`.
+            let others: Vec<String> = state
+                .order
+                .iter()
+                .filter(|t| *t != id && state.tabs.get(*t).is_some_and(|tab| tab.project == project))
+                .cloned()
+                .collect();
+            state.order.retain(|t| t != id);
+            let at = match others.get(to) {
+                Some(next) => state.order.iter().position(|t| t == next).unwrap_or(state.order.len()),
+                None => others
+                    .last()
+                    .and_then(|last| state.order.iter().position(|t| t == last))
+                    .map_or(state.order.len(), |p| p + 1),
+            };
+            state.order.insert(at, id.to_string());
+            project
+        };
+        self.emit(&project);
     }
 
     /// Closes a tab for good, ending its shell and everything it started.
@@ -676,25 +714,31 @@ pub fn tools() -> Value {
     ])
 }
 
-/// A project's tabs, in order, with names made unique.
+/// A project's tabs, in order, with names made unique: where two share one,
+/// the later opened is " 2", wherever it sits in the row.
 fn infos(state: &State, project: &str) -> Vec<TabInfo> {
+    let mut mine: Vec<(&String, &Tab)> =
+        state.order.iter().filter_map(|id| Some((id, state.tabs.get(id).filter(|t| t.project == project)?))).collect();
+    let mut by_age: Vec<&(&String, &Tab)> = mine.iter().collect();
+    by_age.sort_by_key(|(_, tab)| tab.born);
     let mut seen: HashMap<String, usize> = HashMap::new();
-    state
-        .order
-        .iter()
-        .filter_map(|id| {
-            let tab = state.tabs.get(id).filter(|t| t.project == project)?;
-            let base = tab.base_title();
-            let n = seen.entry(base.clone()).or_insert(0);
-            *n += 1;
-            let title = if *n == 1 { base } else { format!("{base} {n}") };
-            Some(TabInfo {
+    let mut titles: HashMap<String, String> = HashMap::new();
+    for (id, tab) in by_age {
+        let base = tab.base_title();
+        let n = seen.entry(base.clone()).or_insert(0);
+        *n += 1;
+        titles.insert((*id).clone(), if *n == 1 { base } else { format!("{base} {n}") });
+    }
+    mine.drain(..)
+        .map(|(id, tab)| {
+            let title = titles.remove(id).unwrap_or_default();
+            TabInfo {
                 id: id.clone(),
                 title,
                 running: tab.running.clone(),
                 closed: tab.live.is_none(),
                 worktree: tab.worktree.as_ref().map(|w| w.to_string_lossy().into_owned()),
-            })
+            }
         })
         .collect()
 }
@@ -1172,6 +1216,28 @@ mod tests {
         assert!(t.tabs(&folder()).is_empty());
         let last = seen.lock().unwrap().last().cloned().unwrap();
         assert_eq!(last.event, AgentEvent::TerminalTabs { project: folder(), tabs: vec![] });
+    }
+
+    #[test]
+    fn a_dragged_tab_moves_among_its_projects_and_keeps_its_name() {
+        let (t, _) = rig(IDLE);
+        let project = folder();
+        let a = t.open(&project, None, Some("same".into()), 80, 24).unwrap();
+        let b = t.open(&project, None, Some("same".into()), 80, 24).unwrap();
+        let c = t.open(&project, None, Some("other".into()), 80, 24).unwrap();
+        // Another project's tab sits between, in the shared order.
+        lock(&t.0.state).order.insert(1, "elsewhere".into());
+        t.move_tab(&b.id, 0);
+        let names: Vec<_> = t.tabs(&project).into_iter().map(|t| (t.id, t.title)).collect();
+        assert_eq!(names, [(b.id.clone(), "same 2".into()), (a.id.clone(), "same".into()), (c.id.clone(), "other".into())]);
+        t.move_tab(&b.id, 9);
+        let ids: Vec<_> = t.tabs(&project).into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, [a.id.clone(), c.id.clone(), b.id.clone()]);
+        t.move_tab(&a.id, 1);
+        let ids: Vec<_> = t.tabs(&project).into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, [c.id.clone(), a.id.clone(), b.id.clone()]);
+        assert!(lock(&t.0.state).order.contains(&"elsewhere".to_string()));
+        t.shutdown();
     }
 
     #[test]
