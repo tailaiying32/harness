@@ -305,6 +305,14 @@ pub enum AgentEvent {
         mode: Option<crate::keep_awake::Mode>,
         ends_at: Option<u64>,
     },
+    /// The agent asked the side panel to show something: a markdown file as
+    /// a tab (`path`), or a view (`view`: notes, plan, browser, terminal or
+    /// info). One of the two is set. Not saved: a reopened chat doesn't
+    /// reopen it.
+    ShowPanel {
+        path: Option<String>,
+        view: Option<String>,
+    },
 }
 
 /// One tab of a chat's browser. `url` is empty for a new tab with no page yet.
@@ -334,6 +342,7 @@ impl AgentEvent {
                 | AgentEvent::TerminalTabs { .. }
                 | AgentEvent::TabKey { .. }
                 | AgentEvent::KeepAwake { .. }
+                | AgentEvent::ShowPanel { .. }
                 | AgentEvent::MessageWithdrawn { ok: false, .. }
         )
     }

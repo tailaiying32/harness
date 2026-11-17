@@ -151,7 +151,7 @@ fn move_into_project(bytes: &[u8], source: &Path, project: &Path, stem: &str, ex
 
 /// A markdown file's bytes. Only absolute paths ending in `.md` or
 /// `.markdown`: the panel shows plans and notes, not whatever a link names.
-fn read_bytes(path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn read_bytes(path: &Path) -> Result<Vec<u8>, String> {
     let markdown = path
         .extension()
         .and_then(|ext| ext.to_str())

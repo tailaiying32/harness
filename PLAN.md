@@ -2137,6 +2137,25 @@ working. One for the whole app: sleep is machine-wide.
 - `HARNESS_KEEP_AWAKE_{LIMIT,AWAY,QUIET,TICK}_SECONDS` override the times.
 - Not covered: coming back after a restart.
 
+### Showing things in the panel (`panel.rs`, built 2026-11-17)
+
+"Pull up the to-do list" used to need a reply link and a click: a file only
+opened by itself when the agent wrote or edited it.
+
+- **The tool**: an app tool group, `harness_panel`, in every chat, with one
+  tool, `show`. It takes `path` (a markdown file, full path) or `view`
+  (`notes`, `plan`, `browser`, `terminal`, `info`). It opens the panel if
+  hidden and picks that tab or view. Its instruction line tells the agent to
+  use it when the user asks to see, show, open or pull up something.
+- **Checks in the core** first, so the agent hears why: the same rule as a
+  link (absolute `.md`/`.markdown`, exists, not too big). Other files are
+  refused; the agent links them instead.
+- **The event** `show_panel` goes to the chat; a side chat's opens in its
+  chat's panel. Not saved, so a reopened chat doesn't reopen anything.
+- **Why a tool, not a guess**: opening every file the agent reads would
+  fill the panel with files read only to understand the code.
+- Not tested yet in the real app.
+
 ### If the approval channel breaks
 
 `--permission-prompt-tool stdio` and the `control_request` /

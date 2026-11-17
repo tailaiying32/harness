@@ -1220,6 +1220,16 @@ export class Chat {
         this.docSaved(event.from, event.to);
         break;
 
+      // Claude asked to show something in the panel; a side chat's opens in its chat's panel.
+      case "show_panel": {
+        const chat = this.owner ?? this;
+        if (event.path) void chat.openFile(event.path);
+        else if (event.view === "notes") chat.openPanel(NOTES_TAB);
+        else if (event.view === "plan") chat.openPanel(chat.plan ? PLAN_TAB : undefined);
+        else if (event.view) chat.showView(event.view);
+        break;
+      }
+
       // Claude or the user opened, moved or closed a page. The panel isn't
       // switched for Claude; the chat's page line (see tool_result) is how to look.
       case "browser_tabs":

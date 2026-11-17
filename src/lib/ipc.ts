@@ -102,7 +102,8 @@ export type AgentEvent =
   | { kind: "browser_tabs"; tabs: BrowserTab[]; shown: string | null }
   | { kind: "terminal_tabs"; project: string; tabs: TerminalTab[] }
   | { kind: "tab_key"; action: TabAction }
-  | { kind: "keep_awake"; mode: KeepAwakeMode | null; ends_at: number | null };
+  | { kind: "keep_awake"; mode: KeepAwakeMode | null; ends_at: number | null }
+  | { kind: "show_panel"; path: string | null; view: "notes" | "plan" | "browser" | "terminal" | "info" | null };
 
 /** One command or agent running in the background. `kind` is the agent's own word, e.g. "local_bash". */
 export type BackgroundTask = { id: string; kind: string; description: string };

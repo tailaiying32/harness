@@ -8,6 +8,7 @@ mod images;
 mod keep_awake;
 mod locate;
 mod notes;
+mod panel;
 mod sessions;
 mod side_chat;
 mod skills;
@@ -902,6 +903,7 @@ pub fn run() {
             let side = SideChats::new(claude, store.clone(), out.clone(), dir.join("notes"), dir.join("side_copies.json"));
             let browsers = Browsers::new(app.handle().clone(), out.clone());
             let terminals = Terminals::new(out.clone(), store.clone());
+            let panel_out = out.clone();
             let sessions = SessionManager::new(agents.clone(), store.clone(), out, dir);
             // Every chat's agent can drive that chat's browser and read its
             // project's terminal.
@@ -911,6 +913,7 @@ pub fn run() {
                 let skills = sessions.skills().clone();
                 let chats = chats::Chats::new(store.clone());
                 let keep_awake = keep_awake.clone();
+                let panel_out = panel_out.clone();
                 sessions.set_app_tools(Arc::new(move |chat_id: &str, project: &str| {
                     let browser_tools = {
                         let browsers = browsers.clone();
@@ -970,7 +973,21 @@ pub fn run() {
                             }),
                         }
                     };
-                    let mut tools = vec![browser_tools, terminal_tools, chats_tools, keep_awake_tools];
+                    // Every chat's agent can open things in its side panel.
+                    let panel_tools = {
+                        let out = panel_out.clone();
+                        let chat_id = chat_id.to_string();
+                        AppTools {
+                            server: panel::SERVER,
+                            instruction: panel::INSTRUCTION.into(),
+                            list: panel::tools(),
+                            call: Arc::new(move |tool, args| {
+                                let result = panel::call(&out, &chat_id, &tool, &args);
+                                Box::pin(async move { result })
+                            }),
+                        }
+                    };
+                    let mut tools = vec![browser_tools, terminal_tools, chats_tools, keep_awake_tools, panel_tools];
                     // Read on every start, so a new chat sees the skills
                     // imported since; none means no skills tool at all.
                     let list = skills.list();

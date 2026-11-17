@@ -24,6 +24,8 @@ them when done. Details live in PLAN.md.
 ## To try in the real app
 
 - [ ] Subagent batch labels from Haiku; step counts on finished subagents.
+- [ ] "Pull up the to-do list" opening it in the panel (the `harness_panel`
+  show tool), and "show me the terminal".
 - [ ] Effort picker.
 - [ ] Editing a queued message from the message box.
 - [ ] Links: a markdown file, a web link, another site from the browser pane.
