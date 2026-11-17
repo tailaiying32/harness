@@ -102,10 +102,11 @@ const CLAUDE_DOCS_INSTRUCTION: &str = "Claude Docs isn't available in this app."
 /// other claude.ai connectors stay; a deny rule alone hid the tools but left
 /// the instructions (tested on CLI 2.1.325; the connectors load after the
 /// first message).
-fn launch_settings(tools: &[AppTools], notes: Option<&Path>) -> String {
+fn launch_settings(tools: &[AppTools], notes: Option<&Path>, project_docs: Option<&Path>) -> String {
     let mut permissions = json!({ "ask": ["EnterWorktree"], "deny": CLAUDE_DOCS_DENY });
     let mut allow: Vec<String> = tools.iter().map(|t| format!("mcp__{}", t.server)).collect();
-    if let Some(folder) = notes.and_then(Path::parent) {
+    // The chat's own folder, and its project's docs folder.
+    for folder in notes.and_then(Path::parent).into_iter().chain(project_docs) {
         allow.push(format!("Edit(/{}/**)", folder.display()));
     }
     if !allow.is_empty() {
@@ -148,11 +149,9 @@ fn apply_plan_edit(input: &mut Value, plan: Option<String>) {
 
 /// Read access to the folder holding the chat's notes, without asking (tested
 /// on CLI 2.1.322, in default mode and with a side chat's read-only tools).
-fn notes_access(notes: &Path) -> Vec<String> {
-    match notes.parent() {
-        Some(folder) => vec!["--add-dir".to_string(), folder.display().to_string()],
-        None => Vec::new(),
-    }
+fn notes_access(notes: &Path, project_docs: Option<&Path>) -> Vec<String> {
+    let folders = notes.parent().into_iter().chain(project_docs);
+    folders.flat_map(|folder| ["--add-dir".to_string(), folder.display().to_string()]).collect()
 }
 
 /// The command line for one chat's process.
@@ -177,7 +176,10 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
     ]
     .map(String::from)
     .to_vec();
-    args.extend(["--settings".to_string(), launch_settings(&opts.tools, opts.notes.as_deref())]);
+    args.extend([
+        "--settings".to_string(),
+        launch_settings(&opts.tools, opts.notes.as_deref(), opts.project_docs.as_deref()),
+    ]);
     let mut instructions = format!("{PLAN_INSTRUCTION}\n\n{WORKTREE_INSTRUCTION}");
     if !opts.tools.is_empty() {
         args.extend(["--mcp-config".to_string(), mcp_config(&opts.tools)]);
@@ -187,9 +189,9 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
         }
     }
     if let Some(notes) = &opts.notes {
-        args.extend(notes_access(notes));
+        args.extend(notes_access(notes, opts.project_docs.as_deref()));
         instructions.push_str("\n\n");
-        instructions.push_str(&notes_instruction(notes, true));
+        instructions.push_str(&notes_instruction(notes, opts.project_docs.as_deref(), true));
         instructions.push(' ');
         instructions.push_str(CLAUDE_DOCS_INSTRUCTION);
     }
@@ -234,9 +236,9 @@ fn side_args(opts: &SpawnOptions, side: &SideOptions) -> Vec<String> {
     .to_vec();
     let mut instructions = SIDE_INSTRUCTION.to_string();
     if let Some(notes) = &opts.notes {
-        args.extend(notes_access(notes));
+        args.extend(notes_access(notes, opts.project_docs.as_deref()));
         instructions.push_str("\n\n");
-        instructions.push_str(&notes_instruction(notes, false));
+        instructions.push_str(&notes_instruction(notes, opts.project_docs.as_deref(), false));
     }
     args.extend(["--append-system-prompt".to_string(), instructions]);
     if let Some(id) = &opts.resume_id {
@@ -641,10 +643,7 @@ fn forget_saved_session(agent_session_id: &str) {
     }
     let base = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(std::path::PathBuf::from)
-        .or_else(|| {
-            let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-            std::env::var_os(var).map(|h| std::path::PathBuf::from(h).join(".claude"))
-        });
+        .or_else(|| crate::home::user_home().map(|home| home.join(".claude")));
     let Some(projects) = base.map(|b| b.join("projects")) else {
         return;
     };
@@ -1521,6 +1520,7 @@ mod tests {
                 side: None,
                 tools: Vec::new(),
                 notes: None,
+                project_docs: None,
             })
         };
         let args = with(Some("max"));
@@ -1542,6 +1542,7 @@ mod tests {
             side: None,
             tools: Vec::new(),
             notes: None,
+            project_docs: None,
         });
         assert!(args.contains(&"--replay-user-messages".to_string()));
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
@@ -1584,6 +1585,7 @@ mod tests {
             side: None,
             tools: vec![echo_tools()],
             notes: None,
+            project_docs: None,
         });
         let at = args.iter().position(|a| a == "--mcp-config").unwrap();
         let config: Value = serde_json::from_str(&args[at + 1]).unwrap();
@@ -1611,6 +1613,7 @@ mod tests {
             side: None,
             tools: vec![echo_tools(), more],
             notes: None,
+            project_docs: None,
         });
         let at = args.iter().position(|a| a == "--mcp-config").unwrap();
         let config: Value = serde_json::from_str(&args[at + 1]).unwrap();
@@ -1642,6 +1645,7 @@ mod tests {
             side: None,
             tools: vec![chats],
             notes: None,
+            project_docs: None,
         });
         let at = args.iter().position(|a| a == "--settings").unwrap();
         let settings: Value = serde_json::from_str(&args[at + 1]).unwrap();
@@ -1662,12 +1666,49 @@ mod tests {
             side,
             tools: Vec::new(),
             notes: Some("/data/notes/chat-1/notes.md".into()),
+            project_docs: None,
         };
         for args in [launch_args(&opts(None)), launch_args(&opts(Some(SideOptions::default())))] {
             assert!(args.windows(2).any(|w| w == ["--add-dir", "/data/notes/chat-1"]));
             let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
             assert!(args[at + 1].contains("/data/notes/chat-1/notes.md"));
         }
+    }
+
+    #[test]
+    fn a_chat_may_read_and_write_its_projects_docs_and_a_side_chat_may_read_them() {
+        let opts = |side: Option<SideOptions>| SpawnOptions {
+            binary: "claude".into(),
+            project_path: "/work".into(),
+            resume_id: None,
+            mode: None,
+            model: None,
+            effort: None,
+            side,
+            tools: Vec::new(),
+            notes: Some("/home/projects/-work/chats/chat-1/notes.md".into()),
+            project_docs: Some("/home/projects/-work/docs".into()),
+        };
+        let arg_after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).map(|at| args[at + 1].clone());
+
+        let main = launch_args(&opts(None));
+        let settings: Value = serde_json::from_str(&arg_after(&main, "--settings").unwrap()).unwrap();
+        assert_eq!(
+            settings["permissions"]["allow"],
+            json!(["Edit(//home/projects/-work/chats/chat-1/**)", "Edit(//home/projects/-work/docs/**)"])
+        );
+        let prompt = arg_after(&main, "--append-system-prompt").unwrap();
+        assert!(prompt.contains("write it into the project's docs folder, /home/projects/-work/docs, delete the old file"));
+        assert!(prompt.contains("Put a doc into the repo itself only when the user asks for that in so many words."));
+
+        let side = launch_args(&opts(Some(SideOptions::default())));
+        for args in [&main, &side] {
+            assert!(args.windows(2).any(|w| w == ["--add-dir", "/home/projects/-work/chats/chat-1"]));
+            assert!(args.windows(2).any(|w| w == ["--add-dir", "/home/projects/-work/docs"]));
+        }
+        let prompt = arg_after(&side, "--append-system-prompt").unwrap();
+        assert!(prompt.contains("The project's saved docs are in /home/projects/-work/docs."));
+        assert!(!prompt.contains("write it into"), "a side chat can't write docs");
     }
 
     #[test]
@@ -1682,6 +1723,7 @@ mod tests {
             side,
             tools: Vec::new(),
             notes: Some("/data/notes/chat-1/notes.md".into()),
+            project_docs: None,
         };
         let arg_after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).map(|at| args[at + 1].clone());
 
@@ -1705,7 +1747,7 @@ mod tests {
     #[test]
     fn claude_docs_is_off_in_every_main_chat() {
         for (tools, notes) in [(Vec::new(), None), (vec![echo_tools()], Some(Path::new("/data/notes/c/notes.md")))] {
-            let settings: Value = serde_json::from_str(&launch_settings(&tools, notes)).unwrap();
+            let settings: Value = serde_json::from_str(&launch_settings(&tools, notes, None)).unwrap();
             assert_eq!(settings["deniedMcpServers"], json!([{ "serverName": "claude.ai Claude Docs" }]));
             assert_eq!(settings["permissions"]["deny"], json!(CLAUDE_DOCS_DENY));
             assert_eq!(settings["permissions"]["ask"], json!(["EnterWorktree"]));
@@ -1931,6 +1973,7 @@ mod tests {
             side: None,
             tools: Vec::new(),
             notes: None,
+            project_docs: None,
         });
         assert!(args.contains(&"--forward-subagent-text".to_string()));
     }
@@ -2316,6 +2359,7 @@ mod tests {
                 }),
                 tools: Vec::new(),
                 notes: None,
+                project_docs: None,
             })
         };
         let first = side(Some("main-1"));

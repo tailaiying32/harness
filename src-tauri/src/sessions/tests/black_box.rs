@@ -189,7 +189,7 @@ fn rig_in(dir: &Path, worktree_idle: Duration, keep: Duration, lookup: PrLookup)
         worktree_idle: Some(worktree_idle),
         keep: Some(keep),
     };
-    let manager = SessionManager::build(fake_agents(&fake), store.clone(), out, timings, dir.to_path_buf(), lookup);
+    let manager = SessionManager::build(fake_agents(&fake), store.clone(), out, timings, dir.to_path_buf(), Home::new(dir.join("home")), lookup);
     Rig {
         fake,
         store,

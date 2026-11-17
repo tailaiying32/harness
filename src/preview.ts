@@ -424,6 +424,8 @@ const savedChat: AgentEvent[] = [
 // still waiting for an answer. For the side panel.
 const notesPath = `${home}/code/harness/docs/memory-notes.md`;
 // In the chat's own folder, so its tab has the save-to-project button.
+// Written when chat folders were still under the app's data folder: the chat's
+// folder has moved since (see `chatFolder`), and its tab shows it from there.
 const testPlanPath = `${home}/Library/Application Support/com.harness.app/notes/planning/test-plan.md`;
 const planPath = `${home}/.claude/plans/idle-timeout.md`;
 const notesText =
@@ -588,6 +590,13 @@ let keepAwake: { mode: "away" | "overnight"; ends_at: number } | null = null;
 /** Documents edited in a tab, kept for the page's life. */
 const docsByPath = new Map<string, string>();
 
+/** A project's folder in the app's home folder, named from its path as the core names it. */
+const projectHome = (project: string) => `${home}/.harness/projects/${project.replace(/[^A-Za-z0-9]/g, "-")}`;
+/** A chat's own folder: its notes and docs, under its project. */
+const chatFolder = (project: string, chatId: string) => `${projectHome(project)}/chats/${chatId}`;
+const projectOf = (chatId: string) =>
+  [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === chatId)?.project_path ?? `${home}/code/harness`;
+
 const notesByChat = new Map<string, string>([
   [
     "planning",
@@ -654,6 +663,7 @@ const commands: Record<string, (args: Args) => unknown> = {
     session: [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === args.sessionId),
     events: args.sessionId === "agents" ? (setTimeout(playAgents, 300), agentsChat) : args.sessionId === "images" ? imagesChat : args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : args.sessionId === "looks" ? looksChat : args.sessionId === "waiting" ? askingChat : args.sessionId === "working" ? movedChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
     live: args.sessionId === "planning" || args.sessionId === "waiting" || args.sessionId === "agents",
+    chat_folder: chatFolder(projectOf(args.sessionId), args.sessionId),
   }),
   title_batch: (args) => {
     setTimeout(() => emit(args.sessionId, { kind: "batch_titled", tool_id: args.toolId, title: "Measuring idle memory" }), 600);
@@ -838,7 +848,7 @@ const commands: Record<string, (args: Args) => unknown> = {
   write_doc: (args: Args) => void docsByPath.set(String(args.path), String(args.text)),
   save_doc_to_project: (args: Args) => {
     const from = String(args.path);
-    const to = `${String(args.project)}/docs/${from.split("/").pop()}`;
+    const to = `${projectHome(String(args.project))}/docs/${from.split("/").pop()}`;
     docsByPath.set(to, docsByPath.get(from) ?? "");
     docsByPath.delete(from);
     emit(String(args.chatId), { kind: "doc_saved", from, to });
@@ -846,8 +856,8 @@ const commands: Record<string, (args: Args) => unknown> = {
   },
   save_notes_to_project: (args: Args) => {
     const chatId = String(args.chatId);
-    const from = `${home}/Library/Application Support/com.harness.app/notes/${chatId}/notes.md`;
-    const to = `${String(args.project)}/docs/notes.md`;
+    const from = `${chatFolder(String(args.project), chatId)}/notes.md`;
+    const to = `${projectHome(String(args.project))}/docs/notes.md`;
     docsByPath.set(to, notesByChat.get(chatId) ?? "");
     notesByChat.delete(chatId);
     emit(chatId, { kind: "doc_saved", from, to });

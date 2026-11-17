@@ -18,8 +18,9 @@ use crate::agent::{AgentAdapter, EventSink, RunningAgent, SideOptions, SpawnOpti
 #[cfg(test)]
 use crate::agent::ImagePayload;
 use crate::events::{AgentEvent, Envelope, SessionState};
+use crate::home::Home;
 use crate::notes::Notes;
-use crate::sessions::{Out, configured_idle, notes_for};
+use crate::sessions::{Out, configured_idle, notes_for, project_docs_for};
 use crate::store::Store;
 
 /// Longest tool result kept in memory, as for chats.
@@ -79,12 +80,12 @@ pub struct SideChats(Arc<Inner>);
 impl SideChats {
     /// `copies_file` lists the agent's copies still to delete; any listed
     /// there from an earlier run are deleted now.
-    pub fn new(adapter: Arc<dyn AgentAdapter>, store: Arc<Store>, out: Out, notes_root: PathBuf, copies_file: PathBuf) -> Self {
+    pub fn new(adapter: Arc<dyn AgentAdapter>, store: Arc<Store>, out: Out, home: Home, copies_file: PathBuf) -> Self {
         let chats = Self(Arc::new(Inner {
             adapter,
+            notes: Notes::for_store(home, store.clone()),
             store,
             out,
-            notes: Notes::new(notes_root),
             sides: Mutex::default(),
             ended: Mutex::default(),
             next_run: AtomicU64::new(1),
@@ -153,6 +154,7 @@ impl SideChats {
                         side: Some(SideOptions { fork_from }),
                         tools: Vec::new(),
                         notes: notes_for(&self.0.notes, chat_id),
+                        project_docs: project_docs_for(&self.0.notes, chat_id),
                     },
                     self.sink(side_id, run),
                 )?);
@@ -511,7 +513,7 @@ mod tests {
             fake.clone(),
             store,
             out,
-            std::env::temp_dir().join("harness-side-notes-test"),
+            Home::new(dir.join("home")),
             dir.join("side_copies.json"),
         );
         let inner = Arc::get_mut(&mut chats.0).unwrap();
@@ -746,7 +748,7 @@ mod tests {
         // The app dies here; the next start reads the list.
         let fake = Arc::new(Fake::default());
         let store = Arc::new(Store::open(&rig.dir).unwrap());
-        let _again = SideChats::new(fake.clone(), store, Arc::new(|_| {}), rig.dir.join("notes"), file.clone());
+        let _again = SideChats::new(fake.clone(), store, Arc::new(|_| {}), Home::new(rig.dir.join("home")), file.clone());
         assert_eq!(*fake.forgotten.lock().unwrap(), vec!["side-1".to_string()]);
         let listed: Vec<String> = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert!(listed.is_empty());

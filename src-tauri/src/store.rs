@@ -206,6 +206,9 @@ const ADDED_SESSION_COLUMNS: &[(&str, &str)] = &[
     ("effort", "TEXT NOT NULL DEFAULT 'default'"),
     // The chat's pull requests: a JSON list of `worktree::PrInfo`, oldest first.
     ("prs", "TEXT"),
+    // Something the app has to tell the chat's agent with its next message
+    // (its folder moved, say). Cleared once told.
+    ("pending_note", "TEXT"),
 ];
 
 fn migrate(conn: &Connection) -> Result<(), String> {
@@ -625,6 +628,35 @@ impl Store {
             .collect::<Result<_, _>>()
             .map_err(err);
         rows
+    }
+
+    /// Leaves something for the chat's agent to be told with the chat's next
+    /// message. Added after anything already waiting.
+    pub fn add_pending_note(&self, session_id: &str, note: &str) -> Result<(), String> {
+        self.exec(
+            "UPDATE sessions SET pending_note = CASE
+                 WHEN pending_note IS NULL OR pending_note = '' THEN ?2
+                 ELSE pending_note || char(10) || char(10) || ?2 END
+             WHERE id = ?1",
+            params![session_id, note],
+        )
+    }
+
+    /// What is waiting to be told to the chat's agent, which is then cleared:
+    /// it is told once.
+    pub fn take_pending_note(&self, session_id: &str) -> Result<Option<String>, String> {
+        let conn = self.conn.lock().unwrap();
+        let note: Option<String> = conn
+            .query_row("SELECT pending_note FROM sessions WHERE id = ?1", [session_id], |r| r.get(0))
+            .optional()
+            .map_err(err)?
+            .flatten();
+        let note = note.filter(|n| !n.trim().is_empty());
+        if note.is_some() {
+            conn.execute("UPDATE sessions SET pending_note = NULL WHERE id = ?1", [session_id])
+                .map_err(err)?;
+        }
+        Ok(note)
     }
 
     /// Where the main folder was when the chat began. Set once.
@@ -1352,6 +1384,18 @@ mod tests {
         store.set_trashed("b", None).unwrap();
         assert_eq!(store.sidebar().unwrap().len(), 2);
         assert!(store.trash().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_pending_note_is_handed_over_once() {
+        let store = Store::in_memory();
+        store.touch_session("s1", "/p", "hi", "default", "default").unwrap();
+        assert_eq!(store.take_pending_note("s1").unwrap(), None);
+        store.add_pending_note("s1", "The folder moved.").unwrap();
+        store.add_pending_note("s1", "And again.").unwrap();
+        assert_eq!(store.take_pending_note("s1").unwrap().as_deref(), Some("The folder moved.\n\nAnd again."));
+        assert_eq!(store.take_pending_note("s1").unwrap(), None);
+        assert_eq!(store.take_pending_note("nope").unwrap(), None);
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod chats;
 mod docs;
 mod events;
 mod github;
+mod home;
 mod images;
 mod keep_awake;
 mod locate;
@@ -28,6 +29,7 @@ use agent::cursor::CursorAdapter;
 use agent::{Agents, AppTools};
 use browser::Browsers;
 use events::{AgentEvent, Decision, Envelope, ModelInfo};
+use home::Home;
 use locate::SetupInfo;
 use sessions::{Out, SessionManager, TerminalHooks};
 use side_chat::SideChats;
@@ -99,6 +101,9 @@ struct LoadedSession {
     session: SessionRow,
     events: Vec<AgentEvent>,
     live: bool,
+    /// The chat's own folder (its notes and docs) as it is now. Paths saved
+    /// in the history may name an older place for it.
+    chat_folder: String,
 }
 
 #[tauri::command]
@@ -117,6 +122,7 @@ async fn load_session(state: State<'_, AppState>, session_id: String) -> Result<
         session,
         events,
         live: state.sessions.is_live(&session_id),
+        chat_folder: state.sessions.notes().folder(&session_id)?.display().to_string(),
     })
 }
 
@@ -500,16 +506,19 @@ async fn write_doc(state: State<'_, AppState>, path: String, text: String) -> Re
         .map_err(|e| e.to_string())?
 }
 
-/// Moves a doc from the chat's folder into the project's `docs/` folder
-/// (`project` is the chat's worktree when it has one). Returns the new path,
-/// which the panel may then save to like any doc it shows.
+/// Moves a doc from the chat's folder into the project's docs folder, which
+/// is in the app's home folder, not the repo (`project` is the project's
+/// main folder, never a worktree, so every chat of it shares the docs).
+/// Returns the new path, which the panel may then save to like any doc it
+/// shows.
 #[tauri::command]
 async fn save_doc_to_project(state: State<'_, AppState>, chat_id: String, path: String, project: String) -> Result<String, String> {
     let sessions = state.sessions.clone();
     let docs = state.docs.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let notes = sessions.notes();
-        let saved = docs::save_to_project(&notes.folder(&chat_id)?, &notes.path(&chat_id)?, Path::new(&path), Path::new(&project))?;
+        let target = sessions.home().project_docs(&project);
+        let saved = docs::save_to_project(&notes.folder(&chat_id)?, &notes.path(&chat_id)?, Path::new(&path), &target)?;
         let saved = saved.display().to_string();
         sessions.doc_saved(&chat_id, &path, &saved);
         docs.read(Path::new(&saved))?;
@@ -519,9 +528,9 @@ async fn save_doc_to_project(state: State<'_, AppState>, chat_id: String, path: 
     .map_err(|e| e.to_string())?
 }
 
-/// Moves the chat's notes into the project's `docs/` folder, named after the
-/// chat, so its notes start empty again. Returns the new path, a doc like any
-/// other from then on.
+/// Moves the chat's notes into the project's docs folder (see
+/// `save_doc_to_project`), named after the chat, so its notes start empty
+/// again. Returns the new path, a doc like any other from then on.
 #[tauri::command]
 async fn save_notes_to_project(state: State<'_, AppState>, chat_id: String, project: String) -> Result<String, String> {
     let sessions = state.sessions.clone();
@@ -530,7 +539,7 @@ async fn save_notes_to_project(state: State<'_, AppState>, chat_id: String, proj
     tauri::async_runtime::spawn_blocking(move || {
         let notes = sessions.notes().path(&chat_id)?;
         let title = store.session(&chat_id)?.map(|row| row.title).unwrap_or_default();
-        let saved = docs::save_notes_to_project(&notes, &title, Path::new(&project))?;
+        let saved = docs::save_notes_to_project(&notes, &title, &sessions.home().project_docs(&project))?;
         let saved = saved.display().to_string();
         sessions.doc_saved(&chat_id, &notes.display().to_string(), &saved);
         docs.read(Path::new(&saved))?;
@@ -725,6 +734,8 @@ fn close_session(state: State<'_, AppState>, session_id: String) {
 /// Messages starting with `@` steer the test; see `runSelfTest` in App.svelte.
 /// Two more variables help tests without touching real data:
 ///   HARNESS_DATA_DIR           where the saved chats live (default: the app data folder)
+///   HARNESS_HOME               where chats' folders and projects' docs live (default: ~/.harness;
+///                              with HARNESS_DATA_DIR set and this not, a `home` folder inside that)
 ///   HARNESS_IDLE_SECONDS       idle time before a chat's process is closed
 ///   HARNESS_WORKTREE_IDLE_SECONDS  time without a message before a worktree is put away
 ///   HARNESS_TRASH_SECONDS      how long put-away branches and trashed chats are kept
@@ -899,17 +910,21 @@ pub fn run() {
             let agents = Agents::default();
             agents.add(agent::CLAUDE, claude.clone(), None);
             agents.add(agent::CURSOR, Arc::new(CursorAdapter), None);
-            let side = SideChats::new(claude, store.clone(), out.clone(), dir.join("notes"), dir.join("side_copies.json"));
+            let home = Home::resolve(&dir);
+            let side = SideChats::new(claude, store.clone(), out.clone(), home.clone(), dir.join("side_copies.json"));
             let browsers = Browsers::new(app.handle().clone(), out.clone());
             let terminals = Terminals::new(out.clone(), store.clone());
-            let sessions = SessionManager::new(agents.clone(), store.clone(), out, dir);
+            let sessions = SessionManager::new(agents.clone(), store.clone(), out, dir, home);
             // Every chat's agent can drive that chat's browser and read its
             // project's terminal.
             {
                 let browsers = browsers.clone();
                 let terminals = terminals.clone();
                 let skills = sessions.skills().clone();
-                let chats = chats::Chats::new(store.clone());
+                let chats = chats::Chats::new(
+                    store.clone(),
+                    Arc::new(notes::Notes::for_store(sessions.home().clone(), store.clone())),
+                );
                 let keep_awake = keep_awake.clone();
                 sessions.set_app_tools(Arc::new(move |chat_id: &str, project: &str| {
                     let browser_tools = {
@@ -1000,7 +1015,10 @@ pub fn run() {
             // Images of chats that are gone, and of new chats never sent.
             {
                 let sessions = sessions.clone();
-                tauri::async_runtime::spawn_blocking(move || sessions.sweep_chat_files());
+                tauri::async_runtime::spawn_blocking(move || {
+                    sessions.move_chat_folders();
+                    sessions.sweep_chat_files();
+                });
             }
             // The worktree cleanup pass: at start, then every hour.
             {

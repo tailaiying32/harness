@@ -174,9 +174,12 @@ export type ProjectRow = { id: string; path: string; sessions: SessionRow[] };
 /** Everything the sidebar shows. */
 export const sidebar = () => invoke<ProjectRow[]>("sidebar");
 
-/** A saved chat's details and history. `live` says whether its process is running. */
+/**
+ * A saved chat's details and history. `live` says whether its process is
+ * running; `chat_folder` is the chat's own folder (its notes and docs) today.
+ */
 export const loadSession = (sessionId: string) =>
-  invoke<{ session: SessionRow; events: AgentEvent[]; live: boolean }>("load_session", { sessionId });
+  invoke<{ session: SessionRow; events: AgentEvent[]; live: boolean; chat_folder?: string }>("load_session", { sessionId });
 
 export const renameSession = (sessionId: string, title: string) =>
   invoke<void>("rename_session", { sessionId, title });

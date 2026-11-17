@@ -775,7 +775,7 @@ fn sign_in_needed(shared: &Shared, e: RpcError) {
 fn instructions(opts: &SpawnOptions) -> Option<String> {
     let mut lines: Vec<String> = opts.tools.iter().map(|t| t.instruction.to_string()).collect();
     if let Some(notes) = &opts.notes {
-        lines.push(super::notes_instruction(notes, true));
+        lines.push(super::notes_instruction(notes, opts.project_docs.as_deref(), true));
     }
     let lines: Vec<String> = lines.into_iter().filter(|l| !l.trim().is_empty()).collect();
     (!lines.is_empty()).then(|| format!("(Notes from the app you run in, not from the user.)\n{}", lines.join("\n")))
@@ -1581,10 +1581,12 @@ mod tests {
             side: None,
             tools: Vec::new(),
             notes: Some("/data/notes/chat-1/notes.md".into()),
+            project_docs: Some("/home/projects/-work/docs".into()),
         };
         let told = instructions(&opts).unwrap();
         assert!(told.contains("That folder, /data/notes/chat-1, is this chat's own"));
         assert!(told.contains("\"put it in the docs\" means write it here"));
+        assert!(told.contains("write it into the project's docs folder, /home/projects/-work/docs,"));
         assert!(!told.contains("Claude Docs"), "only Claude has that connector");
     }
 

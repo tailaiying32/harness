@@ -693,7 +693,7 @@ impl SessionManager {
             eprintln!("harness: couldn't delete a chat: {e}");
         }
         self.0.images.delete_session(&row.id);
-        self.0.notes.delete_session(&row.id);
+        self.0.notes.delete_session(&row.id, &row.project_path);
         self.0.pr_checked.lock().unwrap().remove(&row.id);
     }
 }

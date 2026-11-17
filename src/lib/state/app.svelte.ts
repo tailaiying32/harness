@@ -260,7 +260,7 @@ export class AppState {
     if (!chat) {
       try {
         const saved = await loadSession(sessionId);
-        chat = Chat.fromSaved(saved.session, saved.events, saved.live);
+        chat = Chat.fromSaved(saved.session, saved.events, saved.live, saved.chat_folder);
         // Claude may have opened a page while the chat wasn't loaded here.
         void chat.loadBrowser();
       } catch (e) {

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::agent::{AgentAdapter, Agents, AppTools, EventSink, ImagePayload, RunningAgent, SpawnOptions};
 use crate::events::{AgentEvent, Block, Decision, Envelope, SessionState};
 use crate::images::{self, ImageRef, Images};
+use crate::home::Home;
 use crate::notes::Notes;
 use crate::skills::Skills;
 use crate::store::Store;
@@ -85,6 +86,14 @@ fn with_app_notes(notes: &[String], text: &str) -> String {
     format!("(From the app, not the user: {})\n\n{text}", notes.join(" "))
 }
 
+/// The docs folder of the chat's project, made so the agent can be pointed at
+/// it. None for a chat with no project yet, or if it can't be made.
+pub fn project_docs_for(notes: &Notes, chat: &str) -> Option<PathBuf> {
+    let docs = notes.project_docs(chat)?;
+    std::fs::create_dir_all(&docs).ok()?;
+    Some(docs)
+}
+
 /// The chat's notes file, its folder made so the agent can be pointed at it.
 /// None if the folder can't be made: the chat runs without notes.
 pub fn notes_for(notes: &Notes, chat: &str) -> Option<PathBuf> {
@@ -144,8 +153,10 @@ struct Inner {
     data_dir: PathBuf,
     /// Pasted images and images from tool results.
     images: Images,
-    /// Each chat's notes.
+    /// Each chat's own folder: its notes and docs.
     notes: Notes,
+    /// Where chats' folders and projects' docs are kept (`~/.harness`).
+    home: Home,
     /// The app's own skills, offered to every chat's agent.
     skills: Skills,
     /// Finds a branch's pull request (GitHub in the app, a stand-in in tests).
@@ -168,14 +179,14 @@ struct Inner {
 pub struct SessionManager(Arc<Inner>);
 
 impl SessionManager {
-    pub fn new(agents: Agents, store: Arc<Store>, out: Out, data_dir: PathBuf) -> Self {
+    pub fn new(agents: Agents, store: Arc<Store>, out: Out, data_dir: PathBuf, home: Home) -> Self {
         let timings = Timings {
             idle: None,
             close_grace: CLOSE_GRACE,
             worktree_idle: None,
             keep: None,
         };
-        Self::build(agents, store, out, timings, data_dir, PrLookup::github())
+        Self::build(agents, store, out, timings, data_dir, home, PrLookup::github())
     }
 
     fn build(
@@ -184,17 +195,19 @@ impl SessionManager {
         out: Out,
         timings: Timings,
         data_dir: PathBuf,
+        home: Home,
         pr_lookup: PrLookup,
     ) -> Self {
         Self(Arc::new(Inner {
             agents,
+            notes: Notes::for_store(home.clone(), store.clone()),
+            home,
             store,
             out,
             sessions: Mutex::default(),
             start_lock: tokio::sync::Mutex::default(),
             timings,
             images: Images::new(data_dir.join("images")),
-            notes: Notes::new(data_dir.join("notes")),
             skills: Skills::new(data_dir.join("skills")),
             data_dir,
             pr_lookup,
@@ -237,6 +250,27 @@ impl SessionManager {
     /// Chats' notes.
     pub fn notes(&self) -> &Notes {
         &self.0.notes
+    }
+
+    /// Where chats' folders and projects' docs are kept.
+    pub fn home(&self) -> &Home {
+        &self.0.home
+    }
+
+    /// Moves chat folders kept the old way, under the data folder, into
+    /// their projects in the home folder, and has each moved chat's agent
+    /// told with its next message. Run once at start, before the sweep.
+    pub fn move_chat_folders(&self) {
+        for (chat, from, to) in self.0.notes.migrate(&self.0.data_dir.join("notes")) {
+            let note = format!(
+                "This chat's own folder moved from {} to {}. Its notes and docs are there now, so use the new paths.",
+                from.display(),
+                to.display()
+            );
+            if let Err(e) = self.0.store.add_pending_note(&chat, &note) {
+                eprintln!("harness: couldn't note a chat's moved folder: {e}");
+            }
+        }
     }
 
     /// The app's own skills.
@@ -373,6 +407,8 @@ impl SessionManager {
             model.as_deref().unwrap_or("default"),
         )?;
         if created {
+            // Notes typed before this first message move in under the project.
+            inner.notes.adopt(session_id);
             inner.store.set_agent(session_id, &agent_id)?;
         }
         if let Some(effort) = &effort {
@@ -432,6 +468,7 @@ impl SessionManager {
                         .map(|tools| tools(session_id, &project_path.to_string_lossy()))
                         .unwrap_or_default(),
                     notes: notes_for(&inner.notes, session_id),
+                    project_docs: project_docs_for(&inner.notes, session_id),
                 },
                 self.sink(session_id, run),
             );
@@ -460,7 +497,13 @@ impl SessionManager {
         // A typed `/name` for one of the app's skills goes to the agent with
         // the skill attached; the chat keeps what the user typed.
         let expanded = if show { inner.skills.expand(text) } else { None };
-        let mut text = with_app_notes(app_notes, expanded.as_deref().unwrap_or(text));
+        // Something the app left for this chat's agent (its folder moved,
+        // say) is told once, with the next message the user sends.
+        let mut app_notes = app_notes.to_vec();
+        if show && !created {
+            app_notes.extend(inner.store.take_pending_note(session_id).ok().flatten());
+        }
+        let mut text = with_app_notes(&app_notes, expanded.as_deref().unwrap_or(text));
         // A new chat's first message carries the project's latest chats, so
         // the agent can spot a passing mention of one. Said here once, not in
         // the instructions: those are sent again on every start, and a list
@@ -1101,7 +1144,8 @@ mod tests {
             worktree_idle: Some(worktree_idle),
             keep: Some(keep),
         };
-        let manager = SessionManager::build(fake_agents(&fake), store.clone(), out, timings, dir, lookup);
+        let home = Home::new(dir.join("home"));
+        let manager = SessionManager::build(fake_agents(&fake), store.clone(), out, timings, dir, home, lookup);
         Rig {
             fake,
             store,
@@ -1240,6 +1284,54 @@ mod tests {
             panic!("not a user message");
         };
         assert_eq!(text, "same deal as the login fix");
+    }
+
+    #[tokio::test]
+    async fn a_chats_folder_is_under_its_project_in_the_home_folder() {
+        let rig = rig(LONG);
+        // Notes typed before the first message wait outside any project.
+        rig.manager.notes().write("s1", "typed early").unwrap();
+        let waiting = rig.manager.home().unsent("s1");
+        assert!(waiting.join("notes.md").is_file());
+
+        rig.send("hello").await;
+        let folder = rig.manager.home().chat("/work", "s1");
+        assert_eq!(rig.manager.notes().folder("s1").unwrap(), folder);
+        assert_eq!(rig.manager.notes().read("s1").unwrap(), "typed early");
+        assert!(!waiting.exists());
+        // Its project's docs folder is made, for a doc saved to the project.
+        assert!(rig.manager.home().project_docs("/work").is_dir());
+    }
+
+    #[tokio::test]
+    async fn a_chat_folder_kept_the_old_way_moves_and_its_agent_is_told_once() {
+        let rig = rig(LONG);
+        rig.send("hello").await;
+        // As a build before the home folder left it: under the data folder.
+        let data = rig.manager.0.data_dir.clone();
+        let old = data.join("notes").join("s1");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("report.md"), "a doc").unwrap();
+        let new = rig.manager.home().chat("/work", "s1");
+        let _ = std::fs::remove_dir_all(&new);
+
+        rig.manager.move_chat_folders();
+        assert_eq!(std::fs::read_to_string(new.join("report.md")).unwrap(), "a doc");
+        assert!(!data.join("notes").exists());
+
+        rig.send("carry on").await;
+        rig.send("and again").await;
+        let told = rig.told();
+        assert_eq!(
+            told[1],
+            format!(
+                "say (From the app, not the user: This chat's own folder moved from {} to {}. Its notes and docs \
+are there now, so use the new paths.)\n\ncarry on",
+                old.display(),
+                new.display()
+            )
+        );
+        assert_eq!(told[2], "say and again");
     }
 
     #[tokio::test]
