@@ -9,7 +9,7 @@
   import { prLabel, prShort, shortPath } from "../paths";
   import { IMAGE_WORD, webLinks, type Chat } from "../state/chat.svelte";
   import { loadPrefs, savePrefs } from "../themes";
-  import { indent, newLine, outdent, renumbered, type Edit } from "./editing";
+  import { focusEnd, indent, newLine, outdent, renumbered, type Edit } from "./editing";
   import { imageType } from "./files";
   import { attach, imageFiles } from "./images";
 
@@ -60,6 +60,16 @@
   // screen, so the cursor is put in the box by hand.
   $effect(() => {
     if (focus) box?.focus();
+  });
+
+  // A queued message taken back to edit lands in the box: fit it, and put
+  // the cursor at its end.
+  $effect(() => {
+    if (!chat.focusDraft) return;
+    void tick().then(() => {
+      grow();
+      focusEnd(box);
+    });
   });
 
   // Each agent has its own modes.

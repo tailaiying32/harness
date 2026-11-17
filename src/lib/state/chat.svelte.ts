@@ -71,11 +71,6 @@ export type UserItem = {
   queued?: boolean;
   /** Asked to be taken back for editing; the answer hasn't come yet. */
   withdrawing?: boolean;
-  /**
-   * Taken back and open for editing in place. Files show as their short
-   * words, as in the message box, and become links again when it is sent.
-   */
-  editing?: { text: string; files: FileRef[] };
   /** Images sent with it; `[image n]` in the text points at them. */
   images?: ImageRef[];
 };
@@ -291,6 +286,8 @@ export class Chat {
   draftImages = $state<ImageRef[]>([]);
   /** Files dropped into the draft. One goes with the message only if its word is still in the text. */
   draftFiles = $state<FileRef[]>([]);
+  /** Bumped to put the cursor at the end of the message box, e.g. after a message comes back to it. */
+  focusDraft = $state(0);
 
   /**
    * Takes a dropped or pasted file into the draft. Returns what to put in the
@@ -1187,26 +1184,17 @@ export class Chat {
         }
         break;
 
-      // A waiting message the user asked to edit. Taken back, it opens for
-      // editing; saved history just drops it (the edit is sent as a new one).
+      // A waiting message the user asked to edit. Taken back, it leaves the
+      // chat and goes back into the message box, after anything typed there;
+      // saved history just drops it (the edit is sent as a new message).
       case "message_withdrawn": {
         const at = this.items.findIndex((i) => i.type === "user" && i.messageId === event.id);
         if (at < 0) break;
         const item = this.items[at] as UserItem;
         item.withdrawing = false;
         if (!event.ok) break;
-        if (this.replaying) {
-          this.items.splice(at, 1);
-          break;
-        }
-        const files: FileRef[] = [];
-        const text = item.text.replace(FILE_LINK, (_, label: string, path: string) => {
-          const word = `[${label}]`;
-          if (!files.some((f) => f.path === path)) files.push({ word, path });
-          return word;
-        });
-        item.queued = false;
-        item.editing = { text, files };
+        this.items.splice(at, 1);
+        if (!this.replaying) this.toDraft(item);
         break;
       }
 
@@ -1224,10 +1212,10 @@ export class Chat {
 
   /**
    * Asks to take back a message the agent hasn't read yet, so it can be
-   * edited in place. If the agent read it first, nothing changes.
+   * edited in the message box. If the agent read it first, nothing changes.
    */
   async editQueued(item: UserItem): Promise<void> {
-    if (!item.queued || !item.messageId || item.withdrawing || item.editing) return;
+    if (!item.queued || !item.messageId || item.withdrawing) return;
     item.withdrawing = true;
     try {
       if (this.owner) await sideWithdrawMessage(this.sessionId, item.messageId);
@@ -1238,17 +1226,26 @@ export class Chat {
   }
 
   /**
-   * Ends an in-place edit by sending the message again, at the end of the
-   * queue. `save` false sends the original back unchanged; an emptied
-   * message is dropped.
+   * Puts a taken-back message into the message box, after what is typed
+   * there. Its files become short words again and its images go back with
+   * the draft, so sending it works as if it had just been typed.
    */
-  finishEdit(item: UserItem, save: boolean): void {
-    const editing = item.editing;
-    if (!editing) return;
-    const at = this.items.findIndex((i) => i.id === item.id);
-    if (at >= 0) this.items.splice(at, 1);
-    const text = save ? toLinks(editing.text, editing.files) : item.text;
-    void this.send(text, item.images ?? []);
+  private toDraft(item: UserItem): void {
+    const text = item.text.replace(FILE_LINK, (_, label: string, path: string) => {
+      const same = this.draftFiles.find((f) => f.path === path);
+      if (same) return same.word;
+      // Its old word, unless the draft has that word for another file.
+      let word = `[${label}]`;
+      if (this.draftFiles.some((f) => f.word === word)) word = fileWord(path, this.draftFiles, label.endsWith("/"));
+      this.draftFiles.push({ word, path });
+      return word;
+    });
+    for (const image of item.images ?? []) {
+      if (!this.draftImages.some((i) => i.n === image.n)) this.draftImages.push(image);
+    }
+    const typed = this.draft.trimEnd();
+    this.draft = typed ? `${typed}\n${text}` : text;
+    this.focusDraft++;
   }
 
   /** Sends a message, with the draft's images whose `[image n]` word is in it. */
