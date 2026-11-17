@@ -189,7 +189,7 @@ fn rig_in(dir: &Path, worktree_idle: Duration, keep: Duration, lookup: PrLookup)
         worktree_idle: Some(worktree_idle),
         keep: Some(keep),
     };
-    let manager = SessionManager::build(fake_agents(&fake), store.clone(), out, timings, dir.to_path_buf(), lookup);
+    let manager = SessionManager::build(fake_agents(&fake), store.clone(), out, timings, dir.to_path_buf(), Home::new(dir.join("home")), lookup);
     Rig {
         fake,
         store,
@@ -743,4 +743,185 @@ async fn b13_branch_with_commits_beyond_its_merged_pull_request_is_not_deleted()
     // The rest is cleaned up: the folder was on B, which landed.
     assert!(!wt.path.exists(), "the folder is removed");
     assert!(!has_branch(&repo, B), "B is deleted");
+}
+
+// ---- A project folder that was moved or renamed ----
+
+async fn send_in(rig: &Rig, chat: &str, folder: &Path, text: &str, id: &str) {
+    rig.manager
+        .send_message(chat, crate::agent::CLAUDE, folder.to_path_buf(), None, None, None, text, &[], id, &[])
+        .await
+        .unwrap();
+}
+
+/// Renames a project's folder on disk, as the user would in the Finder.
+fn rename(folder: &Path) -> PathBuf {
+    let renamed = folder.with_file_name(format!("{}-renamed", folder.file_name().unwrap().to_string_lossy()));
+    std::fs::rename(folder, &renamed).unwrap();
+    renamed
+}
+
+fn text(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+#[tokio::test]
+async fn m1_a_moved_project_is_pointed_at_and_everything_kept_for_it_follows() {
+    let rig = rig(LONG);
+    let old = scratch_repo();
+    // A chat in its own worktree, a chat in the main folder, and a saved doc.
+    let wt = rig.into_worktree(&old).await;
+    send_in(&rig, "s2", &old, "a second chat", "m2").await;
+    let home = rig.manager.home().clone();
+    std::fs::create_dir_all(home.project_docs(&text(&old))).unwrap();
+    std::fs::write(home.project_docs(&text(&old)).join("plan.md"), "the plan").unwrap();
+
+    // Still where it was: nothing to point at.
+    let elsewhere = scratch_repo();
+    assert_eq!(
+        rig.manager.relocate_project(&text(&old), &text(&elsewhere)).await.unwrap_err(),
+        "That project's folder is still there."
+    );
+    let new = rename(&old);
+    assert!(rig.manager.relocate_project(&text(&old), "/no/such/folder").await.unwrap_err().starts_with("Not a folder"));
+    assert_eq!(
+        rig.manager.relocate_project("/never/a/project", &text(&new)).await.unwrap_err(),
+        "That folder isn't one of the projects."
+    );
+
+    let mut moved = rig.manager.relocate_project(&text(&old), &text(&new)).await.unwrap();
+    moved.sort();
+    assert_eq!(moved, ["s1", "s2"]);
+    // The chats are the new folder's, and know where it used to be.
+    for chat in ["s1", "s2"] {
+        let row = rig.store.session(chat).unwrap().unwrap();
+        assert_eq!((row.project_path, row.former_paths), (text(&new), vec![text(&old)]));
+    }
+    assert!(!rig.store.has_project(&text(&old)).unwrap());
+    // Nothing runs for the old folder any more.
+    assert!(!rig.manager.is_live("s1") && !rig.manager.is_live("s2"));
+    // The worktree is linked to the repo where it is now.
+    let saved = rig.store.chat_git("s1").unwrap().unwrap().worktree.unwrap();
+    assert_eq!(saved.repo_root, new.canonicalize().unwrap());
+    assert_eq!(saved.path, wt.path);
+    git(&wt.path, &["status", "--short"]);
+    // Its docs are under the new folder's name.
+    assert_eq!(std::fs::read_to_string(home.project_docs(&text(&new)).join("plan.md")).unwrap(), "the plan");
+    assert!(!home.project(&text(&old)).exists());
+
+    // Each chat's agent is told once, with the next message there.
+    send_in(&rig, "s2", &new, "carry on", "m3").await;
+    send_in(&rig, "s2", &new, "and again", "m4").await;
+    let told = rig.told();
+    let note = format!(
+        "(From the app, not the user: This project's folder moved from {} to {}. Paths under the old folder are \
+now under the new one.)",
+        text(&old),
+        text(&new)
+    );
+    assert!(told.contains(&format!("say {note}\n\ncarry on")), "{told:?}");
+    assert!(told.contains(&"say and again".to_string()));
+}
+
+#[tokio::test]
+async fn m2_a_chat_started_in_the_moved_folder_brings_the_project_along_by_itself() {
+    let rig = rig(LONG);
+    let old = scratch_repo();
+    send_in(&rig, "s1", &old, "the first chat", "m1").await;
+    rig.manager.close("s1");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let new = rename(&old);
+
+    // No pointing: a new chat in the folder at its new place is enough.
+    send_in(&rig, "s2", &new, "a chat after the move", "m2").await;
+    assert_eq!(rig.store.session("s1").unwrap().unwrap().project_path, text(&new));
+    assert!(!rig.store.has_project(&text(&old)).unwrap());
+    // The chat that found it says so.
+    let said = rig.store.events("s2").unwrap();
+    assert!(said.contains(&AgentEvent::ProjectMoved { from: text(&old), to: text(&new) }), "{said:?}");
+    // And the new chat, which never knew the old folder, is not told it moved.
+    assert_eq!(rig.store.take_pending_note("s2").unwrap(), None);
+    assert!(rig.store.take_pending_note("s1").unwrap().is_some());
+}
+
+#[tokio::test]
+async fn m3_a_folder_is_only_followed_when_it_is_surely_the_same_project() {
+    let rig = rig(LONG);
+    // Two projects that are clones of one repo, both gone: which one is it?
+    let first = scratch_repo();
+    let second = first.with_file_name(format!("{}-clone", first.file_name().unwrap().to_string_lossy()));
+    let cloned = Command::new("git").arg("clone").arg("-q").arg(&first).arg(&second).output().unwrap();
+    assert!(cloned.status.success());
+    send_in(&rig, "a", &first, "in the first", "m1").await;
+    send_in(&rig, "b", &second, "in the clone", "m2").await;
+    let third = second.with_file_name(format!("{}-third", first.file_name().unwrap().to_string_lossy()));
+    let cloned = Command::new("git").arg("clone").arg("-q").arg(&first).arg(&third).output().unwrap();
+    assert!(cloned.status.success());
+    std::fs::remove_dir_all(&first).unwrap();
+    std::fs::remove_dir_all(&second).unwrap();
+    send_in(&rig, "c", &third, "in a third copy", "m3").await;
+    assert_eq!(rig.store.session("a").unwrap().unwrap().project_path, text(&first));
+    assert_eq!(rig.store.session("b").unwrap().unwrap().project_path, text(&second));
+
+    // A folder that isn't the same repo is its own project.
+    let other = scratch_repo();
+    send_in(&rig, "d", &other, "somewhere else", "m4").await;
+    assert_eq!(rig.store.session("d").unwrap().unwrap().project_path, text(&other));
+    assert_eq!(rig.store.session("a").unwrap().unwrap().project_path, text(&first));
+}
+
+#[tokio::test]
+async fn m4_moving_onto_a_project_that_is_already_there_makes_them_one() {
+    let rig = rig(LONG);
+    let old = scratch_repo();
+    send_in(&rig, "s1", &old, "before the move", "m1").await;
+    rig.manager.close("s1");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Not a repo the app can recognise it by: a plain copy made elsewhere,
+    // already used for a chat before the old project is pointed at it.
+    let new = std::env::temp_dir().join(format!("harness-plain-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&new).unwrap();
+    send_in(&rig, "s2", &new, "already here", "m2").await;
+    std::fs::remove_dir_all(&old).unwrap();
+
+    rig.manager.relocate_project(&text(&old), &text(&new)).await.unwrap();
+    let sidebar = rig.store.sidebar().unwrap();
+    let project = sidebar.iter().find(|p| p.path == text(&new)).expect("the project");
+    let mut chats: Vec<&str> = project.sessions.iter().map(|s| s.id.as_str()).collect();
+    chats.sort();
+    assert_eq!(chats, ["s1", "s2"]);
+    assert!(sidebar.iter().all(|p| p.path != text(&old)));
+    // Only the chat that moved is told.
+    assert!(rig.store.take_pending_note("s1").unwrap().is_some());
+    assert_eq!(rig.store.take_pending_note("s2").unwrap(), None);
+}
+
+#[tokio::test]
+async fn m6_a_put_away_worktree_is_kept_while_its_project_is_missing() {
+    let (rig, _gh, repo, wt) = chat(Duration::ZERO).await;
+    let tip = commit(&wt.path, "work.txt", "unmerged work\n");
+    end_turn(&rig).await;
+    close(&rig).await;
+    cleanup(&rig).await;
+    assert!(!wt.path.exists(), "the idle folder is put away");
+
+    // The repo is renamed, and the cleanup runs before anyone points at it.
+    let new = rename(&repo);
+    cleanup(&rig).await;
+    let saved = rig.store.chat_git("s1").unwrap().unwrap().worktree;
+    assert_eq!(saved.map(|saved| saved.branch), Some(wt.branch.clone()), "the chat still knows its branch");
+
+    rig.manager.relocate_project(&text(&repo), &text(&new)).await.unwrap();
+    rig.send_at(&new, "auto", "back to it").await;
+    assert!(wt.path.exists(), "the folder is back");
+    assert_eq!(git(&wt.path, &["rev-parse", "HEAD"]), tip, "with its work");
+}
+
+#[test]
+fn m5_a_folder_on_a_drive_that_isnt_connected_is_not_gone() {
+    assert!(!folder_gone(&std::env::temp_dir()));
+    assert!(folder_gone(&std::env::temp_dir().join(format!("harness-none-{}", uuid::Uuid::new_v4()))));
+    if !cfg!(windows) {
+        assert!(!folder_gone(Path::new("/Volumes/harness-no-such-drive/code/app")));
+    }
 }

@@ -21,10 +21,7 @@ pub struct SetupInfo {
     pub problem: Option<String>,
 }
 
-fn home() -> Option<PathBuf> {
-    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    std::env::var_os(var).map(PathBuf::from)
-}
+use crate::home::user_home as home;
 
 fn existing(path: impl AsRef<Path>) -> Option<PathBuf> {
     let path = path.as_ref();

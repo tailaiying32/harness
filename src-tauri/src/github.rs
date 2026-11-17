@@ -23,6 +23,13 @@ const FIELDS: &str = "number,state,isDraft,url,headRefOid,headRefName";
 /// again until the app restarts.
 static NO_GITHUB: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
 
+/// A repo moved: what was learned about it at its old place no longer holds.
+pub fn forget_under(folder: &Path) {
+    if let Some(repos) = NO_GITHUB.lock().unwrap().as_mut() {
+        repos.retain(|repo| !repo.starts_with(folder));
+    }
+}
+
 /// The newest pull request whose head is `branch`, in any state. None when
 /// there is none, or no way to ask.
 pub fn pr_for(repo_root: &Path, branch: &str) -> Result<Option<PrInfo>, String> {

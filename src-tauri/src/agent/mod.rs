@@ -10,6 +10,8 @@ pub mod mcp_http;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+
+use crate::home::Preferences;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -79,12 +81,62 @@ pub struct SpawnOptions {
     /// agent is told where it is and may read it, and a main chat may write
     /// it too; it may not exist yet.
     pub notes: Option<PathBuf>,
+    /// The docs folder of the chat's project, in the app's home folder: where
+    /// a doc saved to the project goes, shared by all the project's chats.
+    /// The agent is told where it is and may read it, and a main chat may
+    /// write it too.
+    pub project_docs: Option<PathBuf>,
+    /// The memory folder of the chat's project, in the app's home folder:
+    /// one memory for every agent that works on the project. An agent with a
+    /// memory of its own is made to keep it there; one without is told where
+    /// it is and how a note is written (`memory_instruction`).
+    pub memory: Option<PathBuf>,
+    /// The user's working preferences, for the agent's instructions
+    /// (`preferences_instruction`). None when the user has none.
+    pub preferences: Option<Preferences>,
+}
+
+/// The user's working preferences as an agent is told them: standing
+/// instructions that outrank its defaults, for every agent alike. An agent's
+/// own file for these (Claude Code's `CLAUDE.md`) reaches only that agent.
+pub fn preferences_instruction(preferences: &Preferences) -> String {
+    format!(
+        "The user's own standing instructions, kept in {}. Follow them exactly; where they differ from \
+your defaults, they win. Pass the ones that matter on to any helper agent you start.\n{}",
+        preferences.path.display(),
+        preferences.text
+    )
+}
+
+/// How many lines of the memory's index an agent is given.
+const MEMORY_INDEX_LINES: usize = 200;
+
+/// For an agent with no memory of its own: where the project's memory is,
+/// how a note is written, and what the index holds now. The format is the one
+/// Claude Code keeps, since it writes to the same folder.
+pub fn memory_instruction(folder: &Path) -> String {
+    let index = std::fs::read_to_string(folder.join("MEMORY.md")).unwrap_or_default();
+    let index: Vec<&str> = index.lines().take(MEMORY_INDEX_LINES).collect();
+    let index = match index.join("\n").trim() {
+        "" => "(empty)".to_string(),
+        text => text.to_string(),
+    };
+    format!(
+        "This project has a shared memory in {}, used by every agent that works on it. MEMORY.md there is \
+the index: one line per note, `- [Title](file.md) — what it's about`. Each note is one markdown file with \
+frontmatter (`name`, `description`, and `metadata.type`: user, feedback, project or reference) and then the \
+fact. When the user asks you to remember something, or you learn something that will matter in later chats, \
+write or update a note there and keep its line in MEMORY.md; look for a note that already covers it before \
+making a new one. Read a note when its line looks relevant. The index now:\n{index}",
+        folder.display()
+    )
 }
 
 /// Where the chat's notes are, for the agent's instructions. Read only when the
 /// user mentions them, so nothing changes from turn to turn. `writable`: a main
 /// chat may change them when asked; a side chat can't change files.
-pub fn notes_instruction(notes: &Path, writable: bool) -> String {
+/// `project_docs` is where the project's saved docs are.
+pub fn notes_instruction(notes: &Path, project_docs: Option<&Path>, writable: bool) -> String {
     let rule = if writable {
         "The user sees it in the app's side panel and may edit it at any time. Read it when they \
 mention their notes. Write to it when they ask you to put something in their notes: read it first, \
@@ -96,16 +148,31 @@ then change only what they asked for and keep the rest of their text."
         "The user keeps notes for this chat in {} (markdown; it may not exist yet). {rule}",
         notes.display()
     );
-    match notes.parent().filter(|_| writable) {
-        Some(folder) => format!("{notes_line} {}", docs_rule(folder)),
-        None => notes_line,
+    match (notes.parent().filter(|_| writable), project_docs) {
+        (Some(folder), _) => format!("{notes_line} {}", docs_rule(folder, project_docs)),
+        (None, Some(docs)) => format!("{notes_line} The project's saved docs are in {}.", docs.display()),
+        (None, None) => notes_line,
     }
 }
 
 /// Where docs go: markdown files in the chat's folder, which the side panel
 /// shows as tabs (`trackDocument` in the window; read from disk for this
 /// folder, so any agent's edits show). Told to every agent that can write.
-fn docs_rule(folder: &Path) -> String {
+/// A doc saved to the project goes to the project's docs folder in the app's
+/// home folder, never into the repo unless the user asks for exactly that.
+fn docs_rule(folder: &Path, project_docs: Option<&Path>) -> String {
+    let saving = match project_docs {
+        Some(docs) => format!(
+            "When the user asks to save a doc to the project, write it into the project's docs folder, {}, \
+delete the old file, and keep editing the new one. That folder is outside the repo and shared by every \
+chat of this project, so look there when the user mentions a doc that isn't in this chat. Put a doc into \
+the repo itself only when the user asks for that in so many words.",
+            docs.display()
+        ),
+        None => "When the user asks to save a doc to the project, write it into the project's docs/ folder \
+(or wherever the project clearly keeps docs), delete the old file, and keep editing the new one."
+            .to_string(),
+    };
     format!(
         "That folder, {}, is this chat's own and sits outside the project. When you write something \
 for the user to read or keep (notes, a write-up, a summary, a draft, a report, a doc), write it there as \
@@ -116,8 +183,7 @@ notes.md, even when the user calls it notes: notes.md is only for when they say 
 their notes (\"my notes\", \"your notes\" meaning theirs). In this app \"docs\", \"the docs\" and \"the docs panel\" mean these tabs, never an online docs \
 service, so \"put it in the docs\" means write it here. Answers, discussion and status updates stay in \
 the chat. Change a doc later with your edit tool, not shell commands. These files need no worktree. \
-When the user asks to save a doc to the project, write it into the project's docs/ folder (or wherever \
-the project clearly keeps docs), delete the old file, and keep editing the new one.",
+{saving}",
         folder.display()
     )
 }

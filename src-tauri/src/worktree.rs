@@ -116,6 +116,19 @@ where
     run(cmd)
 }
 
+/// Whether the repo `folder` is in holds this commit. A project's folder that
+/// was moved or renamed still does: how it is recognised at its new place.
+pub fn has_commit(folder: &Path, commit: &str) -> bool {
+    let plain = !commit.is_empty() && commit.chars().all(|c| c.is_ascii_hexdigit());
+    plain && git(folder, ["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_ok()
+}
+
+/// After the main repo moved: links its worktrees to it again. Run in the
+/// repo at its new place, git finds each worktree by the path it kept.
+pub fn repair(repo_root: &Path) -> Result<(), String> {
+    git(repo_root, ["worktree", "repair"]).map(|_| ())
+}
+
 /// Whether `rev` names an existing object; its full ID if so.
 fn resolve(dir: &Path, rev: &str) -> Option<String> {
     git(dir, ["rev-parse", "--verify", "-q", rev]).ok().filter(|s| !s.is_empty())
