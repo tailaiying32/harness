@@ -2,9 +2,10 @@
   // One of the chat's images, drawn over the chat and side panel the way
   // settings are, sized to fit. Clicking the picture switches between that and
   // its actual pixels (one image pixel per screen pixel), to make out detail.
-  // ← and → step through the chat's images; Escape, × or a click beside the
+  // ← and → step through the chat's images; Escape, close or a click beside the
   // picture closes it. The picture is read from the core only while shown.
   import { tick } from "svelte";
+  import BarIcon from "./BarIcon.svelte";
   import { readImage } from "./ipc";
   import type { Chat } from "./state/chat.svelte";
 
@@ -115,7 +116,7 @@
         <button disabled={at >= list.length - 1} title="Next image (→)" onclick={() => step(1)}>›</button>
       </span>
     {/if}
-    <button class="close" title="Close (Esc)" onclick={close}>×</button>
+    <button class="close" title="Close (Esc)" onclick={close}><BarIcon name="close" /></button>
   </div>
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="stage" class:actual bind:this={stage} onclick={(e) => e.target === stage && close()}>
@@ -171,8 +172,11 @@
   .close:hover {
     color: var(--fg);
   }
+  /* The panel's close icon, so every close in the app looks the same. */
   .close {
     margin-left: auto;
+    display: flex;
+    align-items: center;
   }
   /* Auto margins centre the picture, yet let a large one scroll from its edge. */
   .stage {
