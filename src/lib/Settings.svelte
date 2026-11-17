@@ -2,6 +2,7 @@
   // Settings, drawn over everything but the sidebar: top bar, chat and side panel. A choice applies at once and
   // is remembered. Also home to things that aren't part of the work at hand,
   // like the trash.
+  import BarIcon from "./BarIcon.svelte";
   import { CLAUDE, importSkill, listSkills, pickFile, pickFolder, removeSkill, type ModelInfo, type SkillInfo } from "./ipc";
   import type { AppState, Limit } from "./state/app.svelte";
   import { appearances, applyFontSize, applySize, fontSizes, savePrefs, sizes, themes, type Appearance, type Size } from "./themes";
@@ -172,7 +173,7 @@
   <div class="inner">
     <div class="head">
       <span class="title">Settings</span>
-      <button onclick={onclose}>close</button>
+      <button class="close" title="Close" onclick={onclose}><BarIcon name="close" /></button>
     </div>
 
     <section>
@@ -338,7 +339,10 @@
     color: var(--accent);
     font-weight: 700;
   }
+  /* The panel's close icon, so every close in the app looks the same. */
   .head button {
+    display: flex;
+    align-items: center;
     color: var(--faint);
   }
   .head button:hover {
