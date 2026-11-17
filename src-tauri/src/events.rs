@@ -274,6 +274,13 @@ pub enum AgentEvent {
     PrsChanged {
         prs: Vec<crate::worktree::PrInfo>,
     },
+    /// The chat was started in a folder that turned out to be a project
+    /// whose folder had moved from `from`: its chats, docs and memory came
+    /// along to `to`. Saved, so the chat keeps the line that says so.
+    ProjectMoved {
+        from: String,
+        to: String,
+    },
     /// The user edited a plan before approving it; the agent works from this
     /// text. Saved, so the plan shows as approved after a restart.
     PlanEdited {

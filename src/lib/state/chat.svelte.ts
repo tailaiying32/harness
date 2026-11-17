@@ -263,8 +263,9 @@ export class Chat {
    * Rebuilds a saved chat by replaying its history through the same code that
    * handles live events, so a reloaded chat looks exactly as it did.
    */
-  static fromSaved(row: SessionRow, events: AgentEvent[], live: boolean): Chat {
+  static fromSaved(row: SessionRow, events: AgentEvent[], live: boolean, folder = ""): Chat {
     const chat = new Chat(row.id);
+    chat.folder = folder.replace(/[\\/]+$/, "");
     chat.projectPath = row.project_path;
     chat.syncRow(row);
     chat.replaying = true;
@@ -355,6 +356,9 @@ export class Chat {
   }
   /** Takes the saved row's worktree details (they change outside the chat's events). */
   syncRow(row: SessionRow): void {
+    // The project's folder may have been moved or renamed since.
+    if (row.project_path) this.projectPath = row.project_path;
+    this.formerPaths = row.former_paths ?? [];
     this.agent = row.agent ?? CLAUDE;
     this.workPath = row.work_path;
     this.branch = row.branch;
@@ -651,45 +655,65 @@ export class Chat {
     }
   }
 
-  /** The chat's notes file, which Claude may write. Kept by the core in `notes/<chat id>/`. */
+  /**
+   * The chat's own folder today, for a saved chat: under its project in the
+   * app's home folder (`…/chats/<chat id>`). Chats made before that kept it
+   * under the app's data folder (`…/notes/<chat id>`), and their history
+   * still names it there.
+   */
+  private folder = "";
+
+  /**
+   * Where the project's folder used to be, when it was moved or renamed.
+   * The chat's history may still name files there.
+   */
+  private formerPaths: string[] = [];
+
+  /** Whether a path is in the chat's own folder, as named now or before it moved. */
+  private inOwnFolder(path: string): boolean {
+    const p = path.replace(/\\/g, "/");
+    return p.includes(`/chats/${this.sessionId}/`) || p.includes(`/notes/${this.sessionId}/`);
+  }
+
+  /** The chat's notes file, which the agent may write. Kept by the core in the chat's folder. */
   private isNotes(path: string): boolean {
-    return path.replace(/\\/g, "/").endsWith(`/notes/${this.sessionId}/notes.md`);
+    return this.inOwnFolder(path) && path.replace(/\\/g, "/").endsWith(`/${this.sessionId}/notes.md`);
   }
 
   /**
    * A doc in the chat's own folder, where agents write docs (next to the
-   * notes, kept by the core in `notes/<chat id>/`). Its tab follows the file
-   * on disk, whatever the agent's tool said, and it can be saved to the project.
+   * notes). Its tab follows the file on disk, whatever the agent's tool
+   * said, and it can be saved to the project.
    */
   isChatDoc(path: string): boolean {
-    const p = path.replace(/\\/g, "/");
-    return p.includes(`/notes/${this.sessionId}/`) && /\.(md|markdown)$/i.test(p) && !this.isNotes(path);
+    return this.inOwnFolder(path) && /\.(md|markdown)$/i.test(path) && !this.isNotes(path);
   }
 
   /** Said to the agent with the next message the user sends, then dropped. */
   private appNotes: string[] = [];
 
   /**
-   * Moves a doc from the chat's folder into the project's docs/ folder (the
-   * worktree's, if the chat has one). Its tab follows it, and the agent is
-   * told with the next message, so it edits the new file.
+   * Moves a doc from the chat's folder into the project's docs folder, which
+   * is in the app's home folder, not the repo, and shared by every chat of
+   * the project. Its tab follows it, and the agent is told with the next
+   * message, so it edits the new file.
    */
   async saveToProject(path: string): Promise<void> {
     if (this.owner) return this.owner.saveToProject(path);
     let saved: string;
     try {
-      saved = await saveDocToProject(this.sessionId, path, this.root);
+      saved = await saveDocToProject(this.sessionId, path, this.projectPath.trim());
     } catch (e) {
       this.showError(`Couldn't save it to the project: ${e}`);
       return;
     }
     this.docSaved(path, saved);
-    this.appNotes.push(`The user saved the doc ${path} to the project; it is now ${saved}, so edit it there.`);
+    this.appNotes.push(`The user saved the doc ${path} to the project's docs folder; it is now ${saved}, so edit it there.`);
     void this.refreshDoc(saved);
   }
 
   /**
-   * Moves the notes into the project's docs/ folder, named after the chat.
+   * Moves the notes into the project's docs folder, named after the chat.
    * The saved file opens as a doc tab, the notes start empty, and the agent
    * is told with the next message.
    */
@@ -697,21 +721,34 @@ export class Chat {
     if (this.owner) return this.owner.saveNotesToProject();
     let saved: string;
     try {
-      saved = await saveNotesToProject(this.sessionId, this.root);
+      saved = await saveNotesToProject(this.sessionId, this.projectPath.trim());
     } catch (e) {
       this.showError(`Couldn't save the notes to the project: ${e}`);
       return;
     }
     this.notes = "";
-    this.appNotes.push(`The user saved their notes to the project; they are now ${saved}, and the notes file is empty again.`);
+    this.appNotes.push(`The user saved their notes to the project's docs folder; they are now ${saved}, and the notes file is empty again.`);
     await this.openFile(saved);
   }
 
   /** Docs saved to the project: where each went, by its old path. Rebuilt on reopen from the history. */
   private savedTo = new Map<string, string>();
 
-  /** A doc's path now, following any saves to the project. */
+  /**
+   * A doc's path now: one into the chat's old folder is the same file in its
+   * folder today, and a doc saved to the project is where it was saved.
+   */
   private currentPath(path: string): string {
+    const old = path.replace(/\\/g, "/").split(`/notes/${this.sessionId}/`);
+    if (this.folder && old.length > 1 && !path.startsWith(this.folder)) path = `${this.folder}/${old.slice(1).join(`/notes/${this.sessionId}/`)}`;
+    // A file in the project's folder before it moved is in the folder now.
+    for (const former of this.formerPaths) {
+      const rest = path.startsWith(former) ? path.slice(former.length) : null;
+      if (rest !== null && (rest === "" || /^[\\/]/.test(rest))) {
+        path = this.projectPath.replace(/[\\/]+$/, "") + rest;
+        break;
+      }
+    }
     for (let i = 0; i < 10 && this.savedTo.has(path); i++) path = this.savedTo.get(path)!;
     return path;
   }
@@ -728,6 +765,9 @@ export class Chat {
    * replayed on reopen); the second time changes nothing.
    */
   private docSaved(from: string, to: string): void {
+    // A save recorded before the chat's folder moved names the old folder.
+    from = this.currentPath(from);
+    if (from === to) return;
     this.savedTo.set(from, to);
     const doc = this.docs.find((d) => d.path === from);
     if (doc) {
@@ -849,8 +889,10 @@ export class Chat {
 
   /** A call that wrote or edited a markdown file adds its tab, or updates it. */
   private trackDocument(tool: ToolItem): void {
-    const path = docPath(tool);
-    if (!path || path === this.planPath) return;
+    const written = docPath(tool);
+    if (!written || written === this.planPath) return;
+    // A doc written before the chat's folder moved has its tab at the new place.
+    const path = this.isNotes(written) ? written : this.currentPath(written);
     // The notes have their own tab, read back from disk.
     if (this.isNotes(path)) {
       void this.refreshNotes();
@@ -1141,6 +1183,10 @@ export class Chat {
 
       case "worktree_changed":
         this.push({ type: "note", text: worktreeNote(event.status, event.branch) });
+        break;
+
+      case "project_moved":
+        this.push({ type: "note", text: `this project's folder moved here from ${event.from}; its chats and docs came along` });
         break;
 
       case "prs_changed":

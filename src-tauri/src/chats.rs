@@ -16,6 +16,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::events::{AgentEvent, ApprovalKind, Block, Decision};
+use crate::notes::Notes;
 use crate::store::{SessionRow, Store, now_ms, search_words};
 use crate::worktree;
 
@@ -94,26 +95,29 @@ read that doc instead. A chat the user names as [@Title](<chat:ID>) is read by t
 #[derive(Clone)]
 pub struct Chats {
     store: Arc<Store>,
+    /// Where each chat's folder is now, to find a doc saved under an old one.
+    notes: Arc<Notes>,
 }
 
 impl Chats {
-    pub fn new(store: Arc<Store>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<Store>, notes: Arc<Notes>) -> Self {
+        Self { store, notes }
     }
 
     /// Runs one of the group's tools for a chat (`asking`) of a project (its
     /// main folder, as the window names it).
     pub async fn call(&self, asking: &str, project: &str, tool: &str, args: &Value) -> Result<Vec<Value>, String> {
-        let (store, asking, project) = (self.store.clone(), asking.to_string(), project.to_string());
+        let (store, notes) = (self.store.clone(), self.notes.clone());
+        let (asking, project) = (asking.to_string(), project.to_string());
         let (tool, args) = (tool.to_string(), args.clone());
-        let text = tokio::task::spawn_blocking(move || run(&store, &asking, &project, &tool, &args))
+        let text = tokio::task::spawn_blocking(move || run(&store, &notes, &asking, &project, &tool, &args))
             .await
             .map_err(|e| e.to_string())??;
         Ok(vec![json!({ "type": "text", "text": text })])
     }
 }
 
-fn run(store: &Store, asking: &str, project: &str, tool: &str, args: &Value) -> Result<String, String> {
+fn run(store: &Store, notes: &Notes, asking: &str, project: &str, tool: &str, args: &Value) -> Result<String, String> {
     let text = |key: &str| args[key].as_str().map(str::trim).filter(|s| !s.is_empty());
     let now = now_ms();
     match tool {
@@ -178,7 +182,9 @@ fn run(store: &Store, asking: &str, project: &str, tool: &str, args: &Value) -> 
             let chat = store.find_chat(project, id.trim_start_matches("chat:"), asking)?;
             let events = store.events(&chat.id)?;
             match text("doc") {
-                Some(name) => read_doc(&events, name),
+                // A doc written in the chat's folder before chat folders moved
+                // is in the chat's folder today.
+                Some(name) => read_doc(&events, name, &|path| notes.current(&chat.id, path)),
                 None => {
                     let upto = args["upto_turn"].as_u64().map(|n| n as usize);
                     Ok(render(&chat, &events, upto, READ_CHARS, now))
@@ -368,8 +374,8 @@ fn failed_tools(events: &[AgentEvent]) -> HashSet<&str> {
 }
 
 /// One of the chat's docs, by name. Only a doc the chat wrote can be read
-/// this way, never another file.
-fn read_doc(events: &[AgentEvent], name: &str) -> Result<String, String> {
+/// this way, never another file. `now` gives a saved path as it is today.
+fn read_doc(events: &[AgentEvent], name: &str, now: &dyn Fn(&str) -> String) -> Result<String, String> {
     let paths = docs(events);
     let Some(path) = paths.iter().rev().find(|p| *p == name || base_name(p) == name) else {
         let names: Vec<&str> = paths.iter().map(|p| base_name(p)).collect();
@@ -378,6 +384,7 @@ fn read_doc(events: &[AgentEvent], name: &str) -> Result<String, String> {
             false => format!("That chat wrote no doc with that name. Its docs: {}", names.join(", ")),
         });
     };
+    let path = &now(path);
     let text = std::fs::read_to_string(path).map_err(|_| format!("That doc is no longer at {path}"))?;
     Ok(match cut_middle(&text, READ_CHARS) {
         Some(cut) => format!("# {} (cut: it is longer than one read)\n\n{cut}", base_name(path)),
@@ -581,6 +588,7 @@ mod tests {
             prs: Vec::new(),
             trashed_at: None,
             agent: "claude-code".into(),
+            former_paths: Vec::new(),
         }
     }
 
@@ -757,6 +765,7 @@ mod tests {
         let moved = dir.join("moved.md");
         std::fs::write(&moved, "now in the project").unwrap();
         let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        let path_of_dir = |p: &std::path::Path| p.to_string_lossy().into_owned();
         let events = vec![
             user("write it up", "u1"),
             tool("w1", "Write", json!({ "file_path": path(&report), "content": "x" })),
@@ -776,14 +785,21 @@ mod tests {
             AgentEvent::DocSaved { from: "/x/draft.md".into(), to: path(&moved) },
         ];
         assert_eq!(docs(&events), [path(&report), path(&moved)]);
+        let same = |path: &str| path.to_string();
         let text = render(&chat(), &events, None, READ_CHARS, 0);
         assert!(text.contains("Docs this chat wrote: report.md, moved.md (read one with doc)\n"), "{text}");
-        assert_eq!(read_doc(&events, "report.md").unwrap(), "# report.md\n\nthe findings");
-        assert!(read_doc(&events, "moved.md").unwrap().ends_with("now in the project"));
-        assert!(read_doc(&events, "code.rs").unwrap_err().contains("report.md, moved.md"));
-        assert_eq!(read_doc(&[], "a.md").unwrap_err(), "That chat wrote no docs.");
+        assert_eq!(read_doc(&events, "report.md", &same).unwrap(), "# report.md\n\nthe findings");
+        assert!(read_doc(&events, "moved.md", &same).unwrap().ends_with("now in the project"));
+        assert!(read_doc(&events, "code.rs", &same).unwrap_err().contains("report.md, moved.md"));
+        assert_eq!(read_doc(&[], "a.md", &same).unwrap_err(), "That chat wrote no docs.");
+        // A doc saved under the chat's old folder is read from where it is now.
+        let old_place = |path: &str| path.replace(&path_of_dir(&dir), "/gone/notes/abc");
+        let was = vec![user("write", "u1"), tool("o1", "Write", json!({ "file_path": "/gone/notes/abc/report.md" })), result("o1", false)];
+        let now = |path: &str| path.replace("/gone/notes/abc", &path_of_dir(&dir));
+        assert_eq!(old_place(&path(&report)), "/gone/notes/abc/report.md");
+        assert_eq!(read_doc(&was, "report.md", &now).unwrap(), "# report.md\n\nthe findings");
         std::fs::remove_file(&report).unwrap();
-        assert!(read_doc(&events, "report.md").unwrap_err().starts_with("That doc is no longer at"));
+        assert!(read_doc(&events, "report.md", &same).unwrap_err().starts_with("That doc is no longer at"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -818,7 +834,8 @@ mod tests {
         store.touch_session("bbbb2222-x", "/p", "The asking chat", "default", "default").unwrap();
         store.append_event("bbbb2222-x", &user("same deal as the tabs", "u1")).unwrap();
         store.touch_session("cccc3333-x", "/other", "Tabs elsewhere", "default", "default").unwrap();
-        let chats = Chats::new(store.clone());
+        let home = crate::home::Home::new(std::env::temp_dir().join(format!("harness-chats-{}", uuid::Uuid::new_v4())));
+        let chats = Chats::new(store.clone(), Arc::new(Notes::for_store(home, store.clone())));
         let text = |out: Vec<Value>| out[0]["text"].as_str().unwrap().to_string();
         let call = |tool: &'static str, args: Value| {
             let chats = chats.clone();

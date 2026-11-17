@@ -146,6 +146,13 @@ let projects: ProjectRow[] = [
       row("long", `${home}/code/a-rather-long-folder-name/website`, "A very long chat (300 turns)", 3000),
     ],
   },
+  // A project whose folder was moved or renamed: dim, with "locate" to point at where it is now.
+  {
+    id: "p3",
+    path: `${home}/code/old-notes-app`,
+    missing: true,
+    sessions: [row("moved", `${home}/code/old-notes-app`, "Sync notes between devices", 9000)],
+  },
 ];
 
 const text = (message_id: string, body: string): AgentEvent => ({
@@ -424,6 +431,8 @@ const savedChat: AgentEvent[] = [
 // still waiting for an answer. For the side panel.
 const notesPath = `${home}/code/harness/docs/memory-notes.md`;
 // In the chat's own folder, so its tab has the save-to-project button.
+// Written when chat folders were still under the app's data folder: the chat's
+// folder has moved since (see `chatFolder`), and its tab shows it from there.
 const testPlanPath = `${home}/Library/Application Support/com.harness.app/notes/planning/test-plan.md`;
 const planPath = `${home}/.claude/plans/idle-timeout.md`;
 const notesText =
@@ -588,6 +597,13 @@ let keepAwake: { mode: "away" | "overnight"; ends_at: number } | null = null;
 /** Documents edited in a tab, kept for the page's life. */
 const docsByPath = new Map<string, string>();
 
+/** A project's folder in the app's home folder, named from its path as the core names it. */
+const projectHome = (project: string) => `${home}/.harness/projects/${project.replace(/[^A-Za-z0-9]/g, "-")}`;
+/** A chat's own folder: its notes and docs, under its project. */
+const chatFolder = (project: string, chatId: string) => `${projectHome(project)}/chats/${chatId}`;
+const projectOf = (chatId: string) =>
+  [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === chatId)?.project_path ?? `${home}/code/harness`;
+
 const notesByChat = new Map<string, string>([
   [
     "planning",
@@ -654,6 +670,7 @@ const commands: Record<string, (args: Args) => unknown> = {
     session: [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === args.sessionId),
     events: args.sessionId === "agents" ? (setTimeout(playAgents, 300), agentsChat) : args.sessionId === "images" ? imagesChat : args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : args.sessionId === "looks" ? looksChat : args.sessionId === "waiting" ? askingChat : args.sessionId === "working" ? movedChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
     live: args.sessionId === "planning" || args.sessionId === "waiting" || args.sessionId === "agents",
+    chat_folder: chatFolder(projectOf(args.sessionId), args.sessionId),
   }),
   title_batch: (args) => {
     setTimeout(() => emit(args.sessionId, { kind: "batch_titled", tool_id: args.toolId, title: "Measuring idle memory" }), 600);
@@ -784,7 +801,9 @@ const commands: Record<string, (args: Args) => unknown> = {
   autotest: () => null,
   "plugin:path|resolve_directory": () => home,
   // Only the skill file picker answers, so the folder picker stays a cancel.
-  "plugin:dialog|open": (args) => (args.options?.filters ? "/Users/you/Downloads/pr-to-video.zip" : null),
+  // A zip for an import; a folder for "locate" (the only folder picker asked for one from a start folder).
+  "plugin:dialog|open": (args) =>
+    args.options?.filters ? "/Users/you/Downloads/pr-to-video.zip" : args.options?.directory ? `${home}/code/notes-app` : null,
   "plugin:opener|open_url": () => undefined,
   "plugin:opener|reveal_item_in_dir": () => undefined,
   // Dropped files. `__drop([...paths])` in the console stands in for a drop.
@@ -877,9 +896,21 @@ const commands: Record<string, (args: Args) => unknown> = {
     );
   },
   write_doc: (args: Args) => void docsByPath.set(String(args.path), String(args.text)),
+  relocate_project: (args: Args) => {
+    const at = projects.findIndex((p) => p.path === args.from);
+    if (at < 0) throw "That folder isn't one of the projects.";
+    // New rows, as the core's next listing would be: the window's own copy is
+    // left alone until it asks again.
+    const sessions = projects[at].sessions.map((session) => ({
+      ...session,
+      former_paths: [...(session.former_paths ?? []), String(args.from)],
+      project_path: String(args.to),
+    }));
+    projects = projects.map((p, i) => (i === at ? { ...p, path: String(args.to), missing: false, sessions } : p));
+  },
   save_doc_to_project: (args: Args) => {
     const from = String(args.path);
-    const to = `${String(args.project)}/docs/${from.split("/").pop()}`;
+    const to = `${projectHome(String(args.project))}/docs/${from.split("/").pop()}`;
     docsByPath.set(to, docsByPath.get(from) ?? "");
     docsByPath.delete(from);
     emit(String(args.chatId), { kind: "doc_saved", from, to });
@@ -887,8 +918,8 @@ const commands: Record<string, (args: Args) => unknown> = {
   },
   save_notes_to_project: (args: Args) => {
     const chatId = String(args.chatId);
-    const from = `${home}/Library/Application Support/com.harness.app/notes/${chatId}/notes.md`;
-    const to = `${String(args.project)}/docs/notes.md`;
+    const from = `${chatFolder(String(args.project), chatId)}/notes.md`;
+    const to = `${projectHome(String(args.project))}/docs/notes.md`;
     docsByPath.set(to, notesByChat.get(chatId) ?? "");
     notesByChat.delete(chatId);
     emit(chatId, { kind: "doc_saved", from, to });

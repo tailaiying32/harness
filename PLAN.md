@@ -22,6 +22,14 @@ cup in the top strip (and an agent tool) that holds the computer awake while the
 user steps away, ending when they're back, when the work is done, or after
 two hours; overnight is a deliberate step. See "Keep awake".
 
+Added 2026-11-17 (branch `harness/harness-home-2cc4f2`): what chats write
+for the user to read lives in one folder in the home directory, `~/.harness`,
+split by project: each project's docs, shared by all its chats and
+worktrees, and each chat's own notes and docs. Nothing is saved into a repo
+unless the user asks for exactly that. The same folder holds each project's
+memory and the user's preferences, for every agent, and all of it follows a
+project whose folder is moved or renamed. See "The home folder".
+
 Status, 2026-11-13: steps 1 to 5 of "Order of work" are built. Images
 (paste, drop, tool images, a full-space image view) were added 2026-11-14;
 see "Images". The app has a
@@ -321,6 +329,8 @@ src-tauri/
     side_chat.rs       SideChats: read-only side chats, several per chat as tabs (/btw), never saved
     store.rs           SQLite schema, reads, writes, and the search index over what chats said
     chats.rs           the earlier-chats tools: search, list and read a project's chats
+    home.rs            where the home folder (~/.harness) is, and each project's and chat's place in it
+    notes.rs           each chat's own folder there: its notes and docs
     images.rs          pasted images and images from tools, as files per chat
     locate.rs          find the claude binary
 src/
@@ -1507,10 +1517,11 @@ editor. Empty notes get the cursor. Lists edit like the message box, through the
 steps back a level or ends the list), Tab and Shift+Tab indent, and numbered
 lists stay in order. Tested with key presses in the editor. Saved 400 ms after typing stops and when editing
 ends (`write_notes`), read lazily the first time the tab shows (`read_notes`).
-- Stored in the app's data folder, `notes/<chat id>/notes.md` (`notes.rs`),
-  never in the repo; written to a side file then moved into place; 1 MB cap.
-  Purged with the chat when the trash is emptied; swept at start for chats
-  that don't exist (a new chat never sent), like images.
+- Stored in the chat's own folder in the home folder,
+  `~/.harness/projects/<key>/chats/<chat id>/notes.md` (`notes.rs`; see "The
+  home folder"), never in the repo; written to a side file then moved into
+  place; 1 MB cap. Purged with the chat when the trash is emptied; swept at
+  start for chats that don't exist (a new chat never sent), like images.
 - The agent reads them only when the user mentions them (the user's choice:
   "I wrote some notes, take a look"). Each launch, main and side chat, gets
   `--add-dir <notes folder>` (no permission prompt, tested on CLI 2.1.322) and
@@ -1581,14 +1592,15 @@ file, even when coding", and Harness said nothing about its own panel.
 - **Every agent is told** (`docs_rule` in `agent/mod.rs`, part of the
   writable `notes_instruction`, so Claude and Cursor get the same words):
   write-ups go as a new markdown file in the chat's folder
-  (`notes/<chat id>/`, beside notes.md), named for what they hold, with a
+  (`…/chats/<chat id>/`, beside notes.md), named for what they hold, with a
   one-line reply linking the file as `[name](<full path>)` (angle brackets so
   the space in "Application Support" works; markdown-it encodes it and the
   link opens the tab); never into notes.md unless the user says "my notes";
   "docs" means these tabs, never an online service; edit with the edit tool;
   no worktree needed; "save it to the project" means write it into the
-  project's `docs/`, delete the old file and keep editing the new one.
-  Answers and discussion stay in the chat.
+  project's docs folder in the home folder (named in full), delete the old
+  file and keep editing the new one; into the repo itself only when the user
+  asks for that in so many words. Answers and discussion stay in the chat.
 - **Claude Docs is off in Harness only** (`launch_settings`):
   `deniedMcpServers: [{serverName: "claude.ai Claude Docs"}]` drops the
   server, its tools and its instructions, while other claude.ai connectors
@@ -1608,10 +1620,15 @@ file, even when coding", and Harness said nothing about its own panel.
   to the project, deleted) loses its tab.
 - **Save to project**: a chat-folder doc's tab has a "Save to project"
   button at its foot, styled like Approve plan (grey while the agent works; one shared `button.primary` rule in `app.css` for every accent button). `save_doc_to_project`
-  (`docs::save_to_project`) copies it into `<chat root>/docs/` (the
-  worktree's when the chat has one), adding `-2`, `-3`… rather than
-  overwriting, and removes the original; never notes.md. The tab follows
-  the new path, and the agent is told with the next message.
+  (`docs::save_to_project`) copies it into the project's docs folder in the
+  home folder (`~/.harness/projects/<key>/docs/`; the project's main folder
+  names it, never a worktree, so every chat of the project shares it),
+  adding `-2`, `-3`… rather than overwriting, and removes the original. The
+  notes tab has the same button (`save_notes_to_project`): the notes become a
+  doc there named after the chat, and start empty again. Either way a saved
+  `doc_saved {from, to}` event lets the tab, and links to the old path,
+  follow the file when the chat is reopened, and the agent is told with the
+  next message.
 - **App notes**: things the window tells the agent with the next message
   (`appNotes` → `send_message` → `with_app_notes` in `sessions.rs`), put in
   front of the agent's text as "(From the app, not the user: …)". Not shown
@@ -1620,6 +1637,226 @@ file, even when coding", and Harness said nothing about its own panel.
   "write some short notes" made project-notes.md, "put X in my notes" went
   to notes.md, "make it a Claude Doc" was turned down. Not tested live: the
   button in the real window, Cursor's tab from disk.
+
+### The home folder (`home.rs`, built 2026-11-17)
+
+What chats write for the user to read is kept in one folder in the user's
+home directory, split by project, and never in a repo unless the user asks
+for exactly that. Before this, "Save to project" put a doc into the repo's
+`docs/`: it showed up in git, someone had to decide whether to commit it, an
+untracked copy could block a pull, and a doc saved from a worktree chat
+existed only on that worktree's branch.
+
+```
+~/.harness/
+  projects/<key>/docs/               the project's docs, shared by all its chats
+  projects/<key>/chats/<chat id>/    that chat's notes.md and its own docs
+  unsent/<chat id>/                  notes typed before a chat's first message
+```
+
+- **Why outside the repo, and not an ignored folder in it:** a worktree is a
+  second copy of the repo's files, so anything inside the repo exists once
+  per worktree. Only a folder outside is the same for every chat of a
+  project.
+- **`<key>`** (`Home::key`) is the project's main folder path with every
+  character that isn't an ASCII letter or digit turned into `-`
+  (`/Users/me/tailai/harness` → `-Users-me-tailai-harness`), the way Claude
+  Code names its own project folders. Two paths can give one key
+  (`/a/b-c`, `/a/b/c`); they would share a folder.
+- **Which folder** (`Home::resolve`): `HARNESS_HOME` when set; else, when
+  `HARNESS_DATA_DIR` is set, `<data folder>/home`, so a test or a test copy
+  of the app never touches the real one; else `~/.harness`.
+- **Chat folders** (`notes.rs`): `Notes` finds a chat's project in the store.
+  A chat has none until its first message makes it, so notes typed before
+  then are in `unsent/<chat id>/` and move in at that moment (`adopt`,
+  called in `send_inner` before the agent starts, so the agent only ever
+  sees the final path). The sweep at start removes folders of chats that
+  don't exist, in both places, and never a project's `docs`.
+- **A project's docs** are where "Save to project" puts a doc or the notes
+  (`save_doc_to_project`, `save_notes_to_project`: the window sends the
+  project's main folder, never the worktree). Agents are told the folder in
+  `docs_rule` and to look there for a doc that isn't in the chat. Harness
+  never deletes anything in it.
+- **Access.** Claude Code: `--add-dir` and `Edit(//<folder>/**)` for the
+  chat's folder and for the project's docs folder (a side chat: `--add-dir`
+  only). Cursor has no such switch; its own global settings
+  (`~/.cursor/cli-config.json`, `~/.cursor/permissions.json`) allow reading
+  and writing `~/.harness/**`.
+- **The one-time move.** Chat folders used to be `<data folder>/notes/<chat
+  id>/`. At start (`SessionManager::move_chat_folders`, before the sweep)
+  each existing chat's folder is renamed into its project; one that can't be
+  moved stays and is tried again next start; with nothing left the old
+  folder is removed. On a copy of the real data: 79 folders moved, nothing
+  to do on the second start.
+- **Old paths keep working.** A moved chat's history still names the old
+  folder. The window is given the chat's folder as it is now
+  (`load_session` → `chat_folder`) and `Chat.currentPath` maps a path
+  containing `/notes/<chat id>/` to the same file there, so doc tabs rebuilt
+  from history and links in old messages open; `Notes::current` does the
+  same for the earlier-chats `read` tool.
+- **Telling the agent once.** `sessions.pending_note` holds text for a
+  chat's agent that is sent with the user's next message there and then
+  cleared (`add_pending_note`, `take_pending_note`; put before the message
+  like other app notes). The move leaves each moved chat "This chat's own
+  folder moved from … to …".
+- **Not here:** the database, images, skills and worktrees stay in the app's
+  data folder; they aren't for reading. The to-do list
+  (`~/.harness/projects/-Users-tailaiying-tailai-harness/docs/TODO.md`) and
+  the research doc moved out of this repo on 2026-11-17; this plan doc
+  stays in it.
+- **Tested:** Rust tests (layout, early notes, sweep, the move, old paths,
+  the pending note, access); the preview page (a doc written under the old
+  layout shows at the new place, and Save to project moves it to the
+  project's docs); a test copy on a copy of the real chats: the move, an old
+  chat's doc tab at its new path, and new chats on Claude Code and on Cursor
+  (GPT) that wrote a doc and saved it to the project when asked, with nothing
+  new in the repo; another chat then opened that doc by name.
+- **Known gap:** in a Cursor chat, a doc the agent itself saves to the
+  project has no tab until its link is clicked (Cursor's edits carry no
+  text, and only chat-folder docs are read from disk for a tab). The Save to
+  project button moves the tab for both agents.
+- **Project memory, for every agent** (2026-11-17, branch
+  `harness/home-memory-2cc4f2`): `projects/<key>/memory/`, one memory per
+  project (its main folder names it, so worktrees share it). Before this,
+  what Claude Code remembered was in its own folder and Cursor never saw it.
+  - **Claude Code keeps its own memory, moved.** `launch_settings` adds
+    `"autoMemoryDirectory": "<folder>"` to the JSON passed with `--settings`,
+    and an `Edit(//<folder>/**)` allow rule so a save shows no card. Nothing
+    is turned off and nothing is said in its instructions: it saves quietly
+    and loads `MEMORY.md` as before. A side chat gets the same setting
+    (`memory_settings`). Tested on CLI 2.1.326: a new chat read the index
+    there, saved a note there, and a resumed chat followed the setting.
+  - **Cursor has no memory of its own**, so a fresh conversation's intro
+    carries `memory_instruction` (`agent/mod.rs`): where the folder is, that
+    `MEMORY.md` is the index (one line per note), that a note is one
+    markdown file with frontmatter (`name`, `description`,
+    `metadata.type`), when to write one, and the index as it is now (its
+    first 200 lines, as Claude Code cuts its own). Any other agent without
+    a memory can be told the same way; one that lets its memory be moved
+    should be pointed at the folder instead.
+  - **What Claude Code already remembered is copied in once**
+    (`Home::ensure_memory`, when a chat's process starts): from
+    `~/.claude/projects/<key>/memory/` (the same key) when the folder here
+    has no `MEMORY.md` yet. Copied, never moved, so Claude Code run outside
+    the app keeps its own, and from then on the two differ.
+  - **Tested** in a test copy: Claude Code saved a fact and a new Claude
+    chat recalled it; a Cursor (GPT) chat recalled it, then saved another as
+    a note with frontmatter and an index line; a Claude chat started after
+    that recalled both.
+- **The user's preferences, for every agent** (2026-11-17, branch
+  `harness/home-preferences-2cc4f2`): `~/.harness/preferences.md`, standing
+  instructions whatever the project. Before this they were in Claude Code's
+  own `~/.claude/CLAUDE.md`, which no other agent reads.
+  - **In each agent's instructions** (`preferences_instruction`,
+    `agent/mod.rs`; the file is read when a chat's process starts, cut to
+    20,000 characters; missing or blank means none): Claude Code gets them
+    at the end of `--append-system-prompt`, main and side chat; Cursor in
+    the intro of a fresh conversation.
+  - **A reminder with every message** (`SessionManager::reminder`, added in
+    `send_inner`): "(From the app, not the user: Reminder: follow the user's
+    preferences in <file>.)", after the user's words, never before (Cursor
+    titles a chat from the start of its first prompt). Agents drift from
+    the rules in a long chat, and Cursor hears its instructions only once.
+    For an agent with no memory of its own the reminder also names the
+    project's memory folder. Not saved in the history, not shown. A
+    `/command` handed on to the agent goes exactly as typed, with no
+    reminder, recent-chats note or pending note: text after it would be
+    read as the command's arguments. A pending note waits for the next
+    message.
+  - **Helper agents don't inherit them.** Claude Code hands its own
+    `CLAUDE.md` to the subagents it starts, but not text added at launch
+    (tested on CLI 2.1.326: the main agent followed a rule given that way
+    and its helper did not). So the instruction tells the agent to pass on
+    the ones that matter, and in a test it put them in the helper's prompt.
+  - **The switch-over is by hand, last**, once a build with this is running:
+    copy the text of `~/.claude/CLAUDE.md` to `~/.harness/preferences.md`,
+    empty that file (or Claude Code gets the text twice) and remove the
+    `UserPromptSubmit` hook in `~/.claude/settings.json` that reminds Claude
+    Code of it, each with a backup. Claude Code run outside the app then has
+    no preferences; the user accepted that.
+  - **Tested** in a test copy with a made-up rule ("end every reply with
+    the word pineapple"): Claude Code and Cursor (GPT) both followed it on
+    every message, and Cursor's chat title was still about the user's
+    message.
+- **A project folder that moved or was renamed** (2026-11-17, branch
+  `harness/home-moved-project-2cc4f2`). Before this, everything a project
+  kept was tied to its folder's path as text, nothing could change that
+  path, and a message to a chat of a missing folder failed with "Not a
+  folder".
+  - **What is tied to the path:** `projects.path` (chats point at the
+    project by id, so they follow); `terminals.project` and `.folder` and the
+    live tabs; each chat's saved worktree (`repo_root`, `subpath`) and git's
+    own links between the repo and its worktrees; `~/.harness/projects/<key>`;
+    the window's `foldedProjects`, `projectOrder` and `projectModels`; and
+    paths inside saved events, which are history and are not rewritten.
+  - **Noticing.** The `sidebar` command marks a project `missing` when its
+    folder is gone (`sessions::folder_gone`: not a folder, and not on a
+    `/Volumes/<name>` that isn't connected, which shows as it always did).
+    The sidebar draws a missing project faint with a `locate` text button
+    where `+` was; its chats still open.
+  - **The move** (`SessionManager::relocate_project(from, to)`, command
+    `relocate_project`). Refused when the two are the same, `to` isn't a
+    folder, `from` is still there, or `from` isn't a project. Then, in
+    order: the store, in one transaction (`Store::relocate_project`: rename
+    the project row, or when `to` is already a project move the chats to it
+    and delete the old row; add `from` to `projects.former_paths`; re-point
+    the terminal tabs, after the target's own when merging; rewrite each
+    chat's saved worktree for the new repo root; leave every chat the
+    pending note "This project's folder moved from … to …"); close each
+    chat's process and wait for it (it resumes on the next message); forget
+    cached repo roots; `git worktree repair` in the new root, which relinks
+    every worktree (a failure is logged, and such a chat falls back to the
+    main folder as before); drop the folder's GitHub cache
+    (`github::forget_under`); `Home::move_project`; re-key live terminal
+    tabs (`Terminals::project_moved`; running shells are left alone). The
+    command also ends the moved chats' side chats.
+  - **The home folder follows** (`Home::move_project`): a rename when the
+    new key has no folder. Otherwise a merge: chat folders move across, docs
+    move with `-2`… on a name clash, and memory moves in whole when the
+    target has none, else as `memory/from<old key>/` with one line added to
+    the target's `MEMORY.md`.
+  - **By hand:** `locate` opens the folder picker at the old folder's parent
+    and calls the command; an error shows in the sidebar's problem line.
+  - **By itself, when certain** (`find_moved`, in `send_inner` for a first
+    message in a folder the store has never seen): a missing project matches
+    when the newest of its chats with a `start_commit` names a commit that
+    exists in the new folder (`worktree::has_commit`, `git cat-file -e`).
+    Exactly one match is followed, and the new chat records `ProjectMoved
+    { from, to }`, drawn as a faint line. None or several: nothing happens.
+    Projects on an unconnected drive are never candidates. It costs nothing
+    unless some project is missing.
+  - **The window.** `moveProjectPrefs` swaps the old path for the new in the
+    three saved settings before the sidebar prunes paths it no longer sees.
+    An open chat takes its row's new `project_path` on the next refresh.
+    `SessionRow.former_paths` lets `Chat.currentPath` map a path under an
+    old project folder to the same file under the new one, so doc tabs
+    rebuilt from history and links in old messages open. Worktree chats'
+    paths are under the worktree folder, which doesn't move.
+  - **Tested:** Rust tests on real git repos (a renamed repo with a chat in
+    a worktree: chats, terminals, home folder and worktree all follow and
+    git works in the worktree; following by itself; two missing clones of
+    one repo and a folder that isn't a repo are not followed; a merge; an
+    unconnected drive), and the preview page (the missing row, `locate`,
+    the saved order). In a test copy, on a scratch repo with three chats
+    (Claude Code in the main folder, Cursor (GPT), Claude Code in a
+    worktree) that was then renamed: a new chat in the renamed folder
+    brought the project along by itself, and each old chat, sent a message,
+    carried on its own conversation (it recalled a word from before the
+    rename) from the new folder or its worktree; the terminal tab, the docs,
+    the memory and the chat folders were under the new path. Claude Code
+    finds a conversation by its id whatever folder it was started in (CLI
+    2.1.326). Not tried in the real window: the `locate` button itself.
+  - **The cleanup pass leaves a missing repo alone** (`sweep`): a chat whose
+    worktree's repo isn't a folder is skipped. Found in that test: with the
+    repo gone every git question fails, and for a put-away worktree a
+    failure was read as "its branch was deleted outside the app", so the
+    chat forgot its branch and could not bring its folder back once the
+    project was pointed at. The same held for a repo on an unplugged drive.
+- **Not covered yet:** following a moved folder that isn't a git repo
+  without a click (there is nothing to recognise it by); noticing a move
+  the moment it happens (it is seen the next time projects are listed); a
+  list of a project's docs, a view of its memory or a preferences editor in
+  the app; memory shared across projects; syncing between machines.
 
 ### Terminal (`terminal.rs`, built 2026-11-15)
 
@@ -1983,8 +2220,10 @@ from those by hand.
 A new chat can pick up a piece of earlier work without the user explaining
 it again: the agent finds the earlier chat in this project and reads it. It
 is the same for every agent, and a Cursor chat can read a Claude chat. The
-research and the tests behind each choice are in
-`docs/ADE chat search and memory.md`.
+research and the tests behind each choice are in "ADE chat search and
+memory.md", in this project's docs folder in the home folder
+(`~/.harness/projects/-Users-tailaiying-tailai-harness/docs/`), not in the
+repo.
 
 - **The tools** are a fourth app tool group, `harness_chats`, in every main
   chat (side chats get none), made in `lib.rs` beside the browser's:
