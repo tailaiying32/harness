@@ -27,7 +27,7 @@ use agent::claude_code::ClaudeCodeAdapter;
 use agent::cursor::CursorAdapter;
 use agent::{Agents, AppTools};
 use browser::Browsers;
-use events::{AgentEvent, Decision, Envelope, ModelInfo};
+use events::{AgentEvent, CommandInfo, Decision, Envelope, ModelInfo};
 use locate::SetupInfo;
 use sessions::{Out, SessionManager, TerminalHooks};
 use side_chat::SideChats;
@@ -699,6 +699,21 @@ async fn list_models(
         .map_err(|e| e.to_string())?
 }
 
+/// The slash commands an agent (Claude Code if none is named) takes in a
+/// folder, as it reports them. Starts a short-lived agent process: about a
+/// second for Claude Code, a few for Cursor.
+#[tauri::command]
+async fn list_commands(
+    state: State<'_, AppState>,
+    agent: Option<String>,
+    folder: String,
+) -> Result<Vec<CommandInfo>, String> {
+    let (adapter, binary) = state.agents.get(agent.as_deref().unwrap_or(agent::CLAUDE))?;
+    tauri::async_runtime::spawn_blocking(move || adapter.list_commands(&binary, Path::new(&folder)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Runs an agent's own sign-in (Claude Code if none is named), which opens
 /// the browser. Waits until the user is done there, up to a few minutes.
 #[tauri::command]
@@ -1052,6 +1067,7 @@ pub fn run() {
             set_model,
             set_effort,
             list_models,
+            list_commands,
             sign_in,
             side_send,
             side_withdraw_message,

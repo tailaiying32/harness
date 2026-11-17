@@ -18,7 +18,7 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SideOptions, SpawnOptions, notes_instruction};
-use crate::events::{AgentEvent, ApprovalKind, BackgroundTask, Block, ContextPart, Decision, ModelInfo, SessionState};
+use crate::events::{AgentEvent, ApprovalKind, BackgroundTask, Block, CommandInfo, ContextPart, Decision, ModelInfo, SessionState};
 
 /// How many stderr lines to keep for an error message when the process dies.
 const STDERR_TAIL_LINES: usize = 30;
@@ -491,62 +491,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
     // nothing is spent. The list takes about a second, the effort defaults below
     // about 7 more (tested on CLI 2.1.322).
     fn list_models(&self, binary: &Path, _efforts_for: Option<&[String]>) -> Result<Vec<ModelInfo>, String> {
-        use std::io::{BufRead, Write};
-
-        let mut cmd = std::process::Command::new(binary);
-        cmd.args([
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--permission-prompt-tool",
-            "stdio",
-        ])
-        .current_dir(std::env::temp_dir())
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("ANTHROPIC_AUTH_TOKEN")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("Could not start Claude Code: {e}"))?;
-        let mut stdin = child.stdin.take().ok_or("Claude Code has no stdin")?;
-        let stdout = child.stdout.take().ok_or("Claude Code has no stdout")?;
-
-        // Read on another thread so a silent process can't hang the caller.
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
-                if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                    if value["type"] == "control_response" && tx.send(value).is_err() {
-                        return;
-                    }
-                }
-            }
-        });
-        // Sends one request and waits for its reply.
-        let mut ask = |id: &str, request: Value, wait: Duration| -> Option<Value> {
-            let line = json!({ "type": "control_request", "request_id": id, "request": request });
-            writeln!(stdin, "{line}").and_then(|_| stdin.flush()).ok()?;
-            let until = std::time::Instant::now() + wait;
-            loop {
-                let reply = rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())).ok()?;
-                if reply["response"]["request_id"] == id {
-                    return Some(reply);
-                }
-            }
-        };
-
-        let reply = ask("models", json!({ "subtype": "initialize" }), Duration::from_secs(15));
+        let mut probe = Probe::start(binary, &std::env::temp_dir())?;
+        let reply = probe.ask("models", json!({ "subtype": "initialize" }), Duration::from_secs(15));
         let mut models = reply.as_ref().map(parse_models).unwrap_or_default();
 
         // Each model's default effort: Claude Code doesn't list it, so switch
@@ -558,20 +504,27 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 continue;
             }
             let wait = Duration::from_secs(5);
-            let switched = ask(&format!("m{i}"), json!({ "subtype": "set_model", "model": model.value }), wait);
-            let settings = switched.and_then(|_| ask(&format!("s{i}"), json!({ "subtype": "get_settings" }), wait));
+            let switched = probe.ask(&format!("m{i}"), json!({ "subtype": "set_model", "model": model.value }), wait);
+            let settings = switched.and_then(|_| probe.ask(&format!("s{i}"), json!({ "subtype": "get_settings" }), wait));
             let Some(settings) = settings else { break };
             model.default_effort = settings["response"]["response"]["applied"]["effort"]
                 .as_str()
                 .map(str::to_owned);
         }
 
-        drop(stdin);
-        let _ = child.kill();
-        let _ = child.wait();
-
         reply.ok_or("Claude Code didn't list its models in time")?;
         Ok(models)
+    }
+
+    // The same `initialize` reply lists the commands, already cut down to the
+    // ones that work without Claude Code's own screen, with the folder's
+    // skills among them. About a second (tested on CLI 2.1.326).
+    fn list_commands(&self, binary: &Path, folder: &Path) -> Result<Vec<CommandInfo>, String> {
+        let mut probe = Probe::start(binary, folder)?;
+        let reply = probe
+            .ask("commands", json!({ "subtype": "initialize" }), Duration::from_secs(15))
+            .ok_or("Claude Code didn't list its commands in time")?;
+        Ok(parse_commands(&reply))
     }
 
     fn make_title(&self, binary: &Path, first_message: &str) -> Result<String, String> {
@@ -757,6 +710,112 @@ fn clean_title(reply: &str) -> String {
         .trim_end_matches('.')
         .trim()
         .to_string()
+}
+
+/// A short-lived Claude Code process that takes control requests and sends
+/// no chat message, so nothing is spent. Killed when dropped.
+struct Probe {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    replies: std::sync::mpsc::Receiver<Value>,
+}
+
+impl Probe {
+    fn start(binary: &Path, folder: &Path) -> Result<Self, String> {
+        use std::io::BufRead;
+
+        let mut cmd = std::process::Command::new(binary);
+        cmd.args([
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--permission-prompt-tool",
+            "stdio",
+        ])
+        .current_dir(folder)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Could not start Claude Code: {e}"))?;
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().ok_or("Claude Code has no stdout")?;
+        // Read on another thread so a silent process can't hang the caller.
+        let (tx, replies) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                    if value["type"] == "control_response" && tx.send(value).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(Self { child, stdin, replies })
+    }
+
+    /// Sends one request and waits for its reply.
+    fn ask(&mut self, id: &str, request: Value, wait: Duration) -> Option<Value> {
+        use std::io::Write;
+
+        let line = json!({ "type": "control_request", "request_id": id, "request": request });
+        let stdin = self.stdin.as_mut()?;
+        writeln!(stdin, "{line}").and_then(|_| stdin.flush()).ok()?;
+        let until = std::time::Instant::now() + wait;
+        loop {
+            let reply = self
+                .replies
+                .recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+                .ok()?;
+            if reply["response"]["request_id"] == id {
+                return Some(reply);
+            }
+        }
+    }
+}
+
+impl Drop for Probe {
+    fn drop(&mut self) {
+        self.stdin.take();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Pull the command list out of an `initialize` reply. Each entry has `name`,
+/// `description`, `argumentHint` (often empty) and maybe `aliases`.
+fn parse_commands(reply: &Value) -> Vec<CommandInfo> {
+    reply["response"]["response"]["commands"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let name = c["name"].as_str().filter(|n| !n.is_empty())?.to_string();
+            Some(CommandInfo {
+                name,
+                description: c["description"].as_str().unwrap_or_default().to_string(),
+                hint: c["argumentHint"].as_str().filter(|h| !h.trim().is_empty()).map(str::to_owned),
+                aliases: c["aliases"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a.as_str().map(str::to_owned))
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 /// Pull the model list out of an `initialize` reply. Each entry has `value`
@@ -2005,6 +2064,40 @@ mod tests {
         );
         assert!(t.events.is_empty());
         assert!(t.reply.unwrap().contains(r#""request_id":"r9""#));
+    }
+
+    #[test]
+    fn commands_are_read_from_the_initialize_reply() {
+        let reply = json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "commands", "response": { "commands": [
+            { "name": "compact", "description": "Free up context by summarizing the conversation so far", "argumentHint": "<optional custom summarization instructions>", "builtin": true },
+            { "name": "usage", "description": "Show session cost", "argumentHint": "", "aliases": ["cost", "stats"], "builtin": true },
+            { "name": "design:ux-copy", "description": "(design) Write or review UX copy" },
+            { "description": "No name, so skipped" },
+        ]}}});
+        assert_eq!(
+            parse_commands(&reply),
+            vec![
+                CommandInfo {
+                    name: "compact".into(),
+                    description: "Free up context by summarizing the conversation so far".into(),
+                    hint: Some("<optional custom summarization instructions>".into()),
+                    aliases: vec![],
+                },
+                CommandInfo {
+                    name: "usage".into(),
+                    description: "Show session cost".into(),
+                    hint: None,
+                    aliases: vec!["cost".into(), "stats".into()],
+                },
+                CommandInfo {
+                    name: "design:ux-copy".into(),
+                    description: "(design) Write or review UX copy".into(),
+                    hint: None,
+                    aliases: vec![],
+                },
+            ]
+        );
+        assert!(parse_commands(&json!({})).is_empty());
     }
 
     #[test]

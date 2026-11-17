@@ -3,6 +3,7 @@
   // is remembered. Also home to things that aren't part of the work at hand,
   // like the trash.
   import BarIcon from "./BarIcon.svelte";
+  import { refreshSkills } from "./commands.svelte";
   import { CLAUDE, importSkill, listSkills, pickFile, pickFolder, removeSkill, type ModelInfo, type SkillInfo } from "./ipc";
   import type { AppState, Limit } from "./state/app.svelte";
   import {
@@ -156,6 +157,12 @@
   }
   loadSkills();
 
+  /** After an import or a removal: this list, and the `/` menu's. */
+  async function skillsChanged() {
+    await loadSkills();
+    void refreshSkills();
+  }
+
   async function importFrom(pick: () => Promise<string | null>) {
     skillProblem = "";
     removing = null;
@@ -163,7 +170,7 @@
       const path = await pick();
       if (!path) return;
       await importSkill(path);
-      await loadSkills();
+      await skillsChanged();
     } catch (e) {
       skillProblem = String(e);
     }
@@ -174,7 +181,7 @@
     removing = null;
     try {
       await removeSkill(name);
-      await loadSkills();
+      await skillsChanged();
     } catch (e) {
       skillProblem = String(e);
     }

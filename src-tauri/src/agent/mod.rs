@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::events::{AgentEvent, Decision, ModelInfo};
+use crate::events::{AgentEvent, CommandInfo, Decision, ModelInfo};
 
 /// Agent IDs, as saved with each chat.
 pub const CLAUDE: &str = "claude-code";
@@ -233,6 +233,13 @@ pub trait AgentAdapter: Send + Sync {
     /// takes a call per model (Cursor); None = all. Blocks for up to a few
     /// seconds; call it off the main thread.
     fn list_models(&self, binary: &Path, efforts_for: Option<&[String]>) -> Result<Vec<ModelInfo>, String>;
+
+    /// The slash commands the agent takes in `folder` (its own, plus skills it
+    /// finds there), as it reports them. Blocks for a second or a few; call
+    /// it off the main thread. Empty if the agent doesn't say.
+    fn list_commands(&self, _binary: &Path, _folder: &Path) -> Result<Vec<CommandInfo>, String> {
+        Ok(Vec::new())
+    }
 
     /// A short title for a chat that starts with `first_message`, written by a
     /// small model. Blocks for a few seconds; call it off the main thread.
