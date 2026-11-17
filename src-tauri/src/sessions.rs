@@ -460,7 +460,18 @@ impl SessionManager {
         // A typed `/name` for one of the app's skills goes to the agent with
         // the skill attached; the chat keeps what the user typed.
         let expanded = if show { inner.skills.expand(text) } else { None };
-        let text = with_app_notes(app_notes, expanded.as_deref().unwrap_or(text));
+        let mut text = with_app_notes(app_notes, expanded.as_deref().unwrap_or(text));
+        // A new chat's first message carries the project's latest chats, so
+        // the agent can spot a passing mention of one. Said here once, not in
+        // the instructions: those are sent again on every start, and a list
+        // that changes would make a resumed chat pay for its history anew.
+        // It goes after the user's words: Cursor titles a chat from the start
+        // of its first message.
+        if created && show {
+            if let Some(note) = crate::chats::titles_note(&inner.store, &project_path.to_string_lossy(), session_id) {
+                text.push_str(&format!("\n\n(From the app, not the user: {note})"));
+            }
+        }
         agent.send_user_message(&text, &payloads, message_id)
     }
 
@@ -1192,6 +1203,43 @@ mod tests {
             panic!("not a user message");
         };
         assert_eq!(text, "change it");
+    }
+
+    #[tokio::test]
+    async fn a_new_chats_first_message_names_the_projects_other_chats() {
+        let rig = rig(LONG);
+        let send = |chat: &'static str, text: &'static str, id: &'static str| {
+            let manager = rig.manager.clone();
+            async move {
+                manager
+                    .send_message(chat, crate::agent::CLAUDE, "/work".into(), None, None, None, text, &[], id, &[])
+                    .await
+                    .unwrap();
+            }
+        };
+        // The project's first chat has no others to name.
+        send("s1", "Fix the login bug", "m1").await;
+        assert_eq!(rig.told(), vec!["say Fix the login bug"]);
+        // The next chat is told about it, once.
+        send("s2", "same deal as the login fix", "m2").await;
+        // (The first chat's title may have been written by now, or not yet.)
+        let told = rig.told();
+        assert!(
+            told[1].starts_with(
+                "say same deal as the login fix\n\n(From the app, not the user: Recent chats in this project \
+(id, last used, title), readable with the harness_chats tools: s1 · just now · "
+            ),
+            "{}",
+            told[1]
+        );
+        assert!(told[1].ends_with("Fix the login bug.)"), "{}", told[1]);
+        send("s2", "and one more thing", "m3").await;
+        assert_eq!(rig.told()[2], "say and one more thing");
+        // What is saved is what the user typed.
+        let AgentEvent::UserMessage { text, .. } = &rig.store.events("s2").unwrap()[0] else {
+            panic!("not a user message");
+        };
+        assert_eq!(text, "same deal as the login fix");
     }
 
     #[tokio::test]

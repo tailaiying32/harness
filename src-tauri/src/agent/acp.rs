@@ -20,7 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{EventSink, ImagePayload, RunningAgent, SpawnOptions, mcp_http};
+use super::{AppTools, EventSink, ImagePayload, RunningAgent, SpawnOptions, mcp_http};
 use crate::events::{AgentEvent, ApprovalKind, Block, Decision, SessionState};
 
 /// How many stderr lines to keep for an error message when the process dies.
@@ -177,6 +177,8 @@ struct Tool {
     raw_input: Value,
     /// Its block has been passed on.
     shown: bool,
+    /// The name and input last passed on, to tell when fuller ones arrive.
+    sent: Option<(String, Value)>,
     /// Its result has been passed on.
     done: bool,
 }
@@ -259,6 +261,67 @@ struct State {
     /// Messages sent but not yet put in a prompt. One the user takes back
     /// leaves this set, and the driver skips it.
     queued: HashSet<String>,
+    /// What the app's own tools answered, until each call's result is saved.
+    served: ServedLog,
+}
+
+/// What one of the app's own tools answered. Cursor only says such a call
+/// succeeded, so the app keeps its own answer to save as the call's result.
+struct Served {
+    /// As the chat names the tool: `mcp__<server>__<tool>`.
+    name: String,
+    args: Value,
+    text: String,
+    is_error: bool,
+}
+
+type ServedLog = Arc<Mutex<VecDeque<Served>>>;
+
+/// The most answers kept waiting for their call to finish.
+const SERVED_KEPT: usize = 32;
+
+/// The app's tools, with every answer also written to `log`.
+fn recording(tools: &[AppTools], log: &ServedLog) -> Vec<AppTools> {
+    tools
+        .iter()
+        .map(|group| {
+            let (call, log, server) = (group.call.clone(), log.clone(), group.server);
+            AppTools {
+                call: Arc::new(move |tool, args| {
+                    let (call, log) = (call.clone(), log.clone());
+                    Box::pin(async move {
+                        let name = format!("mcp__{server}__{tool}");
+                        let result = call(tool, args.clone()).await;
+                        let (text, is_error) = match &result {
+                            Ok(content) => {
+                                let texts: Vec<&str> = content.iter().filter_map(|part| part["text"].as_str()).collect();
+                                (texts.join("\n"), false)
+                            }
+                            Err(message) => (message.clone(), true),
+                        };
+                        let mut log = log.lock().unwrap();
+                        if log.len() >= SERVED_KEPT {
+                            log.pop_front();
+                        }
+                        log.push_back(Served { name, args, text, is_error });
+                        result
+                    })
+                }),
+                ..group.clone()
+            }
+        })
+        .collect()
+}
+
+/// The app's own answer to a finished call: the oldest one kept for that tool
+/// with the same input, or failing that the oldest for that tool.
+fn take_served(log: &ServedLog, name: &str, args: &Value) -> Option<Served> {
+    let mut log = log.lock().unwrap();
+    let at = log
+        .iter()
+        .position(|s| s.name == name && &s.args == args)
+        .or_else(|| log.iter().position(|s| s.name == name))?;
+    log.remove(at)
 }
 
 struct Shared {
@@ -320,10 +383,11 @@ pub fn spawn(binary: PathBuf, cfg: AcpConfig, opts: SpawnOptions, sink: EventSin
     let stderr = child.stderr.take().ok_or_else(|| format!("{label} has no stderr"))?;
 
     // The app's tools, served for as long as this process lives.
+    let served = ServedLog::default();
     let endpoint = if opts.tools.is_empty() {
         None
     } else {
-        match mcp_http::open(opts.tools.clone()) {
+        match mcp_http::open(recording(&opts.tools, &served)) {
             Ok(endpoint) => Some(endpoint),
             Err(e) => {
                 eprintln!("harness: the app's tools aren't available to {label}: {e}");
@@ -350,6 +414,7 @@ pub fn spawn(binary: PathBuf, cfg: AcpConfig, opts: SpawnOptions, sink: EventSin
         },
         state: Mutex::new(State {
             effort: opts.effort.clone().filter(|e| e != "default"),
+            served,
             ..State::default()
         }),
         sink,
@@ -611,9 +676,7 @@ async fn drive(
         // intro and a pending plan switch wait for the next real prompt.
         let mut prompt: Vec<Value> = Vec::new();
         if !body.is_empty() || !notes.is_empty() {
-            if let Some(text) = intro.take() {
-                prompt.push(json!({ "type": "text", "text": text }));
-            }
+            let intro = intro.take();
             let build = std::mem::take(&mut shared.state.lock().unwrap().build_after_turn);
             let leave_plan = build && shared.state.lock().unwrap().config.modes.iter().any(|m| m == "agent");
             if leave_plan
@@ -628,6 +691,12 @@ async fn drive(
             }
             prompt.extend(notes.into_iter().map(|note| json!({ "type": "text", "text": note })));
             prompt.extend(body);
+            // The intro goes last: Cursor titles a chat from the start of its
+            // first prompt, and with the intro first the title was about the
+            // app's notes ("Harness Agent"), not what the user asked.
+            if let Some(text) = intro {
+                prompt.push(json!({ "type": "text", "text": text }));
+            }
         }
         if !prompt.is_empty() {
             for id in seen {
@@ -983,6 +1052,7 @@ fn show_tool(tool_id: &str, tool: &mut Tool, now: bool) -> Option<AgentEvent> {
     }
     tool.shown = true;
     let (name, input) = name_and_input(tool);
+    tool.sent = Some((name.clone(), input.clone()));
     Some(AgentEvent::AssistantBlock {
         message_id: format!("tool-{tool_id}"),
         block: Block::ToolCall {
@@ -990,6 +1060,26 @@ fn show_tool(tool_id: &str, tool: &mut Tool, now: bool) -> Option<AgentEvent> {
             name,
             input,
         },
+        parent_tool_id: None,
+    })
+}
+
+/// A shown call's name and input again, when a later update brought fuller
+/// ones: a call often starts before Cursor has sent what it is for. A plan
+/// is left out; its text reaches the chat with the request to approve it.
+fn refresh_tool(tool_id: &str, tool: &mut Tool) -> Option<AgentEvent> {
+    if !tool.shown || tool.done || tool.raw_input["_toolName"] == "createPlan" {
+        return None;
+    }
+    let now = name_and_input(tool);
+    if tool.sent.as_ref() == Some(&now) {
+        return None;
+    }
+    tool.sent = Some(now.clone());
+    Some(AgentEvent::ToolInput {
+        tool_id: tool_id.to_string(),
+        name: now.0,
+        input: now.1,
         parent_tool_id: None,
     })
 }
@@ -1092,6 +1182,7 @@ fn update(state: &mut State, u: &Value) -> Vec<AgentEvent> {
             let Some(tool_id) = u["toolCallId"].as_str() else {
                 return out;
             };
+            let served = state.served.clone();
             let tool = state.tools.entry(tool_id.to_string()).or_default();
             if let Some(title) = u["title"].as_str() {
                 tool.title = title.to_string();
@@ -1104,13 +1195,28 @@ fn update(state: &mut State, u: &Value) -> Vec<AgentEvent> {
             }
             let status = u["status"].as_str().unwrap_or_default();
             let started = matches!(status, "in_progress" | "completed" | "failed");
-            out.extend(show_tool(tool_id, tool, started && tool.raw_input["_toolName"] != "createPlan"));
+            match show_tool(tool_id, tool, started && tool.raw_input["_toolName"] != "createPlan") {
+                Some(shown) => out.push(shown),
+                None if started => out.extend(refresh_tool(tool_id, tool)),
+                None => {}
+            }
             if matches!(status, "completed" | "failed") && !tool.done && tool.shown {
                 tool.done = true;
+                let mut text = result_text(u);
+                let mut is_error = status == "failed";
+                // One of the app's own tools: Cursor passes on no output, so
+                // the answer the app gave is the result.
+                if text.is_empty() {
+                    let (name, input) = name_and_input(tool);
+                    if let Some(own) = take_served(&served, &name, &input) {
+                        text = own.text;
+                        is_error |= own.is_error;
+                    }
+                }
                 out.push(AgentEvent::ToolResult {
                     tool_id: tool_id.to_string(),
-                    content: json!(result_text(u)),
-                    is_error: status == "failed",
+                    content: json!(text),
+                    is_error,
                     parent_tool_id: None,
                 });
             }
@@ -1203,6 +1309,12 @@ fn child_update(child: &mut Child, u: &Value) -> Vec<AgentEvent> {
             is_error,
             parent_tool_id: Some(parent.to_string()),
         },
+        AgentEvent::ToolInput { tool_id, name, input, .. } => AgentEvent::ToolInput {
+            tool_id,
+            name,
+            input,
+            parent_tool_id: Some(parent.to_string()),
+        },
         other => other,
     };
     match u["sessionUpdate"].as_str().unwrap_or_default() {
@@ -1229,8 +1341,10 @@ fn child_update(child: &mut Child, u: &Value) -> Vec<AgentEvent> {
             }
             let status = u["status"].as_str().unwrap_or_default();
             let started = matches!(status, "in_progress" | "completed" | "failed");
-            if let Some(event) = show_tool(tool_id, tool, started) {
-                out.push(tag(event, &parent));
+            match show_tool(tool_id, tool, started) {
+                Some(shown) => out.push(tag(shown, &parent)),
+                None if started => out.extend(refresh_tool(tool_id, tool).map(|event| tag(event, &parent))),
+                None => {}
             }
             if matches!(status, "completed" | "failed") && !tool.done && tool.shown {
                 tool.done = true;
@@ -1673,6 +1787,76 @@ mod tests {
         line(&shared, r#"{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t","title":"harness_browser-open: open","kind":"other"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}"#);
         assert!(take(&seen).iter().all(|e| !matches!(e, AgentEvent::ApprovalRequest { .. })));
         assert_eq!(written(&mut rx)[0]["result"]["outcome"]["optionId"], "allow-once");
+    }
+
+    #[test]
+    fn a_call_that_started_empty_gets_its_real_input_when_it_arrives() {
+        let (shared, _rx, seen) = rig();
+        // Started before Cursor said what it searches for.
+        upd(&shared, r#"{"sessionUpdate":"tool_call","toolCallId":"t","title":"Grep","kind":"search","status":"in_progress"}"#);
+        let events = take(&seen);
+        assert!(matches!(&events[0], AgentEvent::AssistantBlock { block: Block::ToolCall { name, input, .. }, .. }
+            if name == "Grep" && input["pattern"].is_null()));
+        // The input arrives while it waits: nothing yet, it may still change.
+        upd(&shared, r#"{"sessionUpdate":"tool_call_update","toolCallId":"t","rawInput":{"pattern":"fn main"}}"#);
+        assert!(take(&seen).is_empty());
+        // It finishes: the real input, then the result.
+        upd(&shared, r#"{"sessionUpdate":"tool_call_update","toolCallId":"t","status":"completed","rawOutput":{"totalMatches":2}}"#);
+        let events = take(&seen);
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(matches!(&events[0], AgentEvent::ToolInput { tool_id, name, input, parent_tool_id: None }
+            if tool_id == "t" && name == "Grep" && input["pattern"] == "fn main"));
+        assert!(matches!(&events[1], AgentEvent::ToolResult { tool_id, .. } if tool_id == "t"));
+
+        // A call whose input was there from the start says it once.
+        upd(&shared, r#"{"sessionUpdate":"tool_call","toolCallId":"u","title":"Read","kind":"read","rawInput":{"path":"/a.rs"},"status":"in_progress"}"#);
+        upd(&shared, r#"{"sessionUpdate":"tool_call_update","toolCallId":"u","status":"completed","rawOutput":{"content":"x"}}"#);
+        let events = take(&seen);
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(events.iter().all(|e| !matches!(e, AgentEvent::ToolInput { .. })));
+    }
+
+    #[tokio::test]
+    async fn the_apps_own_answer_is_saved_as_its_tools_result() {
+        let (shared, _rx, seen) = rig();
+        let echo = AppTools {
+            server: "harness_chats",
+            instruction: String::new(),
+            list: json!([]),
+            call: Arc::new(|tool, args| {
+                Box::pin(async move {
+                    match tool.as_str() {
+                        "read" => Ok(vec![json!({ "type": "text", "text": format!("read {}", args["id"]) })]),
+                        _ => Err("No such tool".to_string()),
+                    }
+                })
+            }),
+        };
+        let log = shared.state.lock().unwrap().served.clone();
+        let tools = recording(&[echo], &log);
+        // Two calls answered by the app, as Cursor's would be over HTTP.
+        (tools[0].call)("read".into(), json!({ "id": "aaaa" })).await.unwrap();
+        (tools[0].call)("read".into(), json!({ "id": "bbbb" })).await.unwrap();
+        (tools[0].call)("nope".into(), json!({})).await.unwrap_err();
+
+        // Cursor then reports each as done, with no output of its own.
+        let done = |id: &str, tool: &str, args: &str| {
+            upd(&shared, &format!(
+                r#"{{"sessionUpdate":"tool_call","toolCallId":"{id}","title":"harness_chats: {tool}","kind":"other","status":"completed","rawInput":{{"providerIdentifier":"harness_chats","toolName":"{tool}","args":{args}}},"rawOutput":{{"success":true}}}}"#
+            ));
+            let events = take(&seen);
+            let Some(AgentEvent::ToolResult { content, is_error, .. }) = events.last().cloned() else {
+                panic!("no result: {events:?}");
+            };
+            (content, is_error)
+        };
+        // Matched by input, not by order.
+        assert_eq!(done("t2", "read", r#"{"id":"bbbb"}"#), (json!("read \"bbbb\""), false));
+        assert_eq!(done("t1", "read", r#"{"id":"aaaa"}"#), (json!("read \"aaaa\""), false));
+        assert_eq!(done("t3", "nope", "{}"), (json!("No such tool"), true));
+        // Nothing kept for it: the result stays empty.
+        assert_eq!(done("t4", "read", r#"{"id":"cccc"}"#), (json!(""), false));
+        assert!(log.lock().unwrap().is_empty());
     }
 
     #[test]

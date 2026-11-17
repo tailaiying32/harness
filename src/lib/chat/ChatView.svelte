@@ -13,6 +13,14 @@
 
   let { chat, problem }: { chat: Chat; problem: string | null } = $props();
 
+  // Opens another chat by the start of its ID. A side chat can't, and there
+  // chat names are plain text.
+  const onchat = $derived(chat.onOpenChat ?? undefined);
+
+  // "Use this" beside a chat a search found: said to the agent as a message,
+  // which it takes in at its next step if it is still working.
+  const steer = (id: string, title: string) => void chat.send(`Use the chat “${title}” (id ${id}) instead.`, []);
+
   let scroller: HTMLElement;
   let content: HTMLElement;
   let pinned = true;
@@ -170,6 +178,8 @@
             onopen={(path) => chat.openPanel(path)}
             onimage={(image) => chat.openImage(image)}
             onagent={(id) => chat.openInfo(id)}
+            {onchat}
+            onsteer={onchat ? steer : undefined}
           />
         </div>
       {:else if group.item.type === "user"}

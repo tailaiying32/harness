@@ -5,6 +5,8 @@
   import {
     awaitsAnswer,
     baseName,
+    chatLines,
+    chatsTool,
     diffLines,
     docPath,
     editCounts,
@@ -30,6 +32,8 @@
     onopen,
     onimage,
     onagent,
+    onchat,
+    onsteer,
   }: {
     tools: ToolCall[];
     root?: string;
@@ -44,7 +48,20 @@
     onimage?: (image: ImageRef) => void;
     /** Opens a subagent's tab in chat info, by the tool call that started it. */
     onagent?: (toolId: string) => void;
+    /** Opens another chat, by the start of its ID. */
+    onchat?: (id: string) => void;
+    /** Tells the agent to go by another chat than the one it picked. */
+    onsteer?: (id: string, title: string) => void;
   } = $props();
+
+  // The chats a search or a list of recent chats found, for an opened run.
+  const listsChats = (tool: ToolCall) =>
+    ["search", "recent"].includes(chatsTool(tool)) && !tool.isError && !tool.declined && Boolean(tool.result);
+  // A finished read of an earlier chat, which can be opened by its ID.
+  const readChat = (tool: ToolCall) => {
+    const id = tool.input && typeof tool.input === "object" ? (tool.input as Record<string, unknown>).id : "";
+    return chatsTool(tool) === "read" && tool.chatTitle && typeof id === "string" ? id : "";
+  };
 
   const isAgent = (tool: ToolCall) => tool.name === "Agent" || tool.name === "Task";
 
@@ -128,6 +145,11 @@
               <button class="target doc" title="Open in the side panel" onclick={(e) => openDoc(e, docPath(tool))}>
                 {name.target}
               </button>
+            {:else if onchat && readChat(tool)}
+              {@const id = readChat(tool)}
+              <button class="target doc" title="Open this chat" onclick={(e) => { e.stopPropagation(); onchat(id); }}>
+                {name.target}
+              </button>
             {:else}
               <span class="target">{name.target}</span>
             {/if}
@@ -138,7 +160,27 @@
           {#if diff && diff.length > 0}
             <Clipped lines={diff} max={24} />
           {/if}
-          {#if tool.result && showsOutput(tool)}
+          {#if listsChats(tool)}
+            <div class="chats">
+              {#each chatLines(tool.result ?? "") as line}
+                {#if typeof line === "string"}
+                  <div class="words">{line}</div>
+                {:else}
+                  <div class="chat">
+                    {#if onchat}
+                      <button class="doc name" title="Open this chat" onclick={() => onchat(line.id)}>{line.title}</button>
+                    {:else}
+                      <span class="name">{line.title}</span>
+                    {/if}
+                    <span class="faint">{line.age}</span>
+                    {#if onsteer}
+                      <button class="doc use" title="Tell the agent to go by this chat" onclick={() => onsteer(line.id, line.title)}>use this</button>
+                    {/if}
+                  </div>
+                {/if}
+              {/each}
+            </div>
+          {:else if tool.result && showsOutput(tool)}
             <Clipped lines={outputLines(tool)} max={12} />
           {/if}
         </div>
@@ -203,6 +245,34 @@
   .call {
     display: flex;
     gap: 1ch;
+  }
+  /* The chats a search found: a title to open, how long ago, and a way to pick it. */
+  .chats {
+    display: flex;
+    flex-direction: column;
+    padding-left: 2ch;
+  }
+  .chat {
+    display: flex;
+    gap: 2ch;
+  }
+  .chat .name {
+    color: var(--fg);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: left;
+  }
+  .chat .use {
+    flex-shrink: 0;
+  }
+  .words {
+    color: var(--faint);
+    padding-left: 2ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .verb {
     flex-shrink: 0;

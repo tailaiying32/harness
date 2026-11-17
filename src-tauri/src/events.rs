@@ -91,6 +91,15 @@ pub enum AgentEvent {
         is_error: bool,
         parent_tool_id: Option<String>,
     },
+    /// A tool call's name and input, when they came after the call was first
+    /// shown: Cursor sends a call empty and fills it in. Saved, so the call
+    /// still reads right when the chat is reopened or read by another chat.
+    ToolInput {
+        tool_id: String,
+        name: String,
+        input: Value,
+        parent_tool_id: Option<String>,
+    },
     ApprovalRequest {
         request_id: String,
         approval: ApprovalKind,

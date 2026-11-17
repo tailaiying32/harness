@@ -262,6 +262,18 @@ export class ChatInfo {
         return false;
       }
 
+      case "tool_input": {
+        if (!event.parent_tool_id) return false;
+        const step = this.agent(event.parent_tool_id)?.steps.find(
+          (s): s is Extract<AgentStep, { type: "tool" }> => s.type === "tool" && s.toolId === event.tool_id,
+        );
+        if (step) {
+          step.name = event.name;
+          step.input = event.input;
+        }
+        return true;
+      }
+
       case "tool_result": {
         if (event.parent_tool_id) {
           const agent = this.agent(event.parent_tool_id);

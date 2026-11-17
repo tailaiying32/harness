@@ -46,7 +46,7 @@ import {
 } from "../ipc";
 import { modeFor } from "../models";
 import { FILE_LINK, fileWord, linkable, toLinks, type FileRef } from "../chat/files";
-import { docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
+import { chatsTool, docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
 import { ChatInfo } from "./chatInfo.svelte";
 
 /** What the side panel shows. */
@@ -54,6 +54,15 @@ export type PanelView = "docs" | "side" | "browser" | "terminal" | "info";
 
 /** The browser tool that opens a page (see browser.rs). */
 const BROWSER_OPEN = "mcp__harness_browser__open";
+
+/** How a chat picked with @ is kept among a message's files: `chat:<id>`. */
+const CHAT_PATH = "chat:";
+
+/** A chat's title as it stands inside its `[@Title]` word: on one line, no brackets, not too long. */
+function clipTitle(title: string): string {
+  const plain = title.replace(/\[/g, "(").replace(/\]/g, ")").replace(/\s+/g, " ").trim();
+  return plain.length > 40 ? plain.slice(0, 39).trimEnd() + "…" : plain;
+}
 
 /** A string field of a tool's input, or "". */
 function field(input: unknown, key: string): string {
@@ -288,6 +297,23 @@ export class Chat {
   draftFiles = $state<FileRef[]>([]);
   /** Bumped to put the cursor at the end of the message box, e.g. after a message comes back to it. */
   focusDraft = $state(0);
+
+  /**
+   * Takes a chat picked with @ into the draft, and returns its word for the
+   * text: `[@Title]`. It rides on the files' ways: the word is sent as
+   * `[@Title](<chat:ID>)`, which the agent is told to read with the
+   * earlier-chats tools, and a click on the word opens that chat.
+   */
+  addDraftChat(id: string, title: string): string {
+    const path = CHAT_PATH + id;
+    const same = this.draftFiles.find((f) => f.path === path);
+    if (same) return same.word;
+    const label = "@" + clipTitle(title);
+    let word = `[${label}]`;
+    for (let n = 2; this.draftFiles.some((f) => f.word === word); n++) word = `[${label} ${n}]`;
+    this.draftFiles.push({ word, path });
+    return word;
+  }
 
   /**
    * Takes a dropped or pasted file into the draft. Returns what to put in the
@@ -742,7 +768,9 @@ export class Chat {
    * link to one; anything else in its own app. Says so in the chat when it can't.
    */
   openDropped(path: string): void {
-    if (/\.(md|markdown)$/i.test(path)) void this.openFile(path);
+    // A chat picked with @ is kept like a file, with `chat:<id>` as its path.
+    if (path.startsWith(CHAT_PATH)) this.onOpenChat?.(path.slice(CHAT_PATH.length));
+    else if (/\.(md|markdown)$/i.test(path)) void this.openFile(path);
     else openFile(path).catch((e) => this.showError(String(e)));
   }
 
@@ -865,6 +893,8 @@ export class Chat {
   onTurnEnd: (() => void) | null = null;
   /** Called after a message has been handed to the core, which saves the chat. */
   onSent: (() => void) | null = null;
+  /** Opens another chat, by its ID or the start of it. Set by the window; a side chat has none. */
+  onOpenChat: ((id: string) => void) | null = null;
   /** Answer every approval this way. Used by the self-test only. */
   autoAnswer: Decision | null = null;
   /** Self-test only: a line added to the next plan before it is auto-approved. */
@@ -982,6 +1012,16 @@ export class Chat {
         break;
       }
 
+      case "tool_input": {
+        // The call was shown before its real name and input arrived.
+        const tool = this.items.find((i): i is ToolItem => i.type === "tool" && i.toolId === event.tool_id);
+        if (tool) {
+          tool.name = event.name;
+          tool.input = event.input;
+        }
+        break;
+      }
+
       case "tool_result": {
         if (event.parent_tool_id) break;
         const tool = this.items.find((i): i is ToolItem => i.type === "tool" && i.toolId === event.tool_id);
@@ -989,6 +1029,12 @@ export class Chat {
           tool.isError = event.is_error;
           // Output that is never shown (a file that was read, say) isn't kept.
           tool.result = showsOutput(tool) ? resultText(event.content) : "";
+          // A read of an earlier chat keeps only that chat's title, from the
+          // first line of what came back (`# Title · agent · last used …`).
+          if (!event.is_error && chatsTool(tool) === "read") {
+            const title = resultText(event.content).match(/^# (.+) · [^·\n]+ · last used [^·\n]+ · \d+ turns?/);
+            if (title) tool.chatTitle = title[1];
+          }
           const images = imagesIn(event.content);
           if (images.length) tool.images = images;
           if (!event.is_error) this.trackDocument(tool);

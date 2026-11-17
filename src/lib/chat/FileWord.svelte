@@ -1,6 +1,7 @@
 <script lang="ts">
   // A dropped file's word, `[report.pdf]`, in the accent colour. Clicking it
-  // opens the file in its own app.
+  // opens the file in its own app. A chat picked with @, `[@Title]`, is drawn
+  // the same way, and a click opens that chat.
   let { word, path, onopen }: { word: string; path: string; onopen?: (path: string) => void } = $props();
 
   function open(e: MouseEvent) {
@@ -9,7 +10,8 @@
   }
 </script>
 
-<button class="file-word" title={path} onclick={open}>{word}</button>
+<!-- A chat picked with @ is kept as a file with the path `chat:<id>`. -->
+<button class="file-word" title={path.startsWith("chat:") ? "Open this chat" : path} onclick={open}>{word}</button>
 
 <style>
   .file-word {
