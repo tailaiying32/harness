@@ -523,6 +523,25 @@ async fn write_doc(state: State<'_, AppState>, path: String, text: String) -> Re
         .map_err(|e| e.to_string())?
 }
 
+/// The user's working preferences file as it is, for Settings; "" when there
+/// is none yet.
+#[tauri::command]
+async fn read_preferences(state: State<'_, AppState>) -> Result<String, String> {
+    let home = state.sessions.home().clone();
+    tauri::async_runtime::spawn_blocking(move || home.read_preferences())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Saves the user's edit to the preferences file from Settings.
+#[tauri::command]
+async fn write_preferences(state: State<'_, AppState>, text: String) -> Result<(), String> {
+    let home = state.sessions.home().clone();
+    tauri::async_runtime::spawn_blocking(move || home.save_preferences(&text))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Moves a doc from the chat's folder into the project's docs folder, which
 /// is in the app's home folder, not the repo (`project` is the project's
 /// main folder, never a worktree, so every chat of it shares the docs).
@@ -1117,6 +1136,8 @@ pub fn run() {
             close_session,
             read_doc,
             write_doc,
+            read_preferences,
+            write_preferences,
             save_doc_to_project,
             save_notes_to_project,
             read_notes,

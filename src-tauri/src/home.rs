@@ -96,6 +96,33 @@ impl Home {
         (!text.is_empty()).then_some(Preferences { path, text })
     }
 
+    /// The preferences file exactly as it is, for the user to edit in
+    /// Settings; "" when there is none yet.
+    pub fn read_preferences(&self) -> Result<String, String> {
+        match std::fs::read_to_string(self.preferences_file()) {
+            Ok(text) => Ok(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Saves the user's edit to the preferences file, making it (and the
+    /// home folder) when there is none. Written to a side file and moved
+    /// into place, so a crash never leaves half a file; a link is followed
+    /// so it stays a link. Chats started after this read the new text.
+    pub fn save_preferences(&self, text: &str) -> Result<(), String> {
+        let path = self.preferences_file();
+        let target = std::fs::canonicalize(&path).unwrap_or(path);
+        let folder = target.parent().ok_or("The preferences file has no folder.")?;
+        std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
+        let tmp = folder.join(".preferences.md.harness-save");
+        let saved = std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &target));
+        if saved.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        saved.map_err(|e| e.to_string())
+    }
+
     /// Everything kept for a project.
     pub fn project(&self, project_path: &str) -> PathBuf {
         self.root.join("projects").join(Self::key(project_path))
@@ -322,6 +349,23 @@ mod tests {
         assert_eq!((found.path, found.text.as_str()), (dir.join("preferences.md"), "# Working preferences\n- Be brief."));
         std::fs::write(home.preferences_file(), "x".repeat(PREFERENCES_CHARS + 50)).unwrap();
         assert_eq!(home.preferences().unwrap().text.chars().count(), PREFERENCES_CHARS);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn preferences_are_edited_as_the_whole_file() {
+        let dir = std::env::temp_dir().join(format!("harness-home-test-{}", uuid::Uuid::new_v4()));
+        let home = Home::new(dir.join("home"));
+        // No file, and no home folder yet: nothing to show, and saving makes both.
+        assert_eq!(home.read_preferences().unwrap(), "");
+        home.save_preferences("- Be brief.\n").unwrap();
+        assert_eq!(home.read_preferences().unwrap(), "- Be brief.\n");
+        assert_eq!(home.preferences().unwrap().text, "- Be brief.");
+        // Saved over, with no side file left behind.
+        home.save_preferences("\n").unwrap();
+        assert_eq!(home.read_preferences().unwrap(), "\n");
+        assert_eq!(home.preferences(), None);
+        assert_eq!(std::fs::read_dir(dir.join("home")).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 
