@@ -6,12 +6,14 @@ import { tabKey } from "./tabKeys";
 import {
   deleteSession,
   emptyTrash,
+  keepAwakeState,
   listTrash,
   loadSession,
   renameSession,
   restoreChat,
   sidebar,
   type Envelope,
+  type KeepAwakeState,
   type Mode,
   type ProjectRow,
   type SessionRow,
@@ -53,6 +55,8 @@ export class AppState {
   limits = $state<Limits>(loadLimits());
   /** A problem opening or deleting a chat, shown in the sidebar. */
   problem = $state("");
+  /** Keep awake, while it is on: holds the computer awake while the user is away. */
+  keepAwake = $state<KeepAwakeState | null>(null);
 
   /** Goes up each time a new chat is asked for, so the message box takes the cursor. */
   focusBox = $state(0);
@@ -133,6 +137,10 @@ export class AppState {
       tabKey(this.current, event.action);
       return;
     }
+    if (event.kind === "keep_awake") {
+      this.keepAwake = event.mode && event.ends_at ? { mode: event.mode, ends_at: event.ends_at } : null;
+      return;
+    }
     // A side chat's events belong to it alone: no sidebar mark, no usage reading.
     const side = id.indexOf("#side-");
     if (side > 0) {
@@ -166,6 +174,19 @@ export class AppState {
     if (id !== this.current.sessionId && (event.kind === "turn_ended" || needsYou)) {
       this.unseen[id] = true;
     }
+  }
+
+  /** Asks whether keep awake is on: after a reload the window starts blank. */
+  async loadKeepAwake(): Promise<void> {
+    this.keepAwake = await keepAwakeState().catch(() => null);
+  }
+
+  /** The titles of chats waiting for the user's answer. */
+  waitingChats(): string[] {
+    const sessions = this.projects.flatMap((p) => p.sessions);
+    return Object.entries(this.statuses)
+      .filter(([, state]) => state === "waiting_approval")
+      .map(([id]) => sessions.find((s) => s.id === id)?.title || "untitled");
   }
 
   dot(sessionId: string): Dot {

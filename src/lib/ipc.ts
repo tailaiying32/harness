@@ -101,7 +101,8 @@ export type AgentEvent =
   | { kind: "plan_edited"; request_id: string; plan: string }
   | { kind: "browser_tabs"; tabs: BrowserTab[]; shown: string | null }
   | { kind: "terminal_tabs"; project: string; tabs: TerminalTab[] }
-  | { kind: "tab_key"; action: TabAction };
+  | { kind: "tab_key"; action: TabAction }
+  | { kind: "keep_awake"; mode: KeepAwakeMode | null; ends_at: number | null };
 
 /** One command or agent running in the background. `kind` is the agent's own word, e.g. "local_bash". */
 export type BackgroundTask = { id: string; kind: string; description: string };
@@ -421,6 +422,16 @@ export type TerminalTab = {
   /** The chat worktree folder it was opened in, if any. */
   worktree: string | null;
 };
+
+/** Keep awake: "away" ends two hours after starting at most, "overnight" at a clock time. */
+export type KeepAwakeMode = "away" | "overnight";
+export type KeepAwakeState = { mode: KeepAwakeMode; ends_at: number };
+/** Starts keep awake, or changes the one running. Overnight takes its end (ms since 1970). */
+export const keepAwakeStart = (mode: KeepAwakeMode, endsAt: number | null = null) =>
+  invoke<KeepAwakeState>("keep_awake_start", { mode, endsAt });
+export const keepAwakeStop = () => invoke<void>("keep_awake_stop");
+export const keepAwakeState = () => invoke<KeepAwakeState | null>("keep_awake_state");
+export const onBattery = () => invoke<boolean>("on_battery");
 
 export const terminalTabs = (project: string) => invoke<TerminalTab[]>("terminal_tabs", { project });
 /** Opens a tab in the project's main folder, or in a chat's worktree folder (named `label`). */

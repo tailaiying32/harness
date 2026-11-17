@@ -5,7 +5,19 @@
   import BarIcon from "./BarIcon.svelte";
   import { CLAUDE, importSkill, listSkills, pickFile, pickFolder, removeSkill, type ModelInfo, type SkillInfo } from "./ipc";
   import type { AppState, Limit } from "./state/app.svelte";
-  import { appearances, applyFontSize, applySize, fontSizes, savePrefs, sizes, themes, type Appearance, type Size } from "./themes";
+  import {
+    appearances,
+    applyFontSize,
+    applySize,
+    fontSizes,
+    loadPrefs,
+    overnightTimes,
+    savePrefs,
+    sizes,
+    themes,
+    type Appearance,
+    type Size,
+  } from "./themes";
 
   let {
     app,
@@ -115,6 +127,13 @@
 
   /** "empty trash" was clicked once and is asking to be sure. */
   let emptying = $state(false);
+
+  // When overnight keep awake ends.
+  let overnightUntil = $state(loadPrefs().overnightUntil);
+  function pickOvernight(time: string) {
+    overnightUntil = time;
+    savePrefs({ overnightUntil: time });
+  }
 
   async function emptyTrash() {
     emptying = false;
@@ -277,6 +296,17 @@
           <span class="left">{limit.text}</span>
         </div>
       {/each}
+    </section>
+
+    <section>
+      <div class="label">Overnight keep awake until</div>
+      <div class="choices">
+        {#each overnightTimes as time (time)}
+          <button class:on={time === overnightUntil} onclick={() => pickOvernight(time)}>
+            <span class="mark">{time === overnightUntil ? "(•)" : "( )"}</span>{time.replace(/^0/, "")}
+          </button>
+        {/each}
+      </div>
     </section>
 
     <section>

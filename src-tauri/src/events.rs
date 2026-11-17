@@ -298,6 +298,13 @@ pub enum AgentEvent {
     /// arrive even while a browser page holds the keys. Sent with an empty
     /// session ID. Not saved.
     TabKey { action: String },
+    /// Keep awake started, changed or ended: its mode and latest end (ms
+    /// since 1970), both empty once it ended. Sent with an empty session ID.
+    /// Not saved.
+    KeepAwake {
+        mode: Option<crate::keep_awake::Mode>,
+        ends_at: Option<u64>,
+    },
 }
 
 /// One tab of a chat's browser. `url` is empty for a new tab with no page yet.
@@ -326,6 +333,7 @@ impl AgentEvent {
                 | AgentEvent::BrowserTabs { .. }
                 | AgentEvent::TerminalTabs { .. }
                 | AgentEvent::TabKey { .. }
+                | AgentEvent::KeepAwake { .. }
                 | AgentEvent::MessageWithdrawn { ok: false, .. }
         )
     }

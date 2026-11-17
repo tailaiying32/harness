@@ -582,6 +582,9 @@ function finish(id: string) {
 
 type Args = Record<string, any>;
 
+// Keep awake, as the core holds it.
+let keepAwake: { mode: "away" | "overnight"; ends_at: number } | null = null;
+
 /** Documents edited in a tab, kept for the page's life. */
 const docsByPath = new Map<string, string>();
 
@@ -604,6 +607,18 @@ const commands: Record<string, (args: Args) => unknown> = {
     }, 50);
   },
   check_setup: () => ({ binary: "claude", cursor: "agent", agents: ["claude-code", "cursor"], problem: null }),
+  keep_awake_state: () => keepAwake,
+  keep_awake_start: (args) => {
+    const ends_at = args.mode === "overnight" ? args.endsAt : Date.now() + 2 * 60 * 60 * 1000;
+    keepAwake = { mode: args.mode, ends_at };
+    emit("", { kind: "keep_awake", ...keepAwake });
+    return keepAwake;
+  },
+  keep_awake_stop: () => {
+    keepAwake = null;
+    emit("", { kind: "keep_awake", mode: null, ends_at: null });
+  },
+  on_battery: () => false,
   sidebar: () => projects,
   list_trash: () => trash,
   restore_chat: (args) => {

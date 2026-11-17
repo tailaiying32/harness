@@ -144,10 +144,10 @@
     align-items: center;
     border-left: 1px solid var(--line);
   }
-  /* The sidebar put away: room for its show/hide button (and a Mac's window
-     buttons) before the title. */
+  /* The sidebar put away: room for its show/hide button, keep awake's cup
+     (and a Mac's window buttons) before the title. */
   :global(.bare) .chat {
-    padding-left: calc(var(--toggle-x) + 1em + var(--pad-x) * 0.8);
+    padding-left: calc(var(--toggle-x) + 2em + 2ch + var(--pad-x) * 0.8);
   }
   /* Full screen panel: as in a narrow window, below. */
   :global(.wide) .bar:has(.over-panel) .chat {

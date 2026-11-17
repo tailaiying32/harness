@@ -25,10 +25,15 @@ base64 = "0.23"
 rusqlite = { version = "0.42.0", features = ["bundled"] }
 arboard = { version = "3.7.0", default-features = false }
 portable-pty = "0.9.0"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 zip = { version = "9.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Keeping the computer awake on Windows (keep_awake.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Power", "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse"] }
 
 # The browser's screenshots on Mac. Same versions wry already uses.
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -5,6 +5,7 @@ mod docs;
 mod events;
 mod github;
 mod images;
+mod keep_awake;
 mod locate;
 mod notes;
 mod sessions;
@@ -50,6 +51,39 @@ struct AppState {
     agents: Agents,
     /// Markdown files shown in the side panel, which the user may edit.
     docs: Arc<docs::Docs>,
+    /// Holds the computer awake while the user is away.
+    keep_awake: keep_awake::KeepAwake,
+}
+
+/// Starts keep awake, or changes the one running. Overnight takes its end
+/// time; away ends two hours from now.
+#[tauri::command]
+async fn keep_awake_start(
+    state: State<'_, AppState>,
+    mode: keep_awake::Mode,
+    ends_at: Option<u64>,
+) -> Result<keep_awake::KeepAwakeState, String> {
+    let keep_awake = state.keep_awake.clone();
+    // Overnight asks about the battery, which starts a process on Mac.
+    tauri::async_runtime::spawn_blocking(move || keep_awake.start(mode, ends_at))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn keep_awake_stop(state: State<'_, AppState>) {
+    state.keep_awake.stop();
+}
+
+#[tauri::command]
+fn keep_awake_state(state: State<'_, AppState>) -> Option<keep_awake::KeepAwakeState> {
+    state.keep_awake.state()
+}
+
+/// Whether the computer runs on battery, for the overnight choice.
+#[tauri::command]
+async fn on_battery() -> bool {
+    tauri::async_runtime::spawn_blocking(keep_awake::on_battery).await.unwrap_or(false)
 }
 
 /// The sidebar: every project with its chats.
@@ -697,6 +731,8 @@ fn close_session(state: State<'_, AppState>, session_id: String) {
 ///   HARNESS_GH                 a program to use in place of GitHub's `gh`
 ///   HARNESS_BROWSER_IDLE_SECONDS  time a browser sits off screen and unused before its page is put away
 ///   HARNESS_TERMINAL_IDLE_SECONDS  time a terminal tab sits unused before its shell is closed
+///   HARNESS_KEEP_AWAKE_{LIMIT,AWAY,QUIET,TICK}_SECONDS  keep awake's longest run, no-input time
+///                              that means the user left, no-work time that means done, and check interval
 #[derive(serde::Serialize)]
 struct AutoTest {
     folder: String,
@@ -835,6 +871,17 @@ pub fn run() {
                     }
                 })
             };
+            // Keep awake sends its own events straight to the window, and
+            // watches every chat event to know which chats are working.
+            let keep_awake = keep_awake::KeepAwake::new(out.clone());
+            let out: Out = {
+                let (keep_awake, out) = (keep_awake.clone(), out);
+                Arc::new(move |envelope: Envelope| {
+                    keep_awake.observe(&envelope);
+                    out(envelope)
+                })
+            };
+            tauri::async_runtime::spawn(keep_awake.clone().run());
             #[cfg(target_os = "macos")]
             {
                 app.set_menu(app_menu(app.handle())?)?;
@@ -863,6 +910,7 @@ pub fn run() {
                 let terminals = terminals.clone();
                 let skills = sessions.skills().clone();
                 let chats = chats::Chats::new(store.clone());
+                let keep_awake = keep_awake.clone();
                 sessions.set_app_tools(Arc::new(move |chat_id: &str, project: &str| {
                     let browser_tools = {
                         let browsers = browsers.clone();
@@ -909,7 +957,20 @@ pub fn run() {
                             }),
                         }
                     };
-                    let mut tools = vec![browser_tools, terminal_tools, chats_tools];
+                    // Every chat's agent can keep the computer awake.
+                    let keep_awake_tools = {
+                        let keep_awake = keep_awake.clone();
+                        AppTools {
+                            server: keep_awake::SERVER,
+                            instruction: keep_awake::INSTRUCTION.into(),
+                            list: keep_awake::tools(),
+                            call: Arc::new(move |tool, args| {
+                                let keep_awake = keep_awake.clone();
+                                Box::pin(async move { keep_awake.call(&tool, &args).await })
+                            }),
+                        }
+                    };
+                    let mut tools = vec![browser_tools, terminal_tools, chats_tools, keep_awake_tools];
                     // Read on every start, so a new chat sees the skills
                     // imported since; none means no skills tool at all.
                     let list = skills.list();
@@ -960,10 +1021,15 @@ pub fn run() {
                 channel,
                 agents,
                 docs: Arc::default(),
+                keep_awake,
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            keep_awake_start,
+            keep_awake_stop,
+            keep_awake_state,
+            on_battery,
             list_skills,
             import_skill,
             remove_skill,
@@ -1035,6 +1101,7 @@ pub fn run() {
             // Quitting: ask every chat's process to finish up, and wait briefly.
             if let RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<AppState>() {
+                    state.keep_awake.shutdown();
                     state.terminals.shutdown();
                     state.side.shutdown();
                     state.sessions.shutdown(QUIT_WAIT);
