@@ -49,6 +49,7 @@ import { modeFor } from "../models";
 import { FILE_LINK, fileWord, linkable, toLinks, type FileRef } from "../chat/files";
 import { chatsTool, docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
 import { ChatInfo } from "./chatInfo.svelte";
+import { terminals } from "./terminals.svelte";
 
 /** What the side panel shows. */
 export type PanelView = "docs" | "side" | "browser" | "terminal" | "info";
@@ -1267,6 +1268,18 @@ export class Chat {
       case "doc_saved":
         this.docSaved(event.from, event.to);
         break;
+
+      // The agent asked to show something in the panel, or opened a terminal
+      // tab (harness-tab); a side chat's opens in its chat's panel.
+      case "show_panel": {
+        const chat = this.owner ?? this;
+        if (event.tab) terminals.reveal(chat.projectPath.trim(), event.tab);
+        if (event.path) void chat.openFile(event.path);
+        else if (event.view === "notes") chat.openPanel(NOTES_TAB);
+        else if (event.view === "plan") chat.openPanel(chat.plan ? PLAN_TAB : undefined);
+        else if (event.view) chat.showView(event.view);
+        break;
+      }
 
       // Claude or the user opened, moved or closed a page. The panel isn't
       // switched for Claude; the chat's page line (see tool_result) is how to look.

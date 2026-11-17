@@ -8,8 +8,15 @@
 //! answered (MCP's "Streamable HTTP" with JSON replies); a GET for a stream is
 //! refused with 405, which MCP clients accept. Tested with Cursor CLI
 //! 2026.11.13.
+//!
+//! It also answers the `harness-tab` command an agent runs in its shell (see
+//! `terminal.rs`): a plain-text POST of a command line to `/tab/<token>`,
+//! answered in plain text. Each chat process gets its own token in
+//! `HARNESS_TAB_URL`.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value;
@@ -20,10 +27,17 @@ use super::AppTools;
 
 /// Largest request body read, in bytes. Tool calls are small.
 const MAX_BODY: usize = 4 * 1024 * 1024;
+/// Longest command line `harness-tab` may send, in bytes.
+const MAX_TAB_COMMAND: usize = 8 * 1024;
+
+/// Runs one `harness-tab` command line for a chat: the text for the agent,
+/// or why it couldn't.
+pub type TabRun = Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> + Send + Sync>;
 
 struct Server {
     port: u16,
     chats: Mutex<HashMap<String, Vec<AppTools>>>,
+    tabs: Mutex<HashMap<String, TabRun>>,
 }
 
 static SERVER: OnceLock<Result<Arc<Server>, String>> = OnceLock::new();
@@ -37,6 +51,7 @@ fn server() -> Result<Arc<Server>, String> {
             let server = Arc::new(Server {
                 port,
                 chats: Mutex::default(),
+                tabs: Mutex::default(),
             });
             let serving = server.clone();
             tauri::async_runtime::spawn(async move {
@@ -89,6 +104,36 @@ pub fn open(tools: Vec<AppTools>) -> Result<Endpoint, String> {
     Ok(Endpoint { token, urls })
 }
 
+/// One chat process's `harness-tab` route, open while this is kept.
+pub struct TabEndpoint {
+    token: String,
+    /// What `HARNESS_TAB_URL` is set to.
+    pub url: String,
+}
+
+impl Drop for TabEndpoint {
+    fn drop(&mut self) {
+        if let Some(Ok(server)) = SERVER.get() {
+            server.tabs.lock().unwrap().remove(&self.token);
+        }
+    }
+}
+
+/// Answers `harness-tab` with `run` until the returned endpoint is dropped.
+pub fn open_tab(run: TabRun) -> Result<TabEndpoint, String> {
+    let server = server()?;
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let url = format!("http://127.0.0.1:{}/tab/{token}", server.port);
+    server.tabs.lock().unwrap().insert(token.clone(), run);
+    Ok(TabEndpoint { token, url })
+}
+
+/// The `harness-tab` route a path names, if its token is live.
+fn tab_for(server: &Server, path: &str) -> Option<TabRun> {
+    let token = path.strip_prefix("/tab/")?;
+    server.tabs.lock().unwrap().get(token).cloned()
+}
+
 /// The tool group a path names, if its token is live.
 fn tools_for(server: &Server, path: &str) -> Option<AppTools> {
     let rest = path.strip_prefix("/mcp/")?;
@@ -137,6 +182,28 @@ async fn serve(server: Arc<Server>, stream: TcpStream) -> std::io::Result<()> {
         let mut body = vec![0; length];
         reader.read_exact(&mut body).await?;
 
+        if path.starts_with("/tab/") {
+            match (method.as_str(), tab_for(&server, &path)) {
+                (_, None) => reply(&mut write, 404, None).await?,
+                ("POST", Some(run)) => {
+                    let (status, text) = match String::from_utf8(body) {
+                        Ok(command) if command.trim().is_empty() => (400, "Give a command to run.".to_string()),
+                        Ok(command) if command.len() > MAX_TAB_COMMAND => (400, "That command is too long.".to_string()),
+                        Ok(command) => match run(command).await {
+                            Ok(text) => (200, text),
+                            Err(text) => (400, text),
+                        },
+                        Err(_) => (400, "The command isn't text.".to_string()),
+                    };
+                    reply_text(&mut write, status, &text).await?
+                }
+                _ => reply(&mut write, 405, None).await?,
+            }
+            if close {
+                return Ok(());
+            }
+            continue;
+        }
         let tools = tools_for(&server, &path);
         match (method.as_str(), tools) {
             (_, None) => reply(&mut write, 404, None).await?,
@@ -157,6 +224,16 @@ async fn serve(server: Arc<Server>, stream: TcpStream) -> std::io::Result<()> {
 }
 
 async fn reply(write: &mut tokio::net::tcp::OwnedWriteHalf, status: u16, body: Option<Value>) -> std::io::Result<()> {
+    let body = body.map(|b| b.to_string()).unwrap_or_default();
+    send(write, status, "application/json", &body).await
+}
+
+/// A plain-text reply, ending in a newline so a shell prints it on its own line.
+async fn reply_text(write: &mut tokio::net::tcp::OwnedWriteHalf, status: u16, text: &str) -> std::io::Result<()> {
+    send(write, status, "text/plain; charset=utf-8", &format!("{}\n", text.trim_end())).await
+}
+
+async fn send(write: &mut tokio::net::tcp::OwnedWriteHalf, status: u16, kind: &str, body: &str) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
         202 => "Accepted",
@@ -165,8 +242,7 @@ async fn reply(write: &mut tokio::net::tcp::OwnedWriteHalf, status: u16, body: O
         405 => "Method Not Allowed",
         _ => "Payload Too Large",
     };
-    let body = body.map(|b| b.to_string()).unwrap_or_default();
-    let content_type = if body.is_empty() { "" } else { "Content-Type: application/json\r\n" };
+    let content_type = if body.is_empty() { String::new() } else { format!("Content-Type: {kind}\r\n") };
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\n{content_type}Content-Length: {}\r\n\r\n",
         body.len()
@@ -191,10 +267,13 @@ mod tests {
     }
 
     async fn post(url: &str, body: Value) -> (u16, String) {
+        post_text(url, &body.to_string()).await
+    }
+
+    async fn post_text(url: &str, body: &str) -> (u16, String) {
         let rest = url.strip_prefix("http://").unwrap();
         let (host, path) = rest.split_once('/').unwrap();
         let mut stream = TcpStream::connect(host).await.unwrap();
-        let body = body.to_string();
         let request = format!(
             "POST /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
@@ -229,5 +308,20 @@ mod tests {
         drop(endpoint);
         let (status, _) = post(&url, call).await;
         assert_eq!(status, 404);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn harness_tab_posts_a_command_until_the_endpoint_closes() {
+        let run: TabRun = Arc::new(|command| {
+            Box::pin(async move { if command == "bad" { Err("no".to_string()) } else { Ok(format!("ran {command}")) } })
+        });
+        let endpoint = open_tab(run).unwrap();
+        let url = endpoint.url.clone();
+        assert_eq!(post_text(&url, "npm run dev").await, (200, "ran npm run dev\n".to_string()));
+        assert_eq!(post_text(&url, "bad").await, (400, "no\n".to_string()));
+        assert_eq!(post_text(&url, "  ").await.0, 400);
+        assert_eq!(post_text(&url, &"x".repeat(MAX_TAB_COMMAND + 1)).await.0, 400);
+        drop(endpoint);
+        assert_eq!(post_text(&url, "npm run dev").await.0, 404);
     }
 }

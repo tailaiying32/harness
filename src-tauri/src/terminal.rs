@@ -36,10 +36,23 @@ use crate::store::{SavedTerminal, Store, now_ms};
 /// Name the agent knows the terminal's tools by.
 pub const SERVER: &str = "harness_terminal";
 
-/// A line for the agent's instructions.
-pub const INSTRUCTION: &str = "The user has a terminal in this app's side panel for this project, \
-with one or more tabs. When they mention their terminal or what it shows, read it with the \
-harness_terminal tools (tabs, read). You can read it but not type into it.";
+/// The lines for the agent's instructions. `tab_command` is the full path of
+/// `harness-tab` (see `Home::write_tab_command`).
+pub fn instruction(tab_command: &Path) -> String {
+    format!(
+        "The user has a terminal in this app's side panel for this project, with one or more tabs. \
+When they mention their terminal or what it shows, read it with the harness_terminal tools (tabs, read). \
+To run a command in a new tab where the user can watch it and type into it (a dev server, a sign-in \
+prompt, or when they ask you to run something in the terminal), run `{} \"<command>\"` with your shell \
+tool. It opens the tab in this chat's folder, shows it, and returns at once with the tab's name; read the \
+tab for its output. You can't type into tabs the user opened.",
+        tab_command.display()
+    )
+}
+
+/// How long an agent's tab waits for its shell's first output before the
+/// command is typed in anyway.
+const PROMPT_WAIT: Duration = Duration::from_secs(3);
 
 /// Raw output kept per tab, for the agent and for saving.
 const TAIL_MAX: usize = 512 * 1024;
@@ -291,6 +304,31 @@ impl Terminals {
             .into_iter()
             .find(|t| t.id == id)
             .ok_or_else(|| "The tab closed at once".to_string())
+    }
+
+    /// An agent's `harness-tab`: a new tab in the chat's folder (`worktree`,
+    /// or the project's main folder), with `command` typed into it once the
+    /// shell has printed something (its prompt), up to `PROMPT_WAIT`. Typed
+    /// sooner, the line still runs but shows twice: echoed before the prompt,
+    /// then again at it. One line only, so nothing rides along unseen after it.
+    /// Blocks while it waits.
+    pub fn run_for_agent(&self, project: &str, worktree: Option<String>, command: &str) -> Result<TabInfo, String> {
+        let command = command.trim();
+        if command.is_empty() {
+            return Err("Give a command to run.".into());
+        }
+        if command.contains(['\n', '\r']) {
+            return Err("Give one command line; join steps with && or ;.".into());
+        }
+        let tab = self.open(project, worktree, None, DEFAULT_SIZE.cols, DEFAULT_SIZE.rows)?;
+        let deadline = Instant::now() + PROMPT_WAIT;
+        while Instant::now() < deadline && lock(&self.0.state).tabs.get(&tab.id).is_some_and(|t| t.tail.is_empty()) {
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        // A prompt is often drawn in pieces; let it finish.
+        std::thread::sleep(Duration::from_millis(150));
+        self.write(&tab.id, &format!("{command}\r"))?;
+        Ok(tab)
     }
 
     /// Starts a shell in a tab whose shell isn't running.
@@ -723,7 +761,7 @@ pub fn tools() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "tab": { "type": "string", "description": "The tab's name, from tabs" },
+                    "tab": { "type": "string", "description": "The tab's name from tabs, or the ID harness-tab gave" },
                     "lines": { "type": "number", "description": "How many of the last lines to read (default 200, at most 2000)" },
                 },
             },
@@ -1188,6 +1226,18 @@ mod tests {
         assert_eq!(t.running(&tab.id), None);
         t.close(&tab.id);
         assert!(t.tabs(&folder()).is_empty());
+    }
+
+    #[test]
+    fn an_agent_opens_a_tab_with_one_command_typed_in() {
+        let (t, _) = rig(IDLE);
+        // Typed before the shell's first prompt; the shell still runs it.
+        let tab = t.run_for_agent(&folder(), None, "echo from-the-ag''ent").unwrap();
+        assert!(wait_for(&t, &tab.id, "from-the-agent"));
+        assert!(t.run_for_agent(&folder(), None, "echo a\nrm -rf x").is_err());
+        assert!(t.run_for_agent(&folder(), None, "  ").is_err());
+        assert_eq!(t.tabs(&folder()).len(), 1);
+        t.close(&tab.id);
     }
 
     #[test]

@@ -38,6 +38,9 @@ pub struct TerminalHooks {
     pub gone: Arc<dyn Fn(&Path, &str) + Send + Sync>,
     /// A project's folder moved, from one path to another: its tabs follow.
     pub moved: Arc<dyn Fn(&str, &str) + Send + Sync>,
+    /// An agent's `harness-tab`: a new tab of the project (main folder, as
+    /// the window names it), in `worktree` if given, with the command typed in.
+    pub run: Arc<dyn Fn(&str, Option<String>, &str) -> Result<crate::terminal::TabInfo, String> + Send + Sync>,
 }
 
 /// Whether a project's folder is gone in the way a moved or renamed folder
@@ -150,6 +153,8 @@ struct Session {
     /// Tool calls that run `gh pr create`, until their results arrive: what
     /// they print names the chat's new pull request.
     pr_calls: HashSet<String>,
+    /// The live process's `harness-tab` route; gone with the process.
+    tab: Option<crate::agent::mcp_http::TabEndpoint>,
 }
 
 /// The agent asked for a worktree; the question waits for the user.
@@ -490,6 +495,8 @@ impl SessionManager {
             // brought back first if it was put away.
             let folder = self.work_folder(session_id, &project_path).await;
             self.note_repo(session_id, &folder).await;
+            let tab = self.tab_route(session_id, &project_path, &folder);
+            let env = tab.iter().map(|t| ("HARNESS_TAB_URL".to_string(), t.url.clone())).collect();
             // Not under the sessions lock: starting reports "starting" through
             // the sink, which takes that lock.
             let agent = adapter.spawn(
@@ -515,6 +522,7 @@ impl SessionManager {
                     project_docs: project_docs_for(&inner.notes, session_id),
                     memory: inner.notes.project_memory(session_id),
                     preferences: inner.home.preferences(),
+                    env,
                 },
                 self.sink(session_id, run),
             );
@@ -532,6 +540,7 @@ impl SessionManager {
                 // If it already died, its exit was reported; don't keep a dead handle.
                 if session.exited_run != run {
                     session.agent = Some(Arc::from(agent));
+                    session.tab = tab;
                 }
             }
         }
@@ -867,6 +876,38 @@ impl SessionManager {
         }
     }
 
+    /// The `harness-tab` route for a chat process about to start in
+    /// `folder`: a tab it opens sits there (its worktree, or the main folder)
+    /// and is shown in the chat's panel. None without a terminal, or if the
+    /// app's local server couldn't start; `harness-tab` then just fails.
+    fn tab_route(&self, session_id: &str, project: &Path, folder: &Path) -> Option<crate::agent::mcp_http::TabEndpoint> {
+        let run = self.0.terminal.get()?.run.clone();
+        let out = self.0.out.clone();
+        let chat = session_id.to_string();
+        let project = project.to_string_lossy().into_owned();
+        let worktree = (folder != Path::new(&project)).then(|| folder.to_string_lossy().into_owned());
+        let route: crate::agent::mcp_http::TabRun = Arc::new(move |command: String| {
+            let (run, out, chat, project, worktree) = (run.clone(), out.clone(), chat.clone(), project.clone(), worktree.clone());
+            Box::pin(async move {
+                let line = command.trim().to_string();
+                let tab = tokio::task::spawn_blocking(move || run(&project, worktree, &line))
+                    .await
+                    .map_err(|e| e.to_string())??;
+                out(Envelope {
+                    session_id: chat,
+                    event: AgentEvent::ShowPanel { path: None, view: Some("terminal".into()), tab: Some(tab.id.clone()) },
+                });
+                // By ID: the tab's name changes to what runs in it.
+                Ok(format!(
+                    "Opened a terminal tab running: {}\nRead its output with the harness_terminal read tool, tab \"{}\".",
+                    command.trim(),
+                    tab.id
+                ))
+            })
+        });
+        crate::agent::mcp_http::open_tab(route).ok()
+    }
+
     fn on_state(&self, session_id: &str, run: u64, state: &SessionState) {
         let mut sessions = self.0.sessions.lock().unwrap();
         let Some(session) = sessions.get_mut(session_id) else {
@@ -881,6 +922,7 @@ impl SessionManager {
         match state {
             SessionState::Exited => {
                 session.agent = None;
+                session.tab = None;
                 session.closing = false;
                 session.busy = false;
                 session.background = false;
@@ -2112,6 +2154,7 @@ are there now, so use the new paths.)\n\ncarry on",
                 in_use: Arc::new(move |_: &Path| *shell_in.lock().unwrap()),
                 gone: Arc::new(move |root: &Path, why: &str| told.lock().unwrap().push((root.to_path_buf(), why.to_string()))),
                 moved: Arc::new(|_: &str, _: &str| {}),
+                run: Arc::new(|_: &str, _: Option<String>, _: &str| Err("no terminal".into())),
             });
         }
         rig.manager.close("s1");
