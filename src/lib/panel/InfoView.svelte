@@ -261,7 +261,7 @@
   /* A folded batch's marks, side by side. */
   .mark.tight {
     width: auto;
-    margin-left: 0.5ch;
+    margin-left: 1.2ch;
   }
   .agent {
     display: flex;
