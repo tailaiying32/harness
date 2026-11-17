@@ -255,6 +255,17 @@ impl Tabs {
         true
     }
 
+    /// Moves a tab to `to` in the row (clamped to the end). False if there
+    /// was no such tab.
+    fn move_to(&mut self, id: &str, to: usize) -> bool {
+        let Some(at) = self.order.iter().position(|t| t == id) else {
+            return false;
+        };
+        let tab = self.order.remove(at);
+        self.order.insert(to.min(self.order.len()), tab);
+        true
+    }
+
     /// The tab a tool works in: the one named, else the one on show.
     fn resolve(&self, asked: Option<&str>) -> Result<String, String> {
         match asked {
@@ -678,6 +689,19 @@ impl Browsers {
             tabs.shown = Some(tab.to_string());
         }
         self.arrange(chat);
+        self.tabs_event(chat);
+        Ok(())
+    }
+
+    /// The user dragged a tab to another place in the row.
+    pub fn move_tab(&self, chat: &str, tab: &str, to: usize) -> Result<(), String> {
+        {
+            let mut tabs = self.0.tabs.lock().unwrap();
+            let tabs = tabs.get_mut(chat).ok_or("No browser tabs")?;
+            if !tabs.move_to(tab, to) {
+                return Err(format!("There is no tab {tab}"));
+            }
+        }
         self.tabs_event(chat);
         Ok(())
     }
@@ -1652,6 +1676,20 @@ mod tests {
         // Ids aren't reused after a close.
         tabs.remove("2");
         assert_eq!(tabs.add(), "3");
+    }
+
+    #[test]
+    fn a_dragged_tab_moves_and_keeps_its_id() {
+        let mut tabs = Tabs::default();
+        for _ in 0..3 {
+            tabs.add();
+        }
+        assert!(tabs.move_to("3", 0));
+        assert_eq!(tabs.order, ["3", "1", "2"]);
+        assert!(tabs.move_to("3", 9));
+        assert_eq!(tabs.order, ["1", "2", "3"]);
+        assert_eq!(tabs.shown(), Some("3"));
+        assert!(!tabs.move_to("7", 0));
     }
 
     #[test]

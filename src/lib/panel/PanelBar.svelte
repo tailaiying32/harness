@@ -9,8 +9,12 @@
   import { NOTES_TAB, PLAN_TAB, type Chat } from "../state/chat.svelte";
   import { terminals } from "../state/terminals.svelte";
   import { baseName } from "../tools";
+  import { TabDrag } from "./tabDrag.svelte";
 
   let { chat }: { chat: Chat } = $props();
+
+  /** Dragging a tab along its row (every row but chat info's). */
+  const drag = new TabDrag();
 
   // ---- Terminal (the project's tabs) ----
   const project = $derived(chat.projectPath.trim());
@@ -77,15 +81,20 @@
   });
 
   // ---- Side chats ----
-  /** Each side chat's tab name: its title, with " 2", " 3" where two share one. */
+  /**
+   * Each side chat's tab name: its title, with " 2", " 3" where two share one,
+   * counted in the order they were started, wherever they sit in the row.
+   */
   const sideTabs = $derived.by(() => {
     const seen = new Map<string, number>();
-    return chat.sides.map((side) => {
+    const names = new Map<string, string>();
+    for (const side of [...chat.sides].sort((a, b) => a.born - b.born)) {
       const base = side.title || "side chat";
       const n = (seen.get(base) ?? 0) + 1;
       seen.set(base, n);
-      return { id: side.sessionId, name: n > 1 ? `${base} ${n}` : base };
-    });
+      names.set(side.sessionId, n > 1 ? `${base} ${n}` : base);
+    }
+    return chat.sides.map((side) => ({ id: side.sessionId, name: names.get(side.sessionId)! }));
   });
 
   // ---- Chat info: the subagent picked last, and a menu of them all ----
@@ -157,9 +166,24 @@
 <div class="row" data-tauri-drag-region bind:this={row}>
   {#if chat.panelView === "terminal"}
     <div class="tabs">
-      {#each termTabs as tab (tab.id)}
-        <span class="tab" class:on={tab.id === termShown?.id}>
-          <button title={tab.running ?? tab.title} onclick={() => terminals.pick(project, tab.id)}>{tab.title}</button>
+      {#each drag.arrange(termTabs, (t) => t.id) as tab (tab.id)}
+        <span
+          class="tab"
+          class:on={tab.id === termShown?.id}
+          class:held={tab.id === drag.id}
+          data-tab={tab.id}
+        >
+          <button
+            title={tab.running ?? tab.title}
+            onclick={() => terminals.pick(project, tab.id)}
+            onpointerdown={(e) =>
+              drag.start(
+                e,
+                tab.id,
+                () => termTabs.map((t) => t.id),
+                (id, to) => terminals.move(project, id, to),
+              )}>{tab.title}</button
+          >
           <button class="shut" title="Close this tab" onclick={(e) => shut(e, tab.id)}>×</button>
         </span>
       {/each}
@@ -196,9 +220,24 @@
   {:else if chat.panelView === "browser"}
     <!-- Marked so the tab keys know the browser has the keys (see tabKeys.ts). -->
     <div class="tabs pages" data-tabs="browser">
-      {#each chat.browserTabs as tab (tab.id)}
-        <span class="tab" class:on={tab.id === page?.id}>
-          <button title={tab.url || "new tab"} onclick={() => chat.pickBrowserTab(tab.id)}>{pageLabel(tab)}</button>
+      {#each drag.arrange(chat.browserTabs, (t) => t.id) as tab (tab.id)}
+        <span
+          class="tab"
+          class:on={tab.id === page?.id}
+          class:held={tab.id === drag.id}
+          data-tab={tab.id}
+        >
+          <button
+            title={tab.url || "new tab"}
+            onclick={() => chat.pickBrowserTab(tab.id)}
+            onpointerdown={(e) =>
+              drag.start(
+                e,
+                tab.id,
+                () => chat.browserTabs.map((t) => t.id),
+                (id, to) => chat.moveBrowserTab(id, to),
+              )}>{pageLabel(tab)}</button
+          >
           <button class="shut" title="Close this tab" onclick={() => chat.closeBrowserTab(tab.id)}>×</button>
         </span>
       {/each}
@@ -248,9 +287,23 @@
     {@render corner()}
   {:else if chat.panelView === "side" && chat.side}
     <div class="tabs">
-      {#each sideTabs as { id, name } (id)}
-        <span class="tab" class:on={id === chat.side.sessionId}>
-          <button onclick={() => chat.pickSide(id)}>{name}</button>
+      {#each drag.arrange(sideTabs, (t) => t.id) as { id, name } (id)}
+        <span
+          class="tab"
+          class:on={id === chat.side.sessionId}
+          class:held={id === drag.id}
+          data-tab={id}
+        >
+          <button
+            onclick={() => chat.pickSide(id)}
+            onpointerdown={(e) =>
+              drag.start(
+                e,
+                id,
+                () => chat.sides.map((s) => s.sessionId),
+                (id, to) => chat.moveSide(id, to),
+              )}>{name}</button
+          >
           <button class="shut" title="End this side chat; it is forgotten" onclick={() => chat.endSide(id)}>×</button>
         </span>
       {/each}
@@ -274,9 +327,25 @@
           {/if}
         </span>
       {/if}
-      {#each chat.openDocs as doc (doc.path)}
-        <span class="tab" class:on={active === doc.path}>
-          <button title={doc.path} onclick={() => chat.openPanel(doc.path)}>{label(doc.path)}</button>
+      <!-- Documents can be dragged along the row; notes and plan stay first. -->
+      {#each drag.arrange(chat.openDocs, (d) => d.path) as doc (doc.path)}
+        <span
+          class="tab"
+          class:on={active === doc.path}
+          class:held={doc.path === drag.id}
+          data-tab={doc.path}
+        >
+          <button
+            title={doc.path}
+            onclick={() => chat.openPanel(doc.path)}
+            onpointerdown={(e) =>
+              drag.start(
+                e,
+                doc.path,
+                () => chat.openDocs.map((d) => d.path),
+                (path, to) => chat.moveDoc(path, to),
+              )}>{label(doc.path)}</button
+          >
           <button class="shut" title="Close this tab" onclick={() => chat.closeTab(doc.path)}>×</button>
         </span>
       {/each}
@@ -317,7 +386,8 @@
     display: flex;
     gap: 1.5ch;
   }
-  .tab.on button:first-child {
+  .tab.on button:first-child,
+  .tab.held button:first-child {
     color: var(--bright);
   }
   /* A tab's close mark shows on the tab in front, or under the pointer. */
