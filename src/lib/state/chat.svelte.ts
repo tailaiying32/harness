@@ -17,6 +17,7 @@ import {
   sendMessage,
   sideEnd,
   sideInterrupt,
+  sideWithdrawMessage,
   sideSend,
   signIn,
   fileKind,
@@ -37,6 +38,7 @@ import {
   type WorktreeStatus,
   writeDoc,
   writeNotes,
+  withdrawMessage,
   CLAUDE,
   CURSOR,
   type AgentId,
@@ -66,6 +68,13 @@ export type UserItem = {
   messageId?: string;
   /** Sent while Claude was working, and not taken in yet. */
   queued?: boolean;
+  /** Asked to be taken back for editing; the answer hasn't come yet. */
+  withdrawing?: boolean;
+  /**
+   * Taken back and open for editing in place. Files show as their short
+   * words, as in the message box, and become links again when it is sent.
+   */
+  editing?: { text: string; files: FileRef[] };
   /** Images sent with it; `[image n]` in the text points at them. */
   images?: ImageRef[];
 };
@@ -1138,6 +1147,29 @@ export class Chat {
         }
         break;
 
+      // A waiting message the user asked to edit. Taken back, it opens for
+      // editing; saved history just drops it (the edit is sent as a new one).
+      case "message_withdrawn": {
+        const at = this.items.findIndex((i) => i.type === "user" && i.messageId === event.id);
+        if (at < 0) break;
+        const item = this.items[at] as UserItem;
+        item.withdrawing = false;
+        if (!event.ok) break;
+        if (this.replaying) {
+          this.items.splice(at, 1);
+          break;
+        }
+        const files: FileRef[] = [];
+        const text = item.text.replace(FILE_LINK, (_, label: string, path: string) => {
+          const word = `[${label}]`;
+          if (!files.some((f) => f.path === path)) files.push({ word, path });
+          return word;
+        });
+        item.queued = false;
+        item.editing = { text, files };
+        break;
+      }
+
       // Claude took the message in. One sent mid-turn was waiting at the end
       // of the chat; it now belongs after whatever Claude did before reading it.
       case "message_seen": {
@@ -1148,6 +1180,35 @@ export class Chat {
         break;
       }
     }
+  }
+
+  /**
+   * Asks to take back a message the agent hasn't read yet, so it can be
+   * edited in place. If the agent read it first, nothing changes.
+   */
+  async editQueued(item: UserItem): Promise<void> {
+    if (!item.queued || !item.messageId || item.withdrawing || item.editing) return;
+    item.withdrawing = true;
+    try {
+      if (this.owner) await sideWithdrawMessage(this.sessionId, item.messageId);
+      else await withdrawMessage(this.sessionId, item.messageId);
+    } catch {
+      item.withdrawing = false;
+    }
+  }
+
+  /**
+   * Ends an in-place edit by sending the message again, at the end of the
+   * queue. `save` false sends the original back unchanged; an emptied
+   * message is dropped.
+   */
+  finishEdit(item: UserItem, save: boolean): void {
+    const editing = item.editing;
+    if (!editing) return;
+    const at = this.items.findIndex((i) => i.id === item.id);
+    if (at >= 0) this.items.splice(at, 1);
+    const text = save ? toLinks(editing.text, editing.files) : item.text;
+    void this.send(text, item.images ?? []);
   }
 
   /** Sends a message, with the draft's images whose `[image n]` word is in it. */

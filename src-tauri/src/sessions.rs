@@ -758,6 +758,12 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Take back a message the agent hasn't read yet, to edit it. The answer
+    /// comes as `MessageWithdrawn`, which is saved only when it worked.
+    pub fn withdraw_message(&self, session_id: &str, message_id: &str) -> Result<(), String> {
+        self.agent(session_id)?.withdraw_message(message_id)
+    }
+
     pub fn interrupt(&self, session_id: &str) -> Result<(), String> {
         self.agent(session_id)?.interrupt()?;
         self.record(session_id, AgentEvent::Interrupted);
@@ -956,6 +962,10 @@ mod tests {
         }
         fn open_requests(&self) -> Vec<String> {
             self.open.lock().unwrap().clone()
+        }
+        fn withdraw_message(&self, id: &str) -> Result<(), String> {
+            self.told.lock().unwrap().push(format!("withdraw {id}"));
+            Ok(())
         }
         fn interrupt(&self) -> Result<(), String> {
             self.told.lock().unwrap().push("stop".into());

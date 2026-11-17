@@ -3,7 +3,8 @@
   // bottom like a terminal unless the user scrolls up.
   import { onMount, tick, untrack } from "svelte";
   import { contentClick } from "../clicks";
-  import { PLAN_TAB, planOutcome, withWords, type Chat, type Item, type ToolItem } from "../state/chat.svelte";
+  import { PLAN_TAB, planOutcome, withWords, type Chat, type Item, type ToolItem, type UserItem } from "../state/chat.svelte";
+  import { indent, newLine, outdent, type Edit } from "./editing";
   import ApprovalCard from "./ApprovalCard.svelte";
   import FileWord from "./FileWord.svelte";
   import ImageWord from "./ImageWord.svelte";
@@ -38,6 +39,52 @@
   });
 
   const lastGroup = $derived(groups[groups.length - 1]);
+
+  // A waiting message opened for editing in place (double-click). Its keys
+  // work as in the message box: Enter sends, Shift+Enter adds a line (the
+  // next list item in a list), Tab indents. Escape puts the original back.
+  function editBox(box: HTMLTextAreaElement) {
+    window.getSelection()?.removeAllRanges();
+    fit(box);
+    box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
+  }
+
+  function fit(box: HTMLTextAreaElement) {
+    box.style.height = "auto";
+    box.style.height = `${box.scrollHeight}px`;
+  }
+
+  async function applyEdit(box: HTMLTextAreaElement, item: UserItem, edit: Edit) {
+    if (!item.editing) return;
+    const text = item.editing.text;
+    item.editing.text = text.slice(0, edit.from) + edit.insert + text.slice(edit.to);
+    await tick();
+    box.setSelectionRange(edit.selStart, edit.selEnd);
+    fit(box);
+  }
+
+  function editKey(e: KeyboardEvent, item: UserItem) {
+    if (e.isComposing || !item.editing) return;
+    const box = e.currentTarget as HTMLTextAreaElement;
+    const { selectionStart: start, selectionEnd: end } = box;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      chat.finishEdit(item, false);
+    } else if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      chat.finishEdit(item, true);
+    } else if (e.key === "Enter") {
+      const edit = newLine(item.editing.text, start, end);
+      if (!edit) return;
+      e.preventDefault();
+      void applyEdit(box, item, edit);
+    } else if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      const edit = e.shiftKey ? outdent(item.editing.text, start, end) : indent(item.editing.text, start, end);
+      if (edit) void applyEdit(box, item, edit);
+    }
+  }
 
   /** Only the latest page line offers to open the browser, so older lines stay quiet. */
   const latestPage = $derived.by(() => {
@@ -172,9 +219,23 @@
             onagent={(id) => chat.openInfo(id)}
           />
         </div>
-      {:else if group.item.type === "user"}
+      {:else if group.item.type === "user" && group.item.editing}
+        {@const item = group.item}
         <div class="row block mine">
-          <div class="body user">{#each withWords(group.item.text, group.item.images) as piece, i (i)}{#if piece.image}<ImageWord image={piece.image} onopen={(image) => chat.openImage(image)} />{:else if piece.file}<FileWord word={piece.text} path={piece.file} onopen={(path) => chat.openDropped(path)} />{:else if piece.url}<a class="link" href={piece.url}>{piece.text}</a>{:else}{piece.text}{/if}{/each}</div>
+          <textarea
+            class="body user edit"
+            rows="1"
+            bind:value={group.item.editing.text}
+            use:editBox
+            oninput={(e) => fit(e.currentTarget)}
+            onkeydown={(e) => editKey(e, item)}
+          ></textarea>
+        </div>
+      {:else if group.item.type === "user"}
+        {@const item = group.item}
+        <div class="row block mine">
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="body user" ondblclick={() => chat.editQueued(item)}>{#each withWords(group.item.text, group.item.images) as piece, i (i)}{#if piece.image}<ImageWord image={piece.image} onopen={(image) => chat.openImage(image)} />{:else if piece.file}<FileWord word={piece.text} path={piece.file} onopen={(path) => chat.openDropped(path)} />{:else if piece.url}<a class="link" href={piece.url}>{piece.text}</a>{:else}{piece.text}{/if}{/each}</div>
           <!-- Claude reads a message sent mid-turn after its current step,
                unless the user would rather cut that step short. -->
           {#if group.item.queued}
@@ -331,6 +392,19 @@
     color: var(--accent);
     text-decoration: underline;
     text-underline-offset: 2px;
+  }
+  /* A waiting message being edited: the same block, now a text box as wide
+     as a message may grow. */
+  .edit {
+    width: 85%;
+    box-sizing: border-box;
+    resize: none;
+    border: 0;
+    outline: 0;
+    font: inherit;
+    line-height: inherit;
+    max-height: 40vh;
+    caret-color: var(--accent);
   }
   /* Under a message Claude hasn't taken in yet. */
   .now {

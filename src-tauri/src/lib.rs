@@ -201,6 +201,11 @@ async fn side_send(
 }
 
 #[tauri::command]
+fn side_withdraw_message(state: State<'_, AppState>, side_id: String, message_id: String) -> Result<(), String> {
+    state.side.withdraw_message(&side_id, &message_id)
+}
+
+#[tauri::command]
 fn side_interrupt(state: State<'_, AppState>, side_id: String) -> Result<(), String> {
     state.side.interrupt(&side_id)
 }
@@ -274,6 +279,11 @@ async fn remove_skill(state: State<'_, AppState>, name: String) -> Result<(), St
     tauri::async_runtime::spawn_blocking(move || skills.remove(&name))
         .await
         .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn withdraw_message(state: State<'_, AppState>, session_id: String, message_id: String) -> Result<(), String> {
+    state.sessions.withdraw_message(&session_id, &message_id)
 }
 
 #[tauri::command]
@@ -914,6 +924,7 @@ pub fn run() {
             rename_session,
             send_message,
             answer_approval,
+            withdraw_message,
             interrupt,
             set_mode,
             set_model,
@@ -921,6 +932,7 @@ pub fn run() {
             list_models,
             sign_in,
             side_send,
+            side_withdraw_message,
             side_interrupt,
             side_end,
             side_end_all,
