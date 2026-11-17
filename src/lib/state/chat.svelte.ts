@@ -13,6 +13,7 @@ import {
   interrupt,
   readDoc,
   saveDocToProject,
+  saveNotesToProject,
   readNotes,
   sendMessage,
   sideEnd,
@@ -687,6 +688,25 @@ export class Chat {
     void this.refreshDoc(saved);
   }
 
+  /**
+   * Moves the notes into the project's docs/ folder, named after the chat.
+   * The saved file opens as a doc tab, the notes start empty, and the agent
+   * is told with the next message.
+   */
+  async saveNotesToProject(): Promise<void> {
+    if (this.owner) return this.owner.saveNotesToProject();
+    let saved: string;
+    try {
+      saved = await saveNotesToProject(this.sessionId, this.root);
+    } catch (e) {
+      this.showError(`Couldn't save the notes to the project: ${e}`);
+      return;
+    }
+    this.notes = "";
+    this.appNotes.push(`The user saved their notes to the project; they are now ${saved}, and the notes file is empty again.`);
+    await this.openFile(saved);
+  }
+
   /** Docs saved to the project: where each went, by its old path. Rebuilt on reopen from the history. */
   private savedTo = new Map<string, string>();
 
@@ -703,8 +723,8 @@ export class Chat {
   }
 
   /**
-   * A doc moved from the chat's folder to the project: its tab and links to
-   * it follow. Done when saving and again by the saved event (live, or
+   * A doc (or the notes) moved from the chat's folder to the project: its
+   * tab and links to it follow. Done when saving and again by the saved event (live, or
    * replayed on reopen); the second time changes nothing.
    */
   private docSaved(from: string, to: string): void {
@@ -714,6 +734,9 @@ export class Chat {
       // A tab at the new path already (opened by a link) wins; the old one goes.
       if (this.docs.some((d) => d.path === to)) this.docs = this.docs.filter((d) => d !== doc);
       else doc.path = to;
+    } else if (!this.docs.some((d) => d.path === to)) {
+      // Saved notes had no doc tab: they get one, read from disk.
+      this.docs.push({ path: to, text: "" });
     }
     if (this.panelTab === from) this.panelTab = to;
   }
@@ -800,14 +823,15 @@ export class Chat {
    */
   async openFile(path: string): Promise<void> {
     if (this.owner) return this.owner.openFile(path);
+    // The notes stay the notes tab, even after they were once saved to the project.
+    if (this.isNotes(path)) {
+      this.openPanel(NOTES_TAB);
+      return;
+    }
     // A link to a doc since saved to the project opens it there.
     path = this.currentPath(path);
     if (path === this.planPath && this.plan) {
       this.openPanel(PLAN_TAB);
-      return;
-    }
-    if (this.isNotes(path)) {
-      this.openPanel(NOTES_TAB);
       return;
     }
     let text: string;

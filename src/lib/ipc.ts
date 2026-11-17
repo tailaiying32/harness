@@ -380,6 +380,9 @@ export const writeDoc = (path: string, text: string) => invoke<void>("write_doc"
 /** Moves a doc from the chat's folder into `<project>/docs/`; the new path. */
 export const saveDocToProject = (chatId: string, path: string, project: string) =>
   invoke<string>("save_doc_to_project", { chatId, path, project });
+/** Moves the chat's notes into `<project>/docs/`, named after the chat; the new path. */
+export const saveNotesToProject = (chatId: string, project: string) =>
+  invoke<string>("save_notes_to_project", { chatId, project });
 
 // ---- The side panel's browser (tabs per chat, localhost pages only) ----
 

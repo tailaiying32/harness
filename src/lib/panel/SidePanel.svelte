@@ -84,11 +84,12 @@
 
   onDestroy(() => void flush());
 
-  /** Typing is saved first, so the doc moves as it stands. */
+  /** Typing is saved first, so the doc (or the notes) moves as it stands. */
   async function saveToProject() {
     const tab = active;
     await flush();
-    await chat.saveToProject(tab);
+    if (tab === NOTES_TAB) await chat.saveNotesToProject();
+    else await chat.saveToProject(tab);
   }
 
   /** The waiting plan as it stands: the user's edit, or Claude's text. */
@@ -298,8 +299,8 @@
     </div>
   {/key}
 
-  {#if chat.isChatDoc(active)}
-    <!-- A doc in the chat's folder goes with the chat unless saved to the project. -->
+  {#if chat.isChatDoc(active) || (active === NOTES_TAB && chat.notes?.trim())}
+    <!-- A doc in the chat's folder, and the notes, go with the chat unless saved to the project. -->
     <div class="foot">
       <div class="actions">
         <button class="primary" disabled={chat.busy} onclick={saveToProject}>Save to project</button>

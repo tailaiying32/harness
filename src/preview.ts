@@ -844,6 +844,15 @@ const commands: Record<string, (args: Args) => unknown> = {
     emit(String(args.chatId), { kind: "doc_saved", from, to });
     return to;
   },
+  save_notes_to_project: (args: Args) => {
+    const chatId = String(args.chatId);
+    const from = `${home}/Library/Application Support/com.harness.app/notes/${chatId}/notes.md`;
+    const to = `${String(args.project)}/docs/notes.md`;
+    docsByPath.set(to, notesByChat.get(chatId) ?? "");
+    notesByChat.delete(chatId);
+    emit(chatId, { kind: "doc_saved", from, to });
+    return to;
+  },
 };
 
 // ---- The terminal: a pretend shell that echoes and answers a few commands ----

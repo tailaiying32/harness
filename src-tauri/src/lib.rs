@@ -519,6 +519,27 @@ async fn save_doc_to_project(state: State<'_, AppState>, chat_id: String, path: 
     .map_err(|e| e.to_string())?
 }
 
+/// Moves the chat's notes into the project's `docs/` folder, named after the
+/// chat, so its notes start empty again. Returns the new path, a doc like any
+/// other from then on.
+#[tauri::command]
+async fn save_notes_to_project(state: State<'_, AppState>, chat_id: String, project: String) -> Result<String, String> {
+    let sessions = state.sessions.clone();
+    let docs = state.docs.clone();
+    let store = state.store.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let notes = sessions.notes().path(&chat_id)?;
+        let title = store.session(&chat_id)?.map(|row| row.title).unwrap_or_default();
+        let saved = docs::save_notes_to_project(&notes, &title, Path::new(&project))?;
+        let saved = saved.display().to_string();
+        sessions.doc_saved(&chat_id, &notes.display().to_string(), &saved);
+        docs.read(Path::new(&saved))?;
+        Ok(saved)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The user typed an address in a chat's browser: into `tab`, else the tab
 /// on show, else a new tab.
 #[tauri::command]
@@ -1041,6 +1062,7 @@ pub fn run() {
             read_doc,
             write_doc,
             save_doc_to_project,
+            save_notes_to_project,
             read_notes,
             write_notes,
             browser_navigate,

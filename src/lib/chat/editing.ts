@@ -83,6 +83,56 @@ export function newLine(text: string, start: number, end: number): Edit | null {
   return { from: start, to: end, insert, selStart: start + insert.length, selEnd: start + insert.length };
 }
 
+/**
+ * Cmd+L: makes every line the selection touches a to-do ("- [ ] "), keeping
+ * its indent; a list item keeps its marker and gains the box. If they are all
+ * to-dos already, they go back to plain lines. Blank lines are left alone,
+ * unless the cursor is on one: it becomes an empty to-do.
+ */
+export function todo(text: string, start: number, end: number): Edit {
+  const { from, to } = block(text, start, end);
+  const lines = text.slice(from, to).split("\n");
+  const single = lines.length === 1;
+  const isTodo = (line: string) => !!ITEM.exec(line)?.[6];
+  const undo = lines.every((line) => isTodo(line) || (!single && line.trim() === ""));
+
+  // Each line's old and new start (indent, marker, box), to move the cursor with its text.
+  const heads: { old: number; now: number }[] = [];
+  const out = lines.map((line) => {
+    const item = ITEM.exec(line);
+    const lead = /^\s*/.exec(line)![0];
+    let head: string;
+    let cut: number;
+    if (undo) {
+      if (!item) return heads.push({ old: 0, now: 0 }), line;
+      [head, cut] = [item[1], item[0].length];
+    } else if (line.trim() === "" && !single) {
+      return heads.push({ old: 0, now: 0 }), line;
+    } else if (item?.[6]) {
+      [head, cut] = [item[0], item[0].length];
+    } else if (item) {
+      [head, cut] = [`${item[0]}[ ] `, item[0].length];
+    } else {
+      [head, cut] = [`${lead}- [ ] `, lead.length];
+    }
+    heads.push({ old: cut, now: head.length });
+    return head + line.slice(cut);
+  });
+
+  const moved = (p: number) => {
+    let oldAt = from;
+    let newAt = from;
+    for (let i = 0; i < lines.length; i++) {
+      const { old, now } = heads[i];
+      if (p <= oldAt + lines[i].length) return newAt + Math.max(now, p - oldAt - old + now);
+      oldAt += lines[i].length + 1;
+      newAt += out[i].length + 1;
+    }
+    return p - oldAt + newAt;
+  };
+  return { from, to, insert: out.join("\n"), selStart: moved(start), selEnd: moved(end) };
+}
+
 const width = (lead: string) => lead.replace(/\t/g, INDENT).length;
 
 /**
