@@ -405,6 +405,17 @@ pub struct ModelInfo {
     pub default_effort: Option<String>,
 }
 
+/// One slash command the agent takes: `/name`, typed at the start of a message.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CommandInfo {
+    pub name: String,
+    pub description: String,
+    /// What it takes after the name, e.g. "[issue description]", if the agent says.
+    pub hint: Option<String>,
+    /// Other names that run it.
+    pub aliases: Vec<String>,
+}
+
 /// What the window receives: an event plus the chat it belongs to.
 #[derive(Debug, Clone, Serialize)]
 pub struct Envelope {

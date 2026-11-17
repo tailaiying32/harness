@@ -312,6 +312,19 @@ export async function pickFolder(startAt?: string): Promise<string | null> {
   return typeof picked === "string" ? picked : null;
 }
 
+/** One slash command an agent takes. Mirrors `CommandInfo` in src-tauri/src/events.rs. */
+export type CommandInfo = {
+  name: string;
+  description: string;
+  /** What it takes after the name, if the agent says. */
+  hint: string | null;
+  aliases: string[];
+};
+
+/** The slash commands an agent takes in a folder, as it reports them. A second or a few. */
+export const listCommands = (agent: AgentId, folder: string) =>
+  invoke<CommandInfo[]>("list_commands", { agent, folder });
+
 /** Native file picker for the given extensions. Null if the user cancels. */
 export async function pickFile(name: string, extensions: string[]): Promise<string | null> {
   const picked = await open({ directory: false, multiple: false, filters: [{ name, extensions }] });
