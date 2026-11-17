@@ -3,6 +3,7 @@
   // plan is answered in the side panel.) Mouse only: no key approves or
   // denies, so a stray keypress can never approve a command.
   import type { ApprovalItem, Chat } from "../state/chat.svelte";
+  import { agentLabel } from "../ipc";
   import { diffLines, title } from "../tools";
   import Clipped from "./Clipped.svelte";
 
@@ -79,13 +80,13 @@
     {:else if item.choice === "here"}
       <div class="done">working here in {repoName}</div>
     {:else if item.answered === "deny"}
-      <!-- The user wrote instead; Claude asks again if it still needs one. -->
+      <!-- The user wrote instead; the agent asks again if it still needs one. -->
       <div class="done">skipped · worktree question</div>
     {/if}
   {:else}
-    <!-- Claude asked to do this work in a worktree; it waits for the answer. -->
+    <!-- The agent asked to do this work in a worktree; its answer comes as its next message. -->
     <div class="approval">
-      <div class="head"><span class="accent">Worktree</span> · Claude wants a separate worktree for this work</div>
+      <div class="head"><span class="accent">Worktree</span> · {agentLabel(chat.agent)} wants a separate worktree for this work</div>
       {#if item.workName}<div class="bright command">{item.workName}</div>{/if}
       <div class="dim">
         A new branch in its own folder, so other chats in {repoName} aren't touched. Or keep working here.

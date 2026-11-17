@@ -686,8 +686,8 @@ async fn b11_finished_chat_starts_new_work_with_an_empty_list() {
 
     // New work, in a new worktree.
     rig.send_at(&repo, "auto", "one more thing").await;
-    rig.agent_says(worktree_call("r2", "one more thing"));
-    rig.manager.choose_worktree("s1", "r2", "worktree").await.unwrap();
+    rig.ask("one more thing").await;
+    rig.manager.choose_worktree("s1", &rig.card(), "worktree").await.unwrap();
     let next = rig.worktree().expect("a new worktree");
     assert!(next.path.exists());
     assert_ne!(next.branch, wt.branch);

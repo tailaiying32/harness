@@ -92,6 +92,9 @@ function terminalWording(tool: string, input: unknown): [string, string, string]
 /** The project's earlier chats, which an agent can search and read (see chats.rs). */
 const CHATS = "mcp__harness_chats__";
 
+/** The app's worktree tool, how every agent asks for a worktree (see sessions/worktrees.rs). */
+const WORKTREE = "mcp__harness_worktree__ask";
+
 /** Which of the earlier-chats tools a call is ("search", "recent", "read"), or "" for another tool. */
 export const chatsTool = (tool: ToolCall) => (tool.name.startsWith(CHATS) ? tool.name.slice(CHATS.length) : "");
 
@@ -185,6 +188,8 @@ function wording(tool: ToolCall): [string, string, string] {
       return [`asked a question`, `Asking a question`, `ask a question`];
     case "ToolSearch":
       return [`looked up a tool`, `Looking up a tool`, `look up a tool`];
+    // The app's worktree tool, and Claude Code's own one in older chats.
+    case WORKTREE:
     case "EnterWorktree":
       return [`asked for a worktree`, `Asking for a worktree`, `ask for a worktree`];
     default:
@@ -202,7 +207,7 @@ export const showsOutput = (tool: ToolCall) =>
 
 /** Plans, questions and worktree requests have their own card, which says how they went. */
 const hasOwnCard = (tool: ToolCall) =>
-  tool.name === "ExitPlanMode" || tool.name === "AskUserQuestion" || tool.name === "EnterWorktree";
+  ["ExitPlanMode", "AskUserQuestion", WORKTREE, "EnterWorktree"].includes(tool.name);
 
 /** True when the call never ran because the user said no. */
 export const skipped = (tool: ToolCall) => Boolean(tool.declined) && !hasOwnCard(tool);

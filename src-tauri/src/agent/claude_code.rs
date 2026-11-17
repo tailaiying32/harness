@@ -67,15 +67,10 @@ plan mode, call EnterPlanMode. Write the plan to the plan file, then present it 
 This app shows the plan in a side panel with approve buttons. This applies in every permission \
 mode. Short answers, status summaries and discussion are not plans and stay in the chat.";
 
-/// Also added on every launch: when to ask for a worktree. The app makes the
-/// worktree itself once the user approves (see `sessions/worktrees.rs`).
-const WORKTREE_INSTRUCTION: &str = "This app keeps separate pieces of work in separate git \
-worktrees, so chats working in the same repo don't get in each other's way. In a git repo, before \
-you start changing files for real work (a feature, a fix that touches more than a line or two, a \
-refactor, anything you'd put on its own branch), call EnterWorktree with a short name for the work, \
-and do this before your first change, however you'd make it (edit tools or shell commands). The \
-user approves or declines. Don't call it for a tiny one-off change, for questions, reviews or \
-planning, or once this chat already works in a worktree.";
+/// Claude Code's own worktree tools, turned off: the app's worktree tool
+/// (`sessions/worktrees.rs`) is how every agent asks for one. A deny rule
+/// takes them off the model's tool list (tested on CLI 2.1.325).
+const WORKTREE_DENY: [&str; 2] = ["EnterWorktree", "ExitWorktree"];
 
 /// The claude.ai connector for Claude Docs, by its server name. Its own
 /// instructions tell Claude to make docs there, "not a local file, even when
@@ -91,10 +86,9 @@ const CLAUDE_DOCS_DENY: [&str; 2] = ["mcp__claude_ai_Claude_Docs", "Skill(anthro
 /// is still listed, and this says it won't work here.
 const CLAUDE_DOCS_INSTRUCTION: &str = "Claude Docs isn't available in this app.";
 
-/// Settings for every main chat launch. Makes Claude Code's own worktree tool
-/// always ask, in every mode, so the request reaches the app instead of Claude
-/// Code making a worktree inside the repo by itself (tested on CLI 2.1.322:
-/// without this it doesn't ask). The app's own tools, if any, never ask, nor
+/// Settings for every main chat launch. Turns off Claude Code's own worktree
+/// tools, which would make a worktree inside the repo by themselves. The
+/// app's own tools, if any, never ask, nor
 /// do writes to the chat's folder (its notes and docs): `Edit(//<absolute
 /// path>/**)` covers Write and Edit (tested on CLI 2.1.322 in default mode,
 /// path with a space, for the notes file alone). Claude Docs is turned off:
@@ -103,7 +97,8 @@ const CLAUDE_DOCS_INSTRUCTION: &str = "Claude Docs isn't available in this app."
 /// the instructions (tested on CLI 2.1.325; the connectors load after the
 /// first message).
 fn launch_settings(tools: &[AppTools], notes: Option<&Path>) -> String {
-    let mut permissions = json!({ "ask": ["EnterWorktree"], "deny": CLAUDE_DOCS_DENY });
+    let deny: Vec<&str> = CLAUDE_DOCS_DENY.iter().chain(WORKTREE_DENY.iter()).copied().collect();
+    let mut permissions = json!({ "deny": deny });
     let mut allow: Vec<String> = tools.iter().map(|t| format!("mcp__{}", t.server)).collect();
     if let Some(folder) = notes.and_then(Path::parent) {
         allow.push(format!("Edit(/{}/**)", folder.display()));
@@ -178,7 +173,7 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
     .map(String::from)
     .to_vec();
     args.extend(["--settings".to_string(), launch_settings(&opts.tools, opts.notes.as_deref())]);
-    let mut instructions = format!("{PLAN_INSTRUCTION}\n\n{WORKTREE_INSTRUCTION}");
+    let mut instructions = PLAN_INSTRUCTION.to_string();
     if !opts.tools.is_empty() {
         args.extend(["--mcp-config".to_string(), mcp_config(&opts.tools)]);
         for tools in &opts.tools {
@@ -1604,11 +1599,13 @@ mod tests {
         });
         assert!(args.contains(&"--replay-user-messages".to_string()));
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
-        assert!(args[at + 1].starts_with(PLAN_INSTRUCTION) && args[at + 1].ends_with(WORKTREE_INSTRUCTION));
-        // The worktree tool always asks, so the request reaches the app.
+        assert_eq!(args[at + 1], PLAN_INSTRUCTION);
+        // Claude Code's own worktree tools are off: the app's tool asks instead.
         let at = args.iter().position(|a| a == "--settings").unwrap();
         let settings: Value = serde_json::from_str(&args[at + 1]).unwrap();
-        assert_eq!(settings["permissions"]["ask"][0], "EnterWorktree");
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.contains(&json!("EnterWorktree")) && deny.contains(&json!("ExitWorktree")));
+        assert!(settings["permissions"].get("ask").is_none());
         // No app tools, no tool server.
         assert!(!args.contains(&"--mcp-config".to_string()));
         assert!(args.windows(2).any(|w| w == ["--resume", "abc"]));
@@ -1650,7 +1647,6 @@ mod tests {
         let at = args.iter().position(|a| a == "--settings").unwrap();
         let settings: Value = serde_json::from_str(&args[at + 1]).unwrap();
         assert_eq!(settings["permissions"]["allow"][0], "mcp__app_tools");
-        assert_eq!(settings["permissions"]["ask"][0], "EnterWorktree");
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
         assert!(args[at + 1].ends_with("Use the app tools."));
     }
@@ -1766,8 +1762,8 @@ mod tests {
         for (tools, notes) in [(Vec::new(), None), (vec![echo_tools()], Some(Path::new("/data/notes/c/notes.md")))] {
             let settings: Value = serde_json::from_str(&launch_settings(&tools, notes)).unwrap();
             assert_eq!(settings["deniedMcpServers"], json!([{ "serverName": "claude.ai Claude Docs" }]));
-            assert_eq!(settings["permissions"]["deny"], json!(CLAUDE_DOCS_DENY));
-            assert_eq!(settings["permissions"]["ask"], json!(["EnterWorktree"]));
+            let deny = settings["permissions"]["deny"].as_array().unwrap();
+            assert!(CLAUDE_DOCS_DENY.iter().chain(WORKTREE_DENY.iter()).all(|d| deny.contains(&json!(d))));
         }
     }
 

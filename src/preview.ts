@@ -271,13 +271,13 @@ function playAgents() {
   say({ kind: "task_progress", task_id: "t2", tool_id: "ag2", description: "Running sleep 60 && ps -o rss -p 4412", tool_uses: 3, last_tool: "Bash" }, 1450);
 }
 
-/** A chat where Claude asked for a worktree, waiting for the answer. */
+/** A chat where the agent asked for a worktree, waiting for the answer. */
 const askingChat: AgentEvent[] = [
   { kind: "user_message", text: "Bump dependencies and run the tests." },
   { kind: "session_started", agent_session_id: "agent-waiting", model: "claude-fable-5-2", mode: "auto" },
   tool("w1", "Read", { file_path: `${home}/code/harness/package.json` }),
   result("w1", "…"),
-  tool("w2", "EnterWorktree", { name: "bump dependencies" }),
+  tool("w2", "mcp__harness_worktree__ask", { name: "bump dependencies" }),
   { kind: "worktree_ask", request_id: "wt-1", repo_root: `${home}/code/harness`, tool_id: "w2", name: "bump dependencies" },
 ];
 
@@ -285,11 +285,11 @@ const askingChat: AgentEvent[] = [
 const movedChat: AgentEvent[] = [
   { kind: "user_message", text: "Why is the idle timer late when hidden?" },
   { kind: "session_started", agent_session_id: "agent-working", model: "claude-fable-5-2", mode: "auto" },
-  tool("v1", "EnterWorktree", { name: "idle timer late" }),
+  tool("v1", "mcp__harness_worktree__ask", { name: "idle timer late" }),
   { kind: "worktree_ask", request_id: "wt-2", repo_root: `${home}/code/harness`, tool_id: "v1", name: "idle timer late" },
   { kind: "worktree_chosen", choice: "worktree" },
   { kind: "worktree_changed", status: "created", branch: "harness/idle-timer-late-4be0a1" },
-  result("v1", "Harness is making this chat's worktree itself. Stop here; you will be told where to continue.", true),
+  result("v1", "The user is being asked whether to do this work in a new worktree. End your turn now and make no changes. Their answer comes as your next message."),
   text("v2", "Moved. The timer runs in the window, which the system slows down when hidden."),
   ended,
   { kind: "worktree_changed", status: "put_away", branch: "harness/idle-timer-late-4be0a1" },
