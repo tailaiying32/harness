@@ -7,7 +7,7 @@
 // the biggest library in the window, and only notes and plans use it.
 
 import { defaultKeymap, history, historyKeymap, insertNewline } from "@codemirror/commands";
-import { defineLanguageFacet, Language, LanguageSupport, syntaxTree } from "@codemirror/language";
+import { defineLanguageFacet, forceParsing, Language, LanguageSupport, syntaxTree } from "@codemirror/language";
 import { GFM, parser as markdownParser } from "@lezer/markdown";
 import { indent, newLine, outdent, renumbered, type Edit } from "./editing";
 import { renderMarkdown } from "../markdown";
@@ -189,7 +189,10 @@ const livePreview = ViewPlugin.fromClass(
       this.decorations = decorate(view);
     }
     update(u: ViewUpdate) {
-      if (u.docChanged || u.selectionSet || u.viewportChanged || u.focusChanged) {
+      // A finished background parse changes only the tree: the text it
+      // covers gets formatted then.
+      const parsed = syntaxTree(u.state) !== syntaxTree(u.startState);
+      if (u.docChanged || u.selectionSet || u.viewportChanged || u.focusChanged || parsed) {
         this.decorations = decorate(u.view);
       }
     }
@@ -381,7 +384,7 @@ function listCommand(make: (text: string, start: number, end: number) => Edit | 
 
 /** Makes the editor in `host`. Escape leaves it (blurs), as clicking away does. */
 export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): EditorView {
-  return new EditorView({
+  const view = new EditorView({
     parent: host,
     state: EditorState.create({
       doc: options.text,
@@ -416,4 +419,11 @@ export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): Edi
       ],
     }),
   });
+  // CodeMirror parses only the first 3000 characters up front and the rest
+  // in the background, which in this webview (no requestIdleCallback) waits
+  // half a second: the doc showed as plain text until then. A doc parses in
+  // a few milliseconds, so do it now; a huge one stops at the time limit and
+  // finishes in the background as before.
+  forceParsing(view, view.state.doc.length, 50);
+  return view;
 }
