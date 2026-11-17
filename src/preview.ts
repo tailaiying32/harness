@@ -719,6 +719,47 @@ const commands: Record<string, (args: Args) => unknown> = {
   set_mode: (args) => emit(args.sessionId, { kind: "mode_changed", mode: args.mode }),
   set_model: () => undefined,
   set_effort: () => undefined,
+  list_commands: async (args) => {
+    // Late, as from a real agent process, so the menu is seen filling in.
+    await new Promise((r) => setTimeout(r, 2500));
+    // As the core sends them (trimmed): Claude Code's, then Cursor's.
+    if (args.agent === "cursor")
+      return [
+        {"name": "autopilot", "description": "Keep a PR merge-ready by triaging comments, resolving clear conflicts, and fixing CI in a loop. (builtin skill)", "hint": null, "aliases": []},
+        {"name": "create-rule", "description": "Create Cursor rules for persistent AI guidance. (builtin skill)", "hint": null, "aliases": []},
+        {"name": "rename-chat", "description": "Rename the current chat to match its focus. (builtin skill)", "hint": null, "aliases": []},
+        {"name": "statusline", "description": "Configure a custom status line in the CLI.", "hint": null, "aliases": []},
+        {"name": "split-to-prs", "description": "Split current work into small reviewable PRs. (builtin skill)", "hint": null, "aliases": []},
+      ];
+    return [
+      {"name": "design:ux-copy", "description": "(design) Write or review UX copy \u2014 microcopy, error messages, empty states, CTAs. Trigger with \"write copy for\", \"what should this button...", "hint": "<context or copy to review>", "aliases": ["ux-copy"]},
+      {"name": "verify", "description": "Verify that a code change actually does what it's supposed to by exercising it end-to-end and observing behavior \u2014 drive the affected flo...", "hint": null, "aliases": []},
+      {"name": "debug", "description": "Enable debug logging for this session and help diagnose issues", "hint": "[issue description]", "aliases": []},
+      {"name": "code-review", "description": "Review the current diff, or a PR number/branch/path target, for correctness bugs (plus reuse/simplification/efficiency cleanups where the...", "hint": "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>] [--max-findings <n>|all]", "aliases": ["review"]},
+      {"name": "simplify", "description": "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only \u2014 it does not hu...", "hint": "[<target>]", "aliases": []},
+      {"name": "batch", "description": "Research and plan a large-scale change, then execute it in parallel across 5\u201330 isolated worktree agents that each open a PR.", "hint": "<instruction>", "aliases": []},
+      {"name": "doctor", "description": "Health-check the user's Claude Code setup and fix issues: diagnose installation health \u2014 what the `claude doctor` terminal diagnostics co...", "hint": "[prompt-audit [<path>]]", "aliases": ["checkup"]},
+      {"name": "loop", "description": "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.", "hint": "[interval] [prompt]", "aliases": ["proactive"]},
+      {"name": "schedule", "description": "Create, update, list, or run scheduled cloud agents (routines) that execute on a cron schedule.", "hint": null, "aliases": ["routines"]},
+      {"name": "clear", "description": "Start a new session with empty context; previous session stays on disk (resumable with /resume)", "hint": "[name]", "aliases": ["reset", "new"]},
+      {"name": "color", "description": "Set the prompt bar color for this session", "hint": "[red|blue|green|yellow|purple|orange|pink|cyan|default]", "aliases": []},
+      {"name": "compact", "description": "Free up context by summarizing the conversation so far", "hint": "<optional custom summarization instructions>", "aliases": []},
+      {"name": "config", "description": "Set a setting by key", "hint": "key=value", "aliases": ["settings"]},
+      {"name": "context", "description": "Show current context usage", "hint": null, "aliases": []},
+      {"name": "effort", "description": "Set the model's effort level", "hint": "<low|medium|high|xhigh|max|auto|ultracode [on|off]>", "aliases": []},
+      {"name": "init", "description": "Initialize a new CLAUDE.md file with codebase documentation", "hint": null, "aliases": []},
+      {"name": "mcp", "description": "Manage MCP servers", "hint": "[reconnect|enable|disable [<server>|all]]", "aliases": []},
+      {"name": "model", "description": "Set the AI model for Claude Code", "hint": "<model>", "aliases": []},
+      {"name": "security-review", "description": "Complete a security review of the pending changes on the current branch", "hint": null, "aliases": []},
+      {"name": "usage", "description": "Show session cost, plan usage, and what's contributing to your limits", "hint": null, "aliases": ["cost", "stats"]},
+      {"name": "recap", "description": "Generate a one-line session recap now", "hint": null, "aliases": []},
+      {"name": "goal", "description": "Set a goal \u2014 keep working until the condition is met", "hint": null, "aliases": []},
+      {"name": "learn", "description": "Use this skill when the user wants intellectual understanding \u2014 learning how or why something works, not getting a task done or solicitin...", "hint": null, "aliases": ["anthropic-skills:learn"]},
+      {"name": "pdf", "description": "Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting text/tables from PDFs, combinin...", "hint": null, "aliases": ["anthropic-skills:pdf"]},
+      {"name": "skill-creator", "description": "Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to create a skill from scratch,...", "hint": null, "aliases": ["anthropic-skills:skill-creator"]},
+      {"name": "xlsx", "description": "Use this skill any time a spreadsheet file is the primary input or output. This means any task where the user wants to: open, read, edit,...", "hint": null, "aliases": ["anthropic-skills:xlsx"]},
+    ];
+  },
   list_models: (args) => {
     const all = ["low", "medium", "high", "xhigh", "max"];
     // Cursor's, as the core sends them: Auto first, newest of each family.
