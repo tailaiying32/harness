@@ -278,6 +278,8 @@ type Prefs = {
   projectOrder: string[];
   /** The model last picked in each project, by path: new chats there start on it. */
   projectModels: Record<string, { agent: string; model: string }>;
+  /** When overnight keep awake ends, "HH:MM". */
+  overnightUntil: string;
 };
 export const DEFAULT_PANEL_WIDTH = 0.46;
 
@@ -286,6 +288,9 @@ export function applyPanelWidth(share: number): void {
   document.documentElement.style.setProperty("--panel-w", `${(share * 100).toFixed(2)}%`);
 }
 export const DEFAULT_MODE = "auto";
+/** The times overnight keep awake can end at, picked in Settings. */
+export const overnightTimes = ["06:00", "07:00", "08:00", "09:00", "10:00"];
+const DEFAULT_OVERNIGHT = "08:00";
 const modes = ["default", "acceptEdits", "auto"];
 
 // Stored in the window's own storage until there is a settings page.
@@ -326,9 +331,10 @@ export function loadPrefs(): Prefs {
           ([, pick]) => pick && typeof pick.model === "string" && pick.model && (pick.agent === "cursor" || pick.agent === "claude-code"),
         ),
       ),
+      overnightUntil: overnightTimes.includes(saved.overnightUntil as string) ? saved.overnightUntil! : DEFAULT_OVERNIGHT,
     };
   } catch {
-    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", agent: "claude-code", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH, foldedProjects: [], sidebarHidden: false, projectOrder: [], projectModels: {} };
+    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", agent: "claude-code", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH, foldedProjects: [], sidebarHidden: false, projectOrder: [], projectModels: {}, overnightUntil: DEFAULT_OVERNIGHT };
   }
 }
 

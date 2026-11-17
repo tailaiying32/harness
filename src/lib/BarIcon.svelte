@@ -2,7 +2,7 @@
   // The panel row's reload and close as small icons, drawn like the panel's
   // view icons (see PanelIcon: 16 × 16, 1.4 stroke, one text line tall), so
   // they sit beside them at the same size instead of as small font glyphs.
-  let { name }: { name: "reload" | "close" | "sidebar" | "widen" | "narrow" | "external" } = $props();
+  let { name }: { name: "reload" | "close" | "sidebar" | "widen" | "narrow" | "external" | "awake" } = $props();
 </script>
 
 <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -23,6 +23,12 @@
     <!-- A box with an arrow leaving it. -->
     <path d="M12.75 9v3.75a1 1 0 0 1-1 1h-8.5a1 1 0 0 1-1-1v-8.5a1 1 0 0 1 1-1H7" />
     <path d="M9.5 2.25h4.25V6.5M13.75 2.25L7.5 8.5" />
+  {:else if name === "awake"}
+    <!-- A cup with three lines of steam: keep awake. The cup's bottom sits
+         on the sidebar icon's bottom line, the steam inside the box's top. -->
+    <path d="M1.75 5.75h9.5v4a3.5 3.5 0 0 1-3.5 3.5h-2.5a3.5 3.5 0 0 1-3.5-3.5z" />
+    <path d="M11.25 6.75h.75a2.25 2.25 0 0 1 0 4.5h-.75" />
+    <path stroke-linecap="round" d="M3.75 2.5v.75M6.5 1.75v1.5M9.25 2.5v.75" />
   {:else}
     <path d="M3.25 3.25l9.5 9.5M12.75 3.25l-9.5 9.5" />
   {/if}

@@ -17,6 +17,11 @@ can search, list and read the project's earlier chats, whatever agent they
 ran on, and a chat can be picked with @ in the message box. See "Earlier
 chats".
 
+Added 2026-11-17 (branch `harness/keep-awake-382ab7`): keep awake, a
+cup in the top strip (and an agent tool) that holds the computer awake while the
+user steps away, ending when they're back, when the work is done, or after
+two hours; overnight is a deliberate step. See "Keep awake".
+
 Status, 2026-11-13: steps 1 to 5 of "Order of work" are built. Images
 (paste, drop, tool images, a full-space image view) were added 2026-11-14;
 see "Images". The app has a
@@ -2084,6 +2089,53 @@ research and the tests behind each choice are in
   shared memory across agents, tool output from an old chat, chats of other
   projects. Not tested yet: a chat long enough to come in parts in real
   use, and a chat whose context was squeezed.
+
+### Keep awake (`keep_awake.rs`, built 2026-11-17)
+
+For stepping away (lunch, a shower) with the lid open while chats keep
+working. One for the whole app: sleep is machine-wide.
+
+- **Starts** from a cup icon in the top strip, in one row with the sidebar
+  toggle, just before it (with the sidebar put away, the row flips: toggle
+  first; the top bar leaves room for both). The cup has three lines of steam,
+  the middle one longest; it is drawn half a pixel high because its weight
+  sits low under the thin steam. Steam above, no steam, a sun eye and a plain
+  eye were tried; the user kept the cup (it means "caffeinate"). A text line in the sidebar's
+  foot looked messy (user, 2026-11-17); an icon in the foot row was also
+  tried. It can also start from any chat's
+  agent through the `harness_keep_awake` tools (`keep_awake` with optional
+  `until` "HH:MM", `stop_keep_awake`). Their descriptions point agents there
+  instead of running `caffeinate`; running it directly isn't blocked.
+- **Holds** idle system sleep only, so the screen still sleeps and locks.
+  Mac: `caffeinate -i -w <app pid>`, killed when it ends and gone even if the
+  app crashes. Windows: `SetThreadExecutionState` on its own thread
+  (untested). Lid close and the power button still sleep the Mac.
+- **Ends** (checked every 15 s in the core, since a hidden window's timers
+  run late) at the first of:
+  - **back**: once there has been no keyboard or mouse input for 2 min (the
+    user left; their display sleeps at 2 min), the next input ends it. Input
+    before that, like the click that started it, doesn't.
+  - **done**: no chat working for 1 min, once one has worked since it
+    started. Working = starting/working, or subagents running. Waiting for
+    approval doesn't count (staying awake can't move it), nor do background
+    commands (a dev server or leftover `caffeinate` would hold it forever).
+    Side chats don't count. With nothing ever working, only back or the limit
+    end it ("start something, then leave").
+  - **limit**: 2 h after starting; overnight: its clock time (Settings,
+    6:00 to 10:00, default 8:00), and unplugging.
+- **While on** the cup is lit with the time beside it, `1h 52m` / `till 8:00`
+  (with the sidebar put away, the cup alone; the time is on hover). Clicking
+  it opens, downward, `stop` and `overnight until 8:00` (`overnight · plug in first` on
+  battery). Overnight first shows a check: `stays awake until 8:00 at most`
+  and, in yellow, the chats waiting on the user. Switching to overnight keeps
+  the hold and what has been seen so far. No message when it ends.
+- **Tested** live with a test copy (2026-11-17): Haiku called the tool for
+  "caffeinate the session"; the hold appeared (`PreventUserIdleSystemSleep`
+  only) and ended 10 s (test setting) after the turn; with a 5 s away time
+  the user's own input ended it; `kill -9` of the app left no `caffeinate`.
+  Not tested: overnight end and unplugging live, Windows.
+- `HARNESS_KEEP_AWAKE_{LIMIT,AWAY,QUIET,TICK}_SECONDS` override the times.
+- Not covered: coming back after a restart.
 
 ### If the approval channel breaks
 

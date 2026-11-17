@@ -12,6 +12,7 @@
   import Sidebar from "./lib/Sidebar.svelte";
   import TopBar from "./lib/TopBar.svelte";
   import BarIcon from "./lib/BarIcon.svelte";
+  import KeepAwake from "./lib/KeepAwake.svelte";
   import {
     type ModelInfo,
     type AgentId,
@@ -187,6 +188,7 @@
 
   onMount(async () => {
     await subscribe((envelope) => app.route(envelope));
+    void app.loadKeepAwake();
     // Side chats aren't kept across a reload: end any the last window left running.
     void sideEndAll().catch(() => {});
     app.home = await homeDir();
@@ -586,9 +588,12 @@
   {#if !sidebarHidden}
     <Sidebar {app} onsettings={() => (showSettings = !showSettings)} />
   {/if}
-  <button class="side-toggle" title={sidebarHidden ? "Show the sidebar (⌘B)" : "Hide the sidebar (⌘B)"} onclick={toggleSidebar}>
-    <BarIcon name="sidebar" />
-  </button>
+  <div class="strip">
+    <KeepAwake {app} short={sidebarHidden} />
+    <button class="side-toggle" title={sidebarHidden ? "Show the sidebar (⌘B)" : "Hide the sidebar (⌘B)"} onclick={toggleSidebar}>
+      <BarIcon name="sidebar" />
+    </button>
+  </div>
   <div class="right">
   <TopBar {app} />
   <!-- Chat and side panel. -->
@@ -625,22 +630,32 @@
     display: flex;
     position: relative;
   }
-  /* In the top strip. With the sidebar showing: at its right edge, in line
-     with the end of its rows (the sidebar is --side plus its side padding).
-     Hidden: at the top bar's start (the top bar leaves room, see TopBar). */
-  .side-toggle {
+  /* The top strip's buttons, in one row: keep awake, then the sidebar
+     toggle. With the sidebar showing, the toggle ends at its right edge, in
+     line with the end of its rows (the sidebar is --side plus its side
+     padding), keeping both far from a Mac's window buttons. Hidden: the row
+     starts at the top bar's start, toggle first (the top bar leaves room,
+     see TopBar). */
+  .strip {
     position: absolute;
     top: 0;
-    left: calc(var(--side) + var(--pad-x) * 0.6 - 1em);
+    right: calc(100% - var(--side) - var(--pad-x) * 0.6);
     height: var(--bar);
     display: flex;
     align-items: center;
-    color: var(--faint);
+    gap: 2ch;
     /* Above settings, which cover the top bar. */
     z-index: 3;
   }
-  .bare .side-toggle {
+  .bare .strip {
+    right: auto;
     left: var(--toggle-x);
+    flex-direction: row-reverse;
+  }
+  .side-toggle {
+    display: flex;
+    align-items: center;
+    color: var(--faint);
   }
   .side-toggle:hover {
     color: var(--fg);
