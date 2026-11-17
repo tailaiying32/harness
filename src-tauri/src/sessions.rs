@@ -534,6 +534,12 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Notes in the chat's history that a doc was saved to the project, so
+    /// the chat finds it at its new place, now and after a reopen.
+    pub fn doc_saved(&self, session_id: &str, from: &str, to: &str) {
+        self.record(session_id, AgentEvent::DocSaved { from: from.to_string(), to: to.to_string() });
+    }
+
     /// What a process's events pass through: bookkeeping, saving, then the window.
     fn sink(&self, session_id: &str, run: u64) -> EventSink {
         let manager = self.clone();
@@ -1248,6 +1254,16 @@ mod tests {
         assert!(rig.seen.lock().unwrap().contains(&labelled));
         // A chat that doesn't exist gets nothing.
         assert!(rig.manager.title_batch("nope", "ag1", "", vec![]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_saved_doc_is_noted_in_the_chat_history() {
+        let rig = rig(LONG);
+        rig.send("Write it up").await;
+        rig.manager.doc_saved("s1", "/notes/s1/report.md", "/proj/docs/report.md");
+        let moved = AgentEvent::DocSaved { from: "/notes/s1/report.md".into(), to: "/proj/docs/report.md".into() };
+        assert!(rig.store.events("s1").unwrap().contains(&moved));
+        assert!(rig.seen.lock().unwrap().contains(&moved));
     }
 
     #[tokio::test]

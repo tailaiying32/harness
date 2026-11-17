@@ -228,6 +228,13 @@ pub enum AgentEvent {
         tool_id: String,
         title: String,
     },
+    /// The user saved a doc from the chat's folder to the project: it moved
+    /// from `from` to `to`. Saved, so links and tabs to `from` still find it
+    /// after the chat is reopened.
+    DocSaved {
+        from: String,
+        to: String,
+    },
     /// The chat got a written title. Not saved: the store holds the title.
     TitleChanged {
         title: String,
