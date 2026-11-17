@@ -307,6 +307,29 @@ const movedChat: AgentEvent[] = [
   { kind: "worktree_changed", status: "restored", branch: "harness/idle-timer-late-4be0a1" },
   text("v3", "Done: the core now times it."),
   ended,
+  { kind: "user_message", text: "Split the follow-ups into separate chats." },
+  tool("v4", "mcp__harness_new_chats__start", { parts: [] }),
+  { kind: "new_chats_ask", request_id: "nc-1", tool_id: "v4", from: "main", parts: [
+    { title: "Idle timer in the core", summary: "Move the timer out of the window.", why: "The window is slowed down when hidden.", brief: "Move the idle timer from the window into the core.\n\n- Files: `src-tauri/src/sessions.rs`\n- Done when the tests pass." },
+    { title: "Timer setting", summary: "A setting for the idle time.", why: "Users asked to change it.", brief: "Add an idle time setting to Settings.", agent: "cursor" },
+  ] },
+  result("v4", "The user is being asked whether to start these chats. End your turn now and make no changes."),
+  ended,
+  { kind: "new_chats_chosen", request_id: "nc-1", choice: "start" },
+  {
+    kind: "new_chats_started",
+    request_id: "nc-1",
+    chats: [
+      { title: "Idle timer in the core", session_id: "preview-child-1", error: null },
+      { title: "Timer setting", session_id: null, error: "Cursor couldn't be found" },
+    ],
+  },
+  { kind: "user_message", text: "Now one more, branched off this chat." },
+  tool("v5", "mcp__harness_new_chats__start", { parts: [] }),
+  { kind: "new_chats_ask", request_id: "nc-2", tool_id: "v5", from: "this_chat", parts: [
+    { title: "Idle timer in the core", summary: "Move the timer out of the window.", why: "The window is slowed down when hidden.", brief: "Move the idle timer from the window into the core.\n\n- Files: `src-tauri/src/sessions.rs`\n- Done when the tests pass." },
+    { title: "Timer setting", summary: "A setting for the idle time.", why: "Users asked to change it.", brief: "Add an idle time setting to Settings.", agent: "cursor" },
+  ] },
 ];
 
 /** A chat with a pasted screenshot, and one a tool took. For images. */

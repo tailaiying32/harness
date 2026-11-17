@@ -94,6 +94,7 @@ const CHATS = "mcp__harness_chats__";
 
 /** The app's worktree tool, how every agent asks for a worktree (see sessions/worktrees.rs). */
 const WORKTREE = "mcp__harness_worktree__ask";
+const NEW_CHATS = "mcp__harness_new_chats__start";
 
 /** Which of the earlier-chats tools a call is ("search", "recent", "read"), or "" for another tool. */
 export const chatsTool = (tool: ToolCall) => (tool.name.startsWith(CHATS) ? tool.name.slice(CHATS.length) : "");
@@ -192,6 +193,8 @@ function wording(tool: ToolCall): [string, string, string] {
     case WORKTREE:
     case "EnterWorktree":
       return [`asked for a worktree`, `Asking for a worktree`, `ask for a worktree`];
+    case NEW_CHATS:
+      return [`asked to start chats`, `Asking to start chats`, `ask to start chats`];
     default:
       return [`used ${name}`, `Using ${name}`, `use ${name}`];
   }
@@ -207,7 +210,7 @@ export const showsOutput = (tool: ToolCall) =>
 
 /** Plans, questions and worktree requests have their own card, which says how they went. */
 const hasOwnCard = (tool: ToolCall) =>
-  ["ExitPlanMode", "AskUserQuestion", WORKTREE, "EnterWorktree"].includes(tool.name);
+  ["ExitPlanMode", "AskUserQuestion", WORKTREE, "EnterWorktree", NEW_CHATS].includes(tool.name);
 
 /** True when the call never ran because the user said no. */
 export const skipped = (tool: ToolCall) => Boolean(tool.declined) && !hasOwnCard(tool);

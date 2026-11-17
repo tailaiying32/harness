@@ -29,6 +29,7 @@
     terminalWrite,
     type Decision,
     type Mode,
+    type NewChatsChoice,
     type WorktreeChoice,
     type SetupInfo,
   } from "./lib/ipc";
@@ -301,6 +302,7 @@
     const modesAfter: string[] = [];
     let answer: Decision | null = "allow";
     let worktreeAnswer: WorktreeChoice | null = null;
+    let newChatsAnswer: NewChatsChoice | null = null;
     let stopAfter = 0;
     /** What each @termclose was asked about ("python3 …"), or null when it closed at once. */
     const termAsked: (string | null)[] = [];
@@ -328,6 +330,7 @@
       //   @model <name> (cursor:<name> for Cursor's, claude:<name> to switch back), @mode <mode>
       //   @answer <allow|always_allow|deny|none>  how approvals are answered from here on
       //   @worktree <worktree|here|none>  how the worktree card is answered
+      //   @newchats <start|no|none>  how the new-chats card is answered
       //   @turn          wait for the open chat's next turn to end (after a move to a
       //                  worktree, the chat carries on in a new turn by itself)
       //   @moved         wait for a turn to end with the chat in its worktree
@@ -362,7 +365,7 @@
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
-        message.match(/^@(model|mode|answer|worktree|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|newside|image|file|browser|settings|termtab|termclose|docs|info|agent|agents)(?:\s+(\S+))?$/) ??
+        message.match(/^@(model|mode|answer|worktree|newchats|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|newside|image|file|browser|settings|termtab|termclose|docs|info|agent|agents)(?:\s+(\S+))?$/) ??
         message.match(/^@(notes|docedit|planedit|terminal|termwait)\s+(.+)$/s) ??
         [];
       const current = app.current;
@@ -379,6 +382,7 @@
       if (directive === "mode") await current.changeMode(value as Mode);
       if (directive === "answer") answer = value === "none" ? null : (value as Decision);
       if (directive === "worktree") worktreeAnswer = value === "none" ? null : (value as WorktreeChoice);
+      if (directive === "newchats") newChatsAnswer = value === "none" ? null : (value as NewChatsChoice);
       if (directive === "moved") {
         await new Promise<void>((resolve) => {
           current.onTurnEnd = () => {
@@ -458,6 +462,7 @@
 
       current.autoAnswer = answer;
       current.autoWorktree = worktreeAnswer;
+      current.autoNewChats = newChatsAnswer;
       // A side question ends a turn in the side chat, not the main one.
       const target = /^\/btw\s/.test(message) ? current.openSide() : current;
       const done = new Promise<void>((resolve) => (target.onTurnEnd = resolve));

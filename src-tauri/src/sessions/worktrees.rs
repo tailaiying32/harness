@@ -125,7 +125,7 @@ fn days_ms(days: u64) -> i64 {
 }
 
 impl SessionManager {
-    fn worktrees_dir(&self) -> PathBuf {
+    pub(super) fn worktrees_dir(&self) -> PathBuf {
         self.0.data_dir.join("worktrees")
     }
 
@@ -502,7 +502,7 @@ impl SessionManager {
     /// The chat's live worktree, after noting any branch its folder was
     /// switched to (a split task's next part). Putting it away, bringing it
     /// back and cleanup all go by the branch saved here.
-    async fn follow_branch(&self, session_id: &str) -> Option<Worktree> {
+    pub(super) async fn follow_branch(&self, session_id: &str) -> Option<Worktree> {
         let git = self.0.store.chat_git(session_id).ok()??;
         let wt = git.worktree.filter(|_| git.status.as_deref() == Some("live"))?;
         let now = {

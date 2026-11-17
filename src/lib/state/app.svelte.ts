@@ -169,7 +169,9 @@ export class AppState {
       event.kind === "title_changed" ||
       event.kind === "worktree_changed" ||
       event.kind === "worktree_chosen" ||
-      event.kind === "prs_changed"
+      event.kind === "prs_changed" ||
+      // Chats started from this one join the sidebar.
+      event.kind === "new_chats_started"
     ) {
       void this.refresh();
     }

@@ -172,7 +172,7 @@ async fn empty_trash(state: State<'_, AppState>) -> Result<(), String> {
     sessions.empty_trash().await
 }
 
-/// The answer to Claude's request for a worktree: "worktree" or "here".
+/// The answer to an agent's request for a worktree: "worktree" or "here".
 #[tauri::command]
 async fn choose_worktree(
     state: State<'_, AppState>,
@@ -182,6 +182,18 @@ async fn choose_worktree(
 ) -> Result<(), String> {
     let sessions = state.sessions.clone();
     sessions.choose_worktree(&session_id, &request_id, &choice).await
+}
+
+/// The answer to an agent's request to start chats: "start" or "no".
+#[tauri::command]
+async fn choose_new_chats(
+    state: State<'_, AppState>,
+    session_id: String,
+    request_id: String,
+    choice: String,
+) -> Result<(), String> {
+    let sessions = state.sessions.clone();
+    sessions.choose_new_chats(&session_id, &request_id, &choice).await
 }
 
 /// Gives a chat a new title.
@@ -1145,6 +1157,7 @@ pub fn run() {
             restore_chat,
             empty_trash,
             choose_worktree,
+            choose_new_chats,
             rename_session,
             title_batch,
             send_message,
