@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use super::acp::{self, AcpConfig};
 use super::{AgentAdapter, EventSink, RunningAgent, SpawnOptions};
-use crate::events::ModelInfo;
+use crate::events::{CommandInfo, ModelInfo};
 
 pub struct CursorAdapter;
 
@@ -26,6 +26,8 @@ fn client_meta() -> Value {
 
 /// How long listing the models may take in all (one call per model).
 const LIST_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long listing the commands may take, from start to Cursor's list.
+const COMMANDS_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long `agent login` may wait for the user in the browser.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -120,6 +122,34 @@ impl AgentAdapter for CursorAdapter {
         Ok(models)
     }
 
+    /// Opens a conversation in the folder (nothing is sent, so nothing is
+    /// spent); Cursor sends its commands right after, as a session update.
+    fn list_commands(&self, binary: &Path, folder: &Path) -> Result<Vec<CommandInfo>, String> {
+        let folder = folder.to_path_buf();
+        let mut rpc = SyncRpc::start(binary, &folder)?;
+        let deadline = Instant::now() + COMMANDS_TIMEOUT;
+        rpc.call(
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false, "_meta": client_meta() },
+                "clientInfo": { "name": "harness", "version": env!("CARGO_PKG_VERSION") },
+            }),
+            deadline,
+        )?;
+        rpc.call(
+            "session/new",
+            json!({ "cwd": folder.to_string_lossy(), "mcpServers": [] }),
+            deadline,
+        )?;
+        // It comes a moment after the reply; none in time means none to show.
+        let wait = deadline.min(Instant::now() + Duration::from_secs(10));
+        Ok(rpc
+            .notice(|v| v["params"]["update"]["sessionUpdate"] == "available_commands_update", wait)
+            .map(|v| parse_commands(&v["params"]["update"]))
+            .unwrap_or_default())
+    }
+
     /// Cursor names each conversation itself (`session_info_update`), which
     /// the chat takes as its title; no model call is needed.
     fn make_title(&self, _binary: &Path, _first_message: &str) -> Result<String, String> {
@@ -182,12 +212,33 @@ fn effort_levels(options: &Value) -> Option<(Vec<String>, Option<String>)> {
     (!levels.is_empty()).then(|| (levels, option["currentValue"].as_str().map(str::to_owned)))
 }
 
-/// A blocking JSON-RPC client for short jobs (listing models).
+/// The commands in an `available_commands_update`: `name`, `description`,
+/// and maybe `input.hint`.
+fn parse_commands(update: &Value) -> Vec<CommandInfo> {
+    update["availableCommands"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let name = c["name"].as_str().filter(|n| !n.is_empty())?.to_string();
+            Some(CommandInfo {
+                name,
+                description: c["description"].as_str().unwrap_or_default().to_string(),
+                hint: c["input"]["hint"].as_str().filter(|h| !h.trim().is_empty()).map(str::to_owned),
+                aliases: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+/// A blocking JSON-RPC client for short jobs (listing models and commands).
 struct SyncRpc {
     child: Child,
     stdin: ChildStdin,
     lines: mpsc::Receiver<String>,
     next: u64,
+    /// Notifications that came while waiting for a reply, oldest first.
+    notices: Vec<Value>,
 }
 
 impl SyncRpc {
@@ -214,7 +265,7 @@ impl SyncRpc {
                 }
             }
         });
-        Ok(Self { child, stdin, lines, next: 1 })
+        Ok(Self { child, stdin, lines, next: 1, notices: Vec::new() })
     }
 
     fn call(&mut self, method: &str, params: Value, deadline: Instant) -> Result<Value, String> {
@@ -227,12 +278,9 @@ impl SyncRpc {
             let left = deadline.saturating_duration_since(Instant::now());
             let line = self.lines.recv_timeout(left).map_err(|_| "Cursor took too long".to_string())?;
             let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-            // Its own requests get a refusal; notifications are skipped.
+            // Its own requests get a refusal; notifications are kept for `notice`.
             if v.get("method").is_some() {
-                if v.get("id").is_some() {
-                    let reply = json!({ "jsonrpc": "2.0", "id": v["id"], "error": { "code": -32601, "message": "Not supported" } });
-                    let _ = writeln!(self.stdin, "{reply}");
-                }
+                self.take_message(v);
                 continue;
             }
             if v["id"].as_u64() != Some(id) {
@@ -243,6 +291,38 @@ impl SyncRpc {
                 return Err(message.to_string());
             }
             return Ok(v["result"].clone());
+        }
+    }
+}
+
+impl SyncRpc {
+    /// Refuses one of the agent's own requests, or keeps a notification.
+    fn take_message(&mut self, v: Value) {
+        if v.get("id").is_some() {
+            let reply = json!({ "jsonrpc": "2.0", "id": v["id"], "error": { "code": -32601, "message": "Not supported" } });
+            let _ = writeln!(self.stdin, "{reply}");
+        } else {
+            self.notices.push(v);
+        }
+    }
+
+    /// The first notification `wanted` accepts, whether it came already or
+    /// comes before `deadline`.
+    fn notice(&mut self, wanted: impl Fn(&Value) -> bool, deadline: Instant) -> Option<Value> {
+        if let Some(i) = self.notices.iter().position(&wanted) {
+            return Some(self.notices.remove(i));
+        }
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let line = self.lines.recv_timeout(left).ok()?;
+            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+            if v.get("method").is_none() {
+                continue;
+            }
+            if v.get("id").is_none() && wanted(&v) {
+                return Some(v);
+            }
+            self.take_message(v);
         }
     }
 }
@@ -271,5 +351,31 @@ mod tests {
             Some((vec!["low".into(), "medium".into(), "high".into()], Some("medium".into())))
         );
         assert_eq!(effort_levels(&json!([])), None);
+    }
+
+    #[test]
+    fn commands_come_from_the_update() {
+        let update = json!({ "sessionUpdate": "available_commands_update", "availableCommands": [
+            { "name": "autopilot", "description": "Keep a PR merge-ready. (builtin skill)" },
+            { "name": "shell", "description": "Runs the rest as a shell command.", "input": { "hint": "command" } },
+            { "description": "No name, so skipped" },
+        ]});
+        assert_eq!(
+            parse_commands(&update),
+            vec![
+                CommandInfo {
+                    name: "autopilot".into(),
+                    description: "Keep a PR merge-ready. (builtin skill)".into(),
+                    hint: None,
+                    aliases: vec![],
+                },
+                CommandInfo {
+                    name: "shell".into(),
+                    description: "Runs the rest as a shell command.".into(),
+                    hint: Some("command".into()),
+                    aliases: vec![],
+                },
+            ]
+        );
     }
 }

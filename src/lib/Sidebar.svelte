@@ -31,6 +31,15 @@
   // Fixed, set by dragging a folder name. A project seen for the first time
   // goes on top (it was just used); one with no chats left drops out.
   let order = $state<string[]>(loadPrefs().projectOrder);
+  // A project's folder moved: its place and its fold go to the new path. The
+  // saved settings were changed already; this is the copy kept here. Before
+  // the effect below, which drops a path that is no longer a project.
+  $effect(() => {
+    if (!app.moved) return;
+    const prefs = loadPrefs();
+    order = prefs.projectOrder;
+    folded = prefs.foldedProjects;
+  });
   $effect(() => {
     // Before the first load the list is empty; pruning then would wipe the saved order.
     if (!app.loaded) return;
@@ -151,9 +160,14 @@
             onpointercancel={drop}
           >
             <svg class="caret" class:shut={isFolded} viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" /></svg>
-            <span class="name">{shortPath(project.path, app.home, 20)}/</span>
+            <span class="name" class:missing={project.missing}>{shortPath(project.path, app.home, 20)}/</span>
           </button>
-          <button class="quiet" title="New chat in this folder" onclick={() => app.newChat(project.path)}>+</button>
+          {#if project.missing}
+            <!-- The folder was moved or renamed: point at where it is, and its chats follow. -->
+            <button class="locate" title="{project.path} is gone. Pick where it is now." onclick={() => app.locate(project.path)}>locate</button>
+          {:else}
+            <button class="quiet" title="New chat in this folder" onclick={() => app.newChat(project.path)}>+</button>
+          {/if}
         </div>
         {#each shown as session (session.id)}
           {@const dot = app.dot(session.id)}
@@ -261,6 +275,19 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* A project whose folder is gone, and the way to point at where it went. */
+  .name.missing {
+    color: var(--faint);
+  }
+  .locate {
+    flex-shrink: 0;
+    color: var(--dim);
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+  }
+  .locate:hover {
+    color: var(--fg);
   }
   .dragging .folder {
     color: var(--fg);

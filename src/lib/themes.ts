@@ -338,6 +338,22 @@ export function loadPrefs(): Prefs {
   }
 }
 
+/**
+ * A project's folder moved: what is kept by its path goes to the new one
+ * (its place in the sidebar, whether it is folded, the model last picked in
+ * it). Where the new path has its own already, that stays.
+ */
+export function moveProjectPrefs(from: string, to: string): void {
+  const prefs = loadPrefs();
+  const swap = (paths: string[]) => (paths.includes(to) ? paths.filter((p) => p !== from) : paths.map((p) => (p === from ? to : p)));
+  const { [from]: model, ...models } = prefs.projectModels;
+  savePrefs({
+    foldedProjects: swap(prefs.foldedProjects),
+    projectOrder: swap(prefs.projectOrder),
+    projectModels: model && !models[to] ? { ...models, [to]: model } : models,
+  });
+}
+
 /** Saves the given choices, leaving the others as they were. */
 export function savePrefs(changed: Partial<Prefs>): void {
   try {

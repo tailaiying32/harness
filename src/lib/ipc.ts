@@ -37,6 +37,8 @@ export type AgentEvent =
   | { kind: "text_delta"; message_id: string; block_index: number; text: string }
   | { kind: "assistant_block"; message_id: string; block: Block; parent_tool_id: string | null }
   | { kind: "tool_result"; tool_id: string; content: unknown; is_error: boolean; parent_tool_id: string | null }
+  /** This chat was started in a folder that is a project whose folder had moved from `from`. */
+  | { kind: "project_moved"; from: string; to: string }
   /** A tool call's name and input, when they came after it was first shown (Cursor). */
   | { kind: "tool_input"; tool_id: string; name: string; input: unknown; parent_tool_id: string | null }
   | {
@@ -149,6 +151,8 @@ export const checkSetup = () => invoke<SetupInfo>("check_setup");
 export type SessionRow = {
   id: string;
   project_path: string;
+  /** Where the project's folder used to be, when it was moved or renamed. */
+  former_paths?: string[];
   title: string;
   mode: string;
   model: string;
@@ -170,14 +174,29 @@ export type SessionRow = {
 };
 
 /** A project folder and its chats, newest first. */
-export type ProjectRow = { id: string; path: string; sessions: SessionRow[] };
+export type ProjectRow = {
+  id: string;
+  path: string;
+  sessions: SessionRow[];
+  /** The folder is gone: moved, renamed, or on a drive that isn't there. */
+  missing?: boolean;
+};
+
+/**
+ * A project's folder was moved or renamed and the user picked where it is
+ * now: its chats, docs, memory, terminal tabs and worktrees follow.
+ */
+export const relocateProject = (from: string, to: string) => invoke<void>("relocate_project", { from, to });
 
 /** Everything the sidebar shows. */
 export const sidebar = () => invoke<ProjectRow[]>("sidebar");
 
-/** A saved chat's details and history. `live` says whether its process is running. */
+/**
+ * A saved chat's details and history. `live` says whether its process is
+ * running; `chat_folder` is the chat's own folder (its notes and docs) today.
+ */
 export const loadSession = (sessionId: string) =>
-  invoke<{ session: SessionRow; events: AgentEvent[]; live: boolean }>("load_session", { sessionId });
+  invoke<{ session: SessionRow; events: AgentEvent[]; live: boolean; chat_folder?: string }>("load_session", { sessionId });
 
 export const renameSession = (sessionId: string, title: string) =>
   invoke<void>("rename_session", { sessionId, title });
@@ -294,6 +313,19 @@ export async function pickFolder(startAt?: string): Promise<string | null> {
   return typeof picked === "string" ? picked : null;
 }
 
+/** One slash command an agent takes. Mirrors `CommandInfo` in src-tauri/src/events.rs. */
+export type CommandInfo = {
+  name: string;
+  description: string;
+  /** What it takes after the name, if the agent says. */
+  hint: string | null;
+  aliases: string[];
+};
+
+/** The slash commands an agent takes in a folder, as it reports them. A second or a few. */
+export const listCommands = (agent: AgentId, folder: string) =>
+  invoke<CommandInfo[]>("list_commands", { agent, folder });
+
 /** Native file picker for the given extensions. Null if the user cancels. */
 export async function pickFile(name: string, extensions: string[]): Promise<string | null> {
   const picked = await open({ directory: false, multiple: false, filters: [{ name, extensions }] });
@@ -377,6 +409,11 @@ export const clipboardFiles = () => invoke<string[]>("clipboard_files");
 export const readDoc = (path: string) => invoke<string>("read_doc", { path });
 /** Saves the user's edit to a markdown file the panel has read. */
 export const writeDoc = (path: string, text: string) => invoke<void>("write_doc", { path, text });
+
+/** The user's working preferences file, for every agent; "" when there is none yet. */
+export const readPreferences = () => invoke<string>("read_preferences");
+/** Saves the preferences file, making it when there is none. */
+export const writePreferences = (text: string) => invoke<void>("write_preferences", { text });
 
 /** Moves a doc from the chat's folder into `<project>/docs/`; the new path. */
 export const saveDocToProject = (chatId: string, path: string, project: string) =>

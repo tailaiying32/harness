@@ -12,6 +12,8 @@
   import { focusEnd, indent, newLine, outdent, renumbered, type Edit } from "./editing";
   import { imageType } from "./files";
   import { attach, imageFiles } from "./images";
+  import SuggestMenu from "./SuggestMenu.svelte";
+  import { commandsFor, fetchCommands, findCommand, matchCommands, type Command } from "../commands.svelte";
 
   let {
     chat,
@@ -197,18 +199,28 @@
     return out.sort((a, b) => a.at - b.at);
   }
 
-  /** The draft in pieces: plain text, the words of images and files it carries, and web addresses. */
+  /** A known command the draft starts with, as `/name`: shown in colour, so a typo stands out by staying plain. */
+  const commandWord = $derived.by(() => {
+    const typed = chat.draft.match(/^\/([^\s/]+)/);
+    return typed && findCommand(commands, typed[1]) ? typed[0] : null;
+  });
+
+  /** The draft in pieces: plain text, a command, the words of images and files it carries, and web addresses. */
   const pieces = $derived.by(() => {
-    const found: { at: number; text: string; open?: () => void; url?: string }[] = [
+    const found: { at: number; text: string; open?: () => void; url?: string; command?: boolean }[] = [
+      ...(commandWord ? [{ at: 0, text: commandWord, command: true }] : []),
       ...words(),
       ...webLinks(chat.draft).map((link) => ({ ...link, url: link.text })),
     ].sort((a, b) => a.at - b.at);
     if (!found.length) return null;
-    const out: { text: string; open?: () => void; url?: string }[] = [];
+    const out: { text: string; open?: () => void; url?: string; command?: boolean }[] = [];
     let at = 0;
     for (const piece of found) {
       if (piece.at < at) continue;
-      out.push({ text: chat.draft.slice(at, piece.at) }, { text: piece.text, open: piece.open, url: piece.url });
+      out.push(
+        { text: chat.draft.slice(at, piece.at) },
+        { text: piece.text, open: piece.open, url: piece.url, command: piece.command },
+      );
       at = piece.at + piece.text.length;
     }
     // A final newline needs something after it to take up its line.
@@ -380,7 +392,7 @@
   $effect(() => {
     const moved = () => {
       if (!pressing) snap();
-      findMention();
+      findSuggest();
     };
     const released = () => {
       if (!pressing) return;
@@ -396,58 +408,107 @@
     };
   });
 
-  // ---- Picking a chat with @ ----
-  // Typing @ at the start of a word lists the project's other chats, newest
-  // first, narrowed by what is typed after it. A picked chat becomes a word,
+  // ---- Picking a chat with @, or a command with / ----
+  // Typing @ at the start of a word lists the project's 8 newest other chats
+  // that match what is typed after it. A picked chat becomes a word,
   // `[@Title]`, kept like a dropped file's: it is one thing in the box, a
   // click opens the chat, and the agent is sent the chat's ID to read it by.
+  //
+  // Typing / at the very start of the message lists the commands this chat's
+  // agent takes here, with Harness's skills and `/model`. A picked command is
+  // typed in as plain text. A command not in the list is still sent as typed.
 
-  /** The @ being typed: where it and the cursor are, and the row the keys are on. */
-  let mention = $state<{ at: number; end: number; row: number } | null>(null);
-  /** An @ whose list was closed with Escape: it stays closed. */
+  /** The @ or / being typed: where it and the cursor are, and the row the keys are on. */
+  let suggest = $state<{ kind: "chat" | "command"; at: number; end: number; row: number } | null>(null);
+  /** An @ or / whose list was closed with Escape: it stays closed. */
   let dismissed = -1;
 
+  // The commands are read from the agent the first time a chat on it shows
+  // in a folder (once per run), once the agents are found, and again on a
+  // `/` if that failed; until then the last list is offered.
+  $effect(() => {
+    if (ready) fetchCommands(chat.agent, chat.root);
+  });
+  const commands = $derived(commandsFor(chat.agent, chat.root));
+
+  const typedWord = $derived(suggest ? chat.draft.slice(suggest.at + 1, suggest.end) : "");
   const mentioned = $derived.by(() => {
-    if (!mention) return [];
-    const typed = chat.draft.slice(mention.at + 1, mention.end).toLowerCase();
+    if (suggest?.kind !== "chat") return [];
+    const typed = typedWord.toLowerCase();
     return chats.filter((c) => c.title.toLowerCase().includes(typed)).slice(0, 8);
   });
+  const commanded = $derived<Command[]>(suggest?.kind === "command" ? matchCommands(commands, typedWord) : []);
+  const suggestRows = $derived(
+    suggest?.kind === "chat"
+      ? mentioned.map((c) => ({ key: c.id, label: c.title }))
+      : commanded.map((c) => ({ key: c.name, label: `/${c.name}`, detail: c.description })),
+  );
 
-  /** Looks for an @ being typed just before the cursor. */
-  function findMention() {
+  /** Looks for an @ or a / being typed just before the cursor. */
+  function findSuggest() {
     const at = box && document.activeElement === box && box.selectionStart === box.selectionEnd ? box.selectionStart : -1;
-    // After a space or at the start, so an address like me@example.com isn't one.
-    const typed = at < 0 || !chats.length ? null : chat.draft.slice(0, at).match(/(?:^|\s)@((?:\S[^\n@[\]]{0,39})?)$/);
+    const before = at < 0 ? "" : chat.draft.slice(0, at);
+    // A / only as the message's first word; an @ after a space or at the
+    // start, so an address like me@example.com isn't one.
+    const command = before.match(/^\/([^\s/]*)$/);
+    const mention = command || !chats.length ? null : before.match(/(?:^|\s)@((?:\S[^\n@[\]]{0,39})?)$/);
+    const typed = command ?? mention;
     if (!typed) {
-      mention = null;
+      suggest = null;
       dismissed = -1;
       return;
     }
+    const kind = command ? "command" : "chat";
+    if (command && ready) fetchCommands(chat.agent, chat.root);
     const start = at - typed[1].length - 1;
-    if (start === dismissed) mention = null;
-    else if (mention?.at !== start || mention.end !== at) mention = { at: start, end: at, row: 0 };
+    if (start === dismissed) suggest = null;
+    else if (suggest?.at !== start || suggest.end !== at || suggest.kind !== kind) suggest = { kind, at: start, end: at, row: 0 };
   }
 
-  /** Puts the picked chat's word where the @ and what was typed after it are. */
-  async function pick(picked: { id: string; title: string }) {
-    if (!mention) return;
-    const { at, end } = mention;
-    mention = null;
-    const insert = chat.addDraftChat(picked.id, picked.title) + " ";
-    await apply({ from: at, to: end, insert, selStart: at + insert.length, selEnd: at + insert.length });
+  /** Puts the picked row in where the @ or / and what was typed after it are. */
+  async function pick(i: number) {
+    if (!suggest) return;
+    const { kind, at, end } = suggest;
+    // Read before the list closes: the lists follow `suggest`.
+    const chatPicked = mentioned[i];
+    const commandPicked = commanded[i];
+    suggest = null;
+    if (kind === "chat") {
+      const picked = chatPicked;
+      if (!picked) return;
+      const insert = chat.addDraftChat(picked.id, picked.title) + " ";
+      await apply({ from: at, to: end, insert, selStart: at + insert.length, selEnd: at + insert.length });
+      return;
+    }
+    const picked = commandPicked;
+    if (!picked) return;
+    if (picked.harness === "model") {
+      // Take out what was typed (up to the end of the word) and open the menu.
+      const word = chat.draft.slice(at).match(/^\S*\s?/)?.[0] ?? "";
+      await apply({ from: at, to: at + word.length, insert: "", selStart: at, selEnd: at });
+      open = "model";
+      return;
+    }
+    // The whole first word is replaced, if the cursor was inside it.
+    const word = chat.draft.slice(at).match(/^\S*/)?.[0] ?? "";
+    const insert = `/${picked.name} `;
+    const to = at + word.length + (chat.draft[at + word.length] === " " ? 1 : 0);
+    await apply({ from: at, to, insert, selStart: at + insert.length, selEnd: at + insert.length });
   }
 
   /** The keys the open list takes: up and down, Enter or Tab to pick, Escape to close. */
-  function mentionKey(e: KeyboardEvent): boolean {
-    if (!mention || !mentioned.length) return false;
-    const rows = mentioned.length;
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      mention.row = (Math.min(mention.row, rows - 1) + (e.key === "ArrowDown" ? 1 : rows - 1)) % rows;
+  function suggestKey(e: KeyboardEvent): boolean {
+    if (!suggest || !suggestRows.length) return false;
+    const last = suggestRows.length - 1;
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      // The best is at the bottom, so Up goes further down the list.
+      const row = Math.min(suggest.row, last) + (e.key === "ArrowUp" ? 1 : -1);
+      suggest.row = Math.max(0, Math.min(last, row));
     } else if ((e.key === "Enter" || e.key === "Tab") && !e.shiftKey) {
-      void pick(mentioned[Math.min(mention.row, rows - 1)]);
+      void pick(Math.min(suggest.row, last));
     } else if (e.key === "Escape") {
-      dismissed = mention.at;
-      mention = null;
+      dismissed = suggest.at;
+      suggest = null;
       e.stopPropagation();
     } else {
       return false;
@@ -458,6 +519,14 @@
 
   async function send() {
     const text = chat.draft;
+    // `/model` is Harness's own: it opens the model menu, and nothing is sent.
+    if (/^\/model(\s|$)/.test(text.trim())) {
+      chat.draft = "";
+      await tick();
+      grow();
+      open = "model";
+      return;
+    }
     if (!text.trim() || !ready) return;
     chat.draft = "";
     await tick();
@@ -486,7 +555,7 @@
   // list starts the next item. Enter alone still sends.
   function onKey(e: KeyboardEvent) {
     if (e.isComposing) return;
-    if (mentionKey(e)) return;
+    if (suggestKey(e)) return;
     const { selectionStart: start, selectionEnd: end } = box;
     // Backspace just after a word, or Delete just before one, removes all of it.
     if ((e.key === "Backspace" || e.key === "Delete") && start === end && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -520,7 +589,7 @@
       <div class="field">
         {#if pieces}
           <div class="mirror" bind:this={mirror} aria-hidden="true">
-            {#each pieces as piece, i (i)}{#if piece.open}<span class="word" data-piece={i}>{piece.text}</span>{:else if piece.url}<span class="link" data-piece={i}>{piece.text}</span>{:else}{piece.text}{/if}{/each}
+            {#each pieces as piece, i (i)}{#if piece.open}<span class="word" data-piece={i}>{piece.text}</span>{:else if piece.command}<span class="command">{piece.text}</span>{:else if piece.url}<span class="link" data-piece={i}>{piece.text}</span>{:else}{piece.text}{/if}{/each}
           </div>
         {/if}
         <textarea
@@ -529,9 +598,9 @@
           class:see-through={!!pieces}
           oninput={() => {
             grow();
-            findMention();
+            findSuggest();
           }}
-          onblur={() => (mention = null)}
+          onblur={() => (suggest = null)}
           onkeydown={onKey}
           onpaste={onPaste}
           onclick={onClick}
@@ -543,16 +612,14 @@
           rows="1"
           placeholder={`Message ${agentLabel(chat.agent)}`}
         ></textarea>
-        {#if mention && mentioned.length}
-          {@const on = Math.min(mention.row, mentioned.length - 1)}
-          <!-- Pressing a row keeps the cursor in the box: the pick is typed in there. -->
-          <div class="menu left mention" role="listbox" aria-label="Chats in this project">
-            {#each mentioned as row, i (row.id)}
-              <button role="option" aria-selected={i === on} class:on={i === on} onpointerdown={(e) => { e.preventDefault(); void pick(row); }}>
-                {row.title}
-              </button>
-            {/each}
-          </div>
+        {#if suggest && suggestRows.length}
+          <SuggestMenu
+            rows={suggestRows}
+            bind:row={suggest.row}
+            onPick={(i) => void pick(i)}
+            label={suggest.kind === "chat" ? "Chats in this project" : "Commands"}
+            wide={suggest.kind === "command"}
+          />
         {/if}
       </div>
       {#if chat.busy}
@@ -676,7 +743,8 @@
     color: var(--bright);
     pointer-events: none;
   }
-  .mirror .word {
+  .mirror .word,
+  .mirror .command {
     color: var(--accent);
   }
   .mirror .link {
@@ -794,19 +862,6 @@
   .menu.left {
     right: auto;
     left: 0;
-  }
-  /* The chats to pick from after an @, above the box. */
-  .menu.mention {
-    max-width: 100%;
-  }
-  .mention button {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-  .mention button:hover {
-    color: var(--fg);
   }
   .menu .row {
     display: flex;

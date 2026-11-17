@@ -466,6 +466,23 @@ impl Terminals {
             .any(|t| t.live.is_some() && t.worktree.as_ref().is_some_and(|w| w.starts_with(root)))
     }
 
+    /// A project's folder moved: its tabs go with it, and one that starts in
+    /// the old folder starts in the new one. Shells already running stay as
+    /// they are.
+    pub fn project_moved(&self, from: &str, to: &str) {
+        {
+            let mut state = lock(&self.0.state);
+            for tab in state.tabs.values_mut().filter(|tab| tab.project == from) {
+                tab.project = to.to_string();
+                if let Some(folder) = crate::store::swap_root(&tab.folder.to_string_lossy(), from, to) {
+                    tab.folder = PathBuf::from(folder);
+                }
+            }
+        }
+        self.emit(from);
+        self.emit(to);
+    }
+
     /// A worktree folder is gone: its tabs close with a line saying why, and
     /// start again in the project's main folder.
     pub fn worktree_gone(&self, root: &Path, why: &str) {

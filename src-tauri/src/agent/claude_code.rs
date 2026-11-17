@@ -17,8 +17,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SideOptions, SpawnOptions, notes_instruction};
-use crate::events::{AgentEvent, ApprovalKind, BackgroundTask, Block, ContextPart, Decision, ModelInfo, SessionState};
+use super::{
+    AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SideOptions, SpawnOptions, notes_instruction,
+    preferences_instruction,
+};
+use crate::events::{AgentEvent, ApprovalKind, BackgroundTask, Block, CommandInfo, ContextPart, Decision, ModelInfo, SessionState};
 
 /// How many stderr lines to keep for an error message when the process dies.
 const STDERR_TAIL_LINES: usize = 30;
@@ -102,20 +105,35 @@ const CLAUDE_DOCS_INSTRUCTION: &str = "Claude Docs isn't available in this app."
 /// other claude.ai connectors stay; a deny rule alone hid the tools but left
 /// the instructions (tested on CLI 2.1.325; the connectors load after the
 /// first message).
-fn launch_settings(tools: &[AppTools], notes: Option<&Path>) -> String {
+fn launch_settings(opts: &SpawnOptions) -> String {
     let mut permissions = json!({ "ask": ["EnterWorktree"], "deny": CLAUDE_DOCS_DENY });
-    let mut allow: Vec<String> = tools.iter().map(|t| format!("mcp__{}", t.server)).collect();
-    if let Some(folder) = notes.and_then(Path::parent) {
+    let mut allow: Vec<String> = opts.tools.iter().map(|t| format!("mcp__{}", t.server)).collect();
+    // The chat's own folder, its project's docs folder and its project's memory.
+    let notes = opts.notes.as_deref().and_then(Path::parent);
+    for folder in notes.into_iter().chain(opts.project_docs.as_deref()).chain(opts.memory.as_deref()) {
         allow.push(format!("Edit(/{}/**)", folder.display()));
     }
     if !allow.is_empty() {
         permissions["allow"] = json!(allow);
     }
-    json!({
+    let mut settings = json!({
         "permissions": permissions,
         "deniedMcpServers": [{ "serverName": CLAUDE_DOCS_SERVER }],
-    })
-    .to_string()
+    });
+    if let Some(memory) = &opts.memory {
+        settings["autoMemoryDirectory"] = json!(memory);
+    }
+    settings.to_string()
+}
+
+/// Where Claude Code keeps its memory: the project's memory folder in the
+/// app's home folder, not its own per-folder one, so every agent and every
+/// worktree of the project shares one memory. Claude Code saves and loads it
+/// exactly as before; only the place changes. A setting given with
+/// `--settings` is honoured for this (tested on CLI 2.1.326: a new chat read
+/// the index there, saved a note there, and a resumed chat followed it).
+fn memory_settings(memory: &Path) -> String {
+    json!({ "autoMemoryDirectory": memory }).to_string()
 }
 
 /// Declares the app's own tools as an in-process ("sdk") MCP server: Claude
@@ -148,11 +166,9 @@ fn apply_plan_edit(input: &mut Value, plan: Option<String>) {
 
 /// Read access to the folder holding the chat's notes, without asking (tested
 /// on CLI 2.1.322, in default mode and with a side chat's read-only tools).
-fn notes_access(notes: &Path) -> Vec<String> {
-    match notes.parent() {
-        Some(folder) => vec!["--add-dir".to_string(), folder.display().to_string()],
-        None => Vec::new(),
-    }
+fn notes_access(notes: &Path, project_docs: Option<&Path>) -> Vec<String> {
+    let folders = notes.parent().into_iter().chain(project_docs);
+    folders.flat_map(|folder| ["--add-dir".to_string(), folder.display().to_string()]).collect()
 }
 
 /// The command line for one chat's process.
@@ -177,7 +193,10 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
     ]
     .map(String::from)
     .to_vec();
-    args.extend(["--settings".to_string(), launch_settings(&opts.tools, opts.notes.as_deref())]);
+    args.extend(["--settings".to_string(), launch_settings(opts)]);
+    if let Some(memory) = &opts.memory {
+        args.extend(["--add-dir".to_string(), memory.display().to_string()]);
+    }
     let mut instructions = format!("{PLAN_INSTRUCTION}\n\n{WORKTREE_INSTRUCTION}");
     if !opts.tools.is_empty() {
         args.extend(["--mcp-config".to_string(), mcp_config(&opts.tools)]);
@@ -187,11 +206,15 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
         }
     }
     if let Some(notes) = &opts.notes {
-        args.extend(notes_access(notes));
+        args.extend(notes_access(notes, opts.project_docs.as_deref()));
         instructions.push_str("\n\n");
-        instructions.push_str(&notes_instruction(notes, true));
+        instructions.push_str(&notes_instruction(notes, opts.project_docs.as_deref(), true));
         instructions.push(' ');
         instructions.push_str(CLAUDE_DOCS_INSTRUCTION);
+    }
+    if let Some(preferences) = &opts.preferences {
+        instructions.push_str("\n\n");
+        instructions.push_str(&preferences_instruction(preferences));
     }
     // Per launch: a resumed session does not remember it.
     args.extend(["--append-system-prompt".to_string(), instructions]);
@@ -233,10 +256,19 @@ fn side_args(opts: &SpawnOptions, side: &SideOptions) -> Vec<String> {
     .map(String::from)
     .to_vec();
     let mut instructions = SIDE_INSTRUCTION.to_string();
+    // The same memory as its chat: read when it starts, like the main chat's.
+    if let Some(memory) = &opts.memory {
+        args.extend(["--settings".to_string(), memory_settings(memory)]);
+        args.extend(["--add-dir".to_string(), memory.display().to_string()]);
+    }
     if let Some(notes) = &opts.notes {
-        args.extend(notes_access(notes));
+        args.extend(notes_access(notes, opts.project_docs.as_deref()));
         instructions.push_str("\n\n");
-        instructions.push_str(&notes_instruction(notes, false));
+        instructions.push_str(&notes_instruction(notes, opts.project_docs.as_deref(), false));
+    }
+    if let Some(preferences) = &opts.preferences {
+        instructions.push_str("\n\n");
+        instructions.push_str(&preferences_instruction(preferences));
     }
     args.extend(["--append-system-prompt".to_string(), instructions]);
     if let Some(id) = &opts.resume_id {
@@ -491,62 +523,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
     // nothing is spent. The list takes about a second, the effort defaults below
     // about 7 more (tested on CLI 2.1.322).
     fn list_models(&self, binary: &Path, _efforts_for: Option<&[String]>) -> Result<Vec<ModelInfo>, String> {
-        use std::io::{BufRead, Write};
-
-        let mut cmd = std::process::Command::new(binary);
-        cmd.args([
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--permission-prompt-tool",
-            "stdio",
-        ])
-        .current_dir(std::env::temp_dir())
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("ANTHROPIC_AUTH_TOKEN")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("Could not start Claude Code: {e}"))?;
-        let mut stdin = child.stdin.take().ok_or("Claude Code has no stdin")?;
-        let stdout = child.stdout.take().ok_or("Claude Code has no stdout")?;
-
-        // Read on another thread so a silent process can't hang the caller.
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
-                if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                    if value["type"] == "control_response" && tx.send(value).is_err() {
-                        return;
-                    }
-                }
-            }
-        });
-        // Sends one request and waits for its reply.
-        let mut ask = |id: &str, request: Value, wait: Duration| -> Option<Value> {
-            let line = json!({ "type": "control_request", "request_id": id, "request": request });
-            writeln!(stdin, "{line}").and_then(|_| stdin.flush()).ok()?;
-            let until = std::time::Instant::now() + wait;
-            loop {
-                let reply = rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())).ok()?;
-                if reply["response"]["request_id"] == id {
-                    return Some(reply);
-                }
-            }
-        };
-
-        let reply = ask("models", json!({ "subtype": "initialize" }), Duration::from_secs(15));
+        let mut probe = Probe::start(binary, &std::env::temp_dir())?;
+        let reply = probe.ask("models", json!({ "subtype": "initialize" }), Duration::from_secs(15));
         let mut models = reply.as_ref().map(parse_models).unwrap_or_default();
 
         // Each model's default effort: Claude Code doesn't list it, so switch
@@ -558,20 +536,27 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 continue;
             }
             let wait = Duration::from_secs(5);
-            let switched = ask(&format!("m{i}"), json!({ "subtype": "set_model", "model": model.value }), wait);
-            let settings = switched.and_then(|_| ask(&format!("s{i}"), json!({ "subtype": "get_settings" }), wait));
+            let switched = probe.ask(&format!("m{i}"), json!({ "subtype": "set_model", "model": model.value }), wait);
+            let settings = switched.and_then(|_| probe.ask(&format!("s{i}"), json!({ "subtype": "get_settings" }), wait));
             let Some(settings) = settings else { break };
             model.default_effort = settings["response"]["response"]["applied"]["effort"]
                 .as_str()
                 .map(str::to_owned);
         }
 
-        drop(stdin);
-        let _ = child.kill();
-        let _ = child.wait();
-
         reply.ok_or("Claude Code didn't list its models in time")?;
         Ok(models)
+    }
+
+    // The same `initialize` reply lists the commands, already cut down to the
+    // ones that work without Claude Code's own screen, with the folder's
+    // skills among them. About a second (tested on CLI 2.1.326).
+    fn list_commands(&self, binary: &Path, folder: &Path) -> Result<Vec<CommandInfo>, String> {
+        let mut probe = Probe::start(binary, folder)?;
+        let reply = probe
+            .ask("commands", json!({ "subtype": "initialize" }), Duration::from_secs(15))
+            .ok_or("Claude Code didn't list its commands in time")?;
+        Ok(parse_commands(&reply))
     }
 
     fn make_title(&self, binary: &Path, first_message: &str) -> Result<String, String> {
@@ -641,10 +626,7 @@ fn forget_saved_session(agent_session_id: &str) {
     }
     let base = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(std::path::PathBuf::from)
-        .or_else(|| {
-            let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-            std::env::var_os(var).map(|h| std::path::PathBuf::from(h).join(".claude"))
-        });
+        .or_else(|| crate::home::user_home().map(|home| home.join(".claude")));
     let Some(projects) = base.map(|b| b.join("projects")) else {
         return;
     };
@@ -757,6 +739,112 @@ fn clean_title(reply: &str) -> String {
         .trim_end_matches('.')
         .trim()
         .to_string()
+}
+
+/// A short-lived Claude Code process that takes control requests and sends
+/// no chat message, so nothing is spent. Killed when dropped.
+struct Probe {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    replies: std::sync::mpsc::Receiver<Value>,
+}
+
+impl Probe {
+    fn start(binary: &Path, folder: &Path) -> Result<Self, String> {
+        use std::io::BufRead;
+
+        let mut cmd = std::process::Command::new(binary);
+        cmd.args([
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--permission-prompt-tool",
+            "stdio",
+        ])
+        .current_dir(folder)
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Could not start Claude Code: {e}"))?;
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().ok_or("Claude Code has no stdout")?;
+        // Read on another thread so a silent process can't hang the caller.
+        let (tx, replies) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                    if value["type"] == "control_response" && tx.send(value).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        Ok(Self { child, stdin, replies })
+    }
+
+    /// Sends one request and waits for its reply.
+    fn ask(&mut self, id: &str, request: Value, wait: Duration) -> Option<Value> {
+        use std::io::Write;
+
+        let line = json!({ "type": "control_request", "request_id": id, "request": request });
+        let stdin = self.stdin.as_mut()?;
+        writeln!(stdin, "{line}").and_then(|_| stdin.flush()).ok()?;
+        let until = std::time::Instant::now() + wait;
+        loop {
+            let reply = self
+                .replies
+                .recv_timeout(until.saturating_duration_since(std::time::Instant::now()))
+                .ok()?;
+            if reply["response"]["request_id"] == id {
+                return Some(reply);
+            }
+        }
+    }
+}
+
+impl Drop for Probe {
+    fn drop(&mut self) {
+        self.stdin.take();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Pull the command list out of an `initialize` reply. Each entry has `name`,
+/// `description`, `argumentHint` (often empty) and maybe `aliases`.
+fn parse_commands(reply: &Value) -> Vec<CommandInfo> {
+    reply["response"]["response"]["commands"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let name = c["name"].as_str().filter(|n| !n.is_empty())?.to_string();
+            Some(CommandInfo {
+                name,
+                description: c["description"].as_str().unwrap_or_default().to_string(),
+                hint: c["argumentHint"].as_str().filter(|h| !h.trim().is_empty()).map(str::to_owned),
+                aliases: c["aliases"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a.as_str().map(str::to_owned))
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 /// Pull the model list out of an `initialize` reply. Each entry has `value`
@@ -1521,6 +1609,9 @@ mod tests {
                 side: None,
                 tools: Vec::new(),
                 notes: None,
+                project_docs: None,
+                memory: None,
+                preferences: None,
             })
         };
         let args = with(Some("max"));
@@ -1542,6 +1633,9 @@ mod tests {
             side: None,
             tools: Vec::new(),
             notes: None,
+            project_docs: None,
+            memory: None,
+            preferences: None,
         });
         assert!(args.contains(&"--replay-user-messages".to_string()));
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
@@ -1584,6 +1678,9 @@ mod tests {
             side: None,
             tools: vec![echo_tools()],
             notes: None,
+            project_docs: None,
+            memory: None,
+            preferences: None,
         });
         let at = args.iter().position(|a| a == "--mcp-config").unwrap();
         let config: Value = serde_json::from_str(&args[at + 1]).unwrap();
@@ -1611,6 +1708,9 @@ mod tests {
             side: None,
             tools: vec![echo_tools(), more],
             notes: None,
+            project_docs: None,
+            memory: None,
+            preferences: None,
         });
         let at = args.iter().position(|a| a == "--mcp-config").unwrap();
         let config: Value = serde_json::from_str(&args[at + 1]).unwrap();
@@ -1642,6 +1742,9 @@ mod tests {
             side: None,
             tools: vec![chats],
             notes: None,
+            project_docs: None,
+            memory: None,
+            preferences: None,
         });
         let at = args.iter().position(|a| a == "--settings").unwrap();
         let settings: Value = serde_json::from_str(&args[at + 1]).unwrap();
@@ -1662,12 +1765,53 @@ mod tests {
             side,
             tools: Vec::new(),
             notes: Some("/data/notes/chat-1/notes.md".into()),
+            project_docs: None,
+            memory: None,
+            preferences: None,
         };
         for args in [launch_args(&opts(None)), launch_args(&opts(Some(SideOptions::default())))] {
             assert!(args.windows(2).any(|w| w == ["--add-dir", "/data/notes/chat-1"]));
             let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
             assert!(args[at + 1].contains("/data/notes/chat-1/notes.md"));
         }
+    }
+
+    #[test]
+    fn a_chat_may_read_and_write_its_projects_docs_and_a_side_chat_may_read_them() {
+        let opts = |side: Option<SideOptions>| SpawnOptions {
+            binary: "claude".into(),
+            project_path: "/work".into(),
+            resume_id: None,
+            mode: None,
+            model: None,
+            effort: None,
+            side,
+            tools: Vec::new(),
+            notes: Some("/home/projects/-work/chats/chat-1/notes.md".into()),
+            project_docs: Some("/home/projects/-work/docs".into()),
+            memory: None,
+            preferences: None,
+        };
+        let arg_after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).map(|at| args[at + 1].clone());
+
+        let main = launch_args(&opts(None));
+        let settings: Value = serde_json::from_str(&arg_after(&main, "--settings").unwrap()).unwrap();
+        assert_eq!(
+            settings["permissions"]["allow"],
+            json!(["Edit(//home/projects/-work/chats/chat-1/**)", "Edit(//home/projects/-work/docs/**)"])
+        );
+        let prompt = arg_after(&main, "--append-system-prompt").unwrap();
+        assert!(prompt.contains("write it into the project's docs folder, /home/projects/-work/docs, delete the old file"));
+        assert!(prompt.contains("Put a doc into the repo itself only when the user asks for that in so many words."));
+
+        let side = launch_args(&opts(Some(SideOptions::default())));
+        for args in [&main, &side] {
+            assert!(args.windows(2).any(|w| w == ["--add-dir", "/home/projects/-work/chats/chat-1"]));
+            assert!(args.windows(2).any(|w| w == ["--add-dir", "/home/projects/-work/docs"]));
+        }
+        let prompt = arg_after(&side, "--append-system-prompt").unwrap();
+        assert!(prompt.contains("The project's saved docs are in /home/projects/-work/docs."));
+        assert!(!prompt.contains("write it into"), "a side chat can't write docs");
     }
 
     #[test]
@@ -1682,6 +1826,9 @@ mod tests {
             side,
             tools: Vec::new(),
             notes: Some("/data/notes/chat-1/notes.md".into()),
+            project_docs: None,
+            memory: None,
+            preferences: None,
         };
         let arg_after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).map(|at| args[at + 1].clone());
 
@@ -1702,10 +1849,74 @@ mod tests {
         assert!(!prompt.contains(CLAUDE_DOCS_INSTRUCTION));
     }
 
+    /// A chat with nothing extra: no tools, notes, docs folder or memory.
+    fn bare_options() -> SpawnOptions {
+        SpawnOptions {
+            binary: "claude".into(),
+            project_path: "/work".into(),
+            resume_id: None,
+            mode: None,
+            model: None,
+            effort: None,
+            side: None,
+            tools: Vec::new(),
+            notes: None,
+            project_docs: None,
+            memory: None,
+            preferences: None,
+        }
+    }
+
+    #[test]
+    fn claude_code_keeps_its_memory_in_the_projects_memory_folder() {
+        let arg_after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).map(|at| args[at + 1].clone());
+        let memory = Some("/home/projects/-work/memory".into());
+
+        let main = launch_args(&SpawnOptions { memory: memory.clone(), ..bare_options() });
+        let settings: Value = serde_json::from_str(&arg_after(&main, "--settings").unwrap()).unwrap();
+        assert_eq!(settings["autoMemoryDirectory"], "/home/projects/-work/memory");
+        // Saved to without a card, as its own memory folder was.
+        assert_eq!(settings["permissions"]["allow"], json!(["Edit(//home/projects/-work/memory/**)"]));
+        // Nothing is said about memory: Claude Code saves and loads it as before.
+        assert!(!arg_after(&main, "--append-system-prompt").unwrap().contains("memory"));
+
+        // A side chat reads the same memory.
+        let side = launch_args(&SpawnOptions { memory, side: Some(SideOptions::default()), ..bare_options() });
+        let settings: Value = serde_json::from_str(&arg_after(&side, "--settings").unwrap()).unwrap();
+        assert_eq!(settings, json!({ "autoMemoryDirectory": "/home/projects/-work/memory" }));
+        for args in [&main, &side] {
+            assert!(args.windows(2).any(|w| w == ["--add-dir", "/home/projects/-work/memory"]));
+        }
+
+        // With no memory folder, its own is left alone.
+        let plain: Value = serde_json::from_str(&arg_after(&launch_args(&bare_options()), "--settings").unwrap()).unwrap();
+        assert!(plain.get("autoMemoryDirectory").is_none());
+    }
+
+    #[test]
+    fn the_users_preferences_are_in_a_chats_and_a_side_chats_instructions() {
+        let arg_after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).map(|at| args[at + 1].clone());
+        let preferences = Some(crate::home::Preferences {
+            path: "/home/preferences.md".into(),
+            text: "# Working preferences\n- Be brief.".into(),
+        });
+        let told = "The user's own standing instructions, kept in /home/preferences.md. Follow them exactly; where \
+they differ from your defaults, they win. Pass the ones that matter on to any helper agent you start.\n\
+# Working preferences\n- Be brief.";
+        let main = launch_args(&SpawnOptions { preferences: preferences.clone(), ..bare_options() });
+        assert!(arg_after(&main, "--append-system-prompt").unwrap().ends_with(told));
+        let side = launch_args(&SpawnOptions { preferences, side: Some(SideOptions::default()), ..bare_options() });
+        assert!(arg_after(&side, "--append-system-prompt").unwrap().ends_with(told));
+        // None: nothing is said.
+        let plain = arg_after(&launch_args(&bare_options()), "--append-system-prompt").unwrap();
+        assert!(!plain.contains("standing instructions"));
+    }
+
     #[test]
     fn claude_docs_is_off_in_every_main_chat() {
         for (tools, notes) in [(Vec::new(), None), (vec![echo_tools()], Some(Path::new("/data/notes/c/notes.md")))] {
-            let settings: Value = serde_json::from_str(&launch_settings(&tools, notes)).unwrap();
+            let opts = SpawnOptions { tools, notes: notes.map(Into::into), ..bare_options() };
+            let settings: Value = serde_json::from_str(&launch_settings(&opts)).unwrap();
             assert_eq!(settings["deniedMcpServers"], json!([{ "serverName": "claude.ai Claude Docs" }]));
             assert_eq!(settings["permissions"]["deny"], json!(CLAUDE_DOCS_DENY));
             assert_eq!(settings["permissions"]["ask"], json!(["EnterWorktree"]));
@@ -1931,6 +2142,9 @@ mod tests {
             side: None,
             tools: Vec::new(),
             notes: None,
+            project_docs: None,
+            memory: None,
+            preferences: None,
         });
         assert!(args.contains(&"--forward-subagent-text".to_string()));
     }
@@ -2005,6 +2219,40 @@ mod tests {
         );
         assert!(t.events.is_empty());
         assert!(t.reply.unwrap().contains(r#""request_id":"r9""#));
+    }
+
+    #[test]
+    fn commands_are_read_from_the_initialize_reply() {
+        let reply = json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "commands", "response": { "commands": [
+            { "name": "compact", "description": "Free up context by summarizing the conversation so far", "argumentHint": "<optional custom summarization instructions>", "builtin": true },
+            { "name": "usage", "description": "Show session cost", "argumentHint": "", "aliases": ["cost", "stats"], "builtin": true },
+            { "name": "design:ux-copy", "description": "(design) Write or review UX copy" },
+            { "description": "No name, so skipped" },
+        ]}}});
+        assert_eq!(
+            parse_commands(&reply),
+            vec![
+                CommandInfo {
+                    name: "compact".into(),
+                    description: "Free up context by summarizing the conversation so far".into(),
+                    hint: Some("<optional custom summarization instructions>".into()),
+                    aliases: vec![],
+                },
+                CommandInfo {
+                    name: "usage".into(),
+                    description: "Show session cost".into(),
+                    hint: None,
+                    aliases: vec!["cost".into(), "stats".into()],
+                },
+                CommandInfo {
+                    name: "design:ux-copy".into(),
+                    description: "(design) Write or review UX copy".into(),
+                    hint: None,
+                    aliases: vec![],
+                },
+            ]
+        );
+        assert!(parse_commands(&json!({})).is_empty());
     }
 
     #[test]
@@ -2316,6 +2564,9 @@ mod tests {
                 }),
                 tools: Vec::new(),
                 notes: None,
+                project_docs: None,
+                memory: None,
+                preferences: None,
             })
         };
         let first = side(Some("main-1"));

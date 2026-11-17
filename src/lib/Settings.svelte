@@ -3,6 +3,8 @@
   // is remembered. Also home to things that aren't part of the work at hand,
   // like the trash.
   import BarIcon from "./BarIcon.svelte";
+  import Preferences from "./Preferences.svelte";
+  import { refreshSkills } from "./commands.svelte";
   import { CLAUDE, importSkill, listSkills, pickFile, pickFolder, removeSkill, type ModelInfo, type SkillInfo } from "./ipc";
   import type { AppState, Limit } from "./state/app.svelte";
   import {
@@ -156,6 +158,12 @@
   }
   loadSkills();
 
+  /** After an import or a removal: this list, and the `/` menu's. */
+  async function skillsChanged() {
+    await loadSkills();
+    void refreshSkills();
+  }
+
   async function importFrom(pick: () => Promise<string | null>) {
     skillProblem = "";
     removing = null;
@@ -163,7 +171,7 @@
       const path = await pick();
       if (!path) return;
       await importSkill(path);
-      await loadSkills();
+      await skillsChanged();
     } catch (e) {
       skillProblem = String(e);
     }
@@ -174,9 +182,21 @@
     removing = null;
     try {
       await removeSkill(name);
-      await loadSkills();
+      await skillsChanged();
     } catch (e) {
       skillProblem = String(e);
+    }
+  }
+
+  /** A page within Settings, in place of the list; null for the list. */
+  let page = $state<"preferences" | null>(null);
+
+  /** Escape on a page goes back to the list, not out of Settings. Caught
+   *  before the app's own key handler, which closes Settings. */
+  function pageKey(e: KeyboardEvent) {
+    if (e.key === "Escape" && page) {
+      e.stopPropagation();
+      page = null;
     }
   }
 
@@ -187,13 +207,23 @@
   }
 </script>
 
+<svelte:window onkeydowncapture={pageKey} />
+
 <!-- It covers the title bar's strip, so its empty space moves the window. -->
 <div class="settings" data-tauri-drag-region>
   <div class="inner">
     <div class="head">
-      <span class="title">Settings</span>
+      {#if page}
+        <span class="title"><button class="back" onclick={() => (page = null)}>Settings</button> / {page}</span>
+      {:else}
+        <span class="title">Settings</span>
+      {/if}
       <button class="close" title="Close" onclick={onclose}><BarIcon name="close" /></button>
     </div>
+
+    {#if page === "preferences"}
+      <Preferences />
+    {:else}
 
     <section>
       <div class="label">Spacing</div>
@@ -262,6 +292,14 @@
         {/if}
       </section>
     {/if}
+
+    <section>
+      <div class="label">Agents</div>
+      <div class="row">
+        <span class="name">preferences</span>
+        <button class="act" onclick={() => (page = "preferences")}>edit</button>
+      </div>
+    </section>
 
     <section>
       <div class="label">Skills</div>
@@ -339,6 +377,7 @@
         </div>
       {/if}
     </section>
+    {/if}
   </div>
 </div>
 
@@ -377,6 +416,14 @@
   }
   .head button:hover {
     color: var(--fg);
+  }
+  .head .title {
+    display: flex;
+    gap: 1ch;
+  }
+  .head .back {
+    color: var(--accent);
+    font-weight: 700;
   }
   .label {
     color: var(--bright);

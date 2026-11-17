@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::agent::{AgentAdapter, Agents, AppTools, EventSink, ImagePayload, RunningAgent, SpawnOptions};
 use crate::events::{AgentEvent, Block, Decision, Envelope, SessionState};
 use crate::images::{self, ImageRef, Images};
+use crate::home::Home;
 use crate::notes::Notes;
 use crate::skills::Skills;
 use crate::store::Store;
@@ -35,6 +36,23 @@ pub struct TerminalHooks {
     /// A worktree folder is gone, and why ("branch merged", "chat deleted",
     /// "cleaned up").
     pub gone: Arc<dyn Fn(&Path, &str) + Send + Sync>,
+    /// A project's folder moved, from one path to another: its tabs follow.
+    pub moved: Arc<dyn Fn(&str, &str) + Send + Sync>,
+}
+
+/// Whether a project's folder is gone in the way a moved or renamed folder
+/// is: not there, while the drive it was on is. A folder on a drive that
+/// isn't connected is only out of reach, and nothing should follow it.
+pub fn folder_gone(path: &Path) -> bool {
+    if path.is_dir() {
+        return false;
+    }
+    let drive: Option<PathBuf> = if cfg!(windows) {
+        path.components().next().map(|prefix| Path::new(prefix.as_os_str()).join(std::path::MAIN_SEPARATOR_STR))
+    } else {
+        path.starts_with("/Volumes").then(|| path.components().take(3).collect())
+    };
+    drive.is_none_or(|drive| drive.is_dir())
 }
 
 /// How long a chat sits idle before its process is asked to exit.
@@ -83,6 +101,14 @@ fn with_app_notes(notes: &[String], text: &str) -> String {
         return text.to_string();
     }
     format!("(From the app, not the user: {})\n\n{text}", notes.join(" "))
+}
+
+/// The docs folder of the chat's project, made so the agent can be pointed at
+/// it. None for a chat with no project yet, or if it can't be made.
+pub fn project_docs_for(notes: &Notes, chat: &str) -> Option<PathBuf> {
+    let docs = notes.project_docs(chat)?;
+    std::fs::create_dir_all(&docs).ok()?;
+    Some(docs)
 }
 
 /// The chat's notes file, its folder made so the agent can be pointed at it.
@@ -144,8 +170,10 @@ struct Inner {
     data_dir: PathBuf,
     /// Pasted images and images from tool results.
     images: Images,
-    /// Each chat's notes.
+    /// Each chat's own folder: its notes and docs.
     notes: Notes,
+    /// Where chats' folders and projects' docs are kept (`~/.harness`).
+    home: Home,
     /// The app's own skills, offered to every chat's agent.
     skills: Skills,
     /// Finds a branch's pull request (GitHub in the app, a stand-in in tests).
@@ -168,14 +196,14 @@ struct Inner {
 pub struct SessionManager(Arc<Inner>);
 
 impl SessionManager {
-    pub fn new(agents: Agents, store: Arc<Store>, out: Out, data_dir: PathBuf) -> Self {
+    pub fn new(agents: Agents, store: Arc<Store>, out: Out, data_dir: PathBuf, home: Home) -> Self {
         let timings = Timings {
             idle: None,
             close_grace: CLOSE_GRACE,
             worktree_idle: None,
             keep: None,
         };
-        Self::build(agents, store, out, timings, data_dir, PrLookup::github())
+        Self::build(agents, store, out, timings, data_dir, home, PrLookup::github())
     }
 
     fn build(
@@ -184,17 +212,19 @@ impl SessionManager {
         out: Out,
         timings: Timings,
         data_dir: PathBuf,
+        home: Home,
         pr_lookup: PrLookup,
     ) -> Self {
         Self(Arc::new(Inner {
             agents,
+            notes: Notes::for_store(home.clone(), store.clone()),
+            home,
             store,
             out,
             sessions: Mutex::default(),
             start_lock: tokio::sync::Mutex::default(),
             timings,
             images: Images::new(data_dir.join("images")),
-            notes: Notes::new(data_dir.join("notes")),
             skills: Skills::new(data_dir.join("skills")),
             data_dir,
             pr_lookup,
@@ -237,6 +267,27 @@ impl SessionManager {
     /// Chats' notes.
     pub fn notes(&self) -> &Notes {
         &self.0.notes
+    }
+
+    /// Where chats' folders and projects' docs are kept.
+    pub fn home(&self) -> &Home {
+        &self.0.home
+    }
+
+    /// Moves chat folders kept the old way, under the data folder, into
+    /// their projects in the home folder, and has each moved chat's agent
+    /// told with its next message. Run once at start, before the sweep.
+    pub fn move_chat_folders(&self) {
+        for (chat, from, to) in self.0.notes.migrate(&self.0.data_dir.join("notes")) {
+            let note = format!(
+                "This chat's own folder moved from {} to {}. Its notes and docs are there now, so use the new paths.",
+                from.display(),
+                to.display()
+            );
+            if let Err(e) = self.0.store.add_pending_note(&chat, &note) {
+                eprintln!("harness: couldn't note a chat's moved folder: {e}");
+            }
+        }
     }
 
     /// The app's own skills.
@@ -362,6 +413,20 @@ impl SessionManager {
             self.wait_for_exit(session_id).await?;
         }
 
+        // A first message in a folder that isn't a project yet: it may be a
+        // project whose folder was moved or renamed, come back under a new
+        // path. Then that project follows it here, with its chats and docs.
+        let project = project_path.to_string_lossy().into_owned();
+        let mut moved_from = None;
+        if show && !inner.store.has_project(&project)? {
+            if let Some(from) = self.find_moved(&project_path).await {
+                match self.relocate_project(&from, &project).await {
+                    Ok(_) => moved_from = Some(from),
+                    Err(e) => eprintln!("harness: couldn't bring {from} along to {project}: {e}"),
+                }
+            }
+        }
+
         let _starting = inner.start_lock.lock().await;
 
         // Save the chat first, so its events have somewhere to go.
@@ -373,6 +438,8 @@ impl SessionManager {
             model.as_deref().unwrap_or("default"),
         )?;
         if created {
+            // Notes typed before this first message move in under the project.
+            inner.notes.adopt(session_id);
             inner.store.set_agent(session_id, &agent_id)?;
         }
         if let Some(effort) = &effort {
@@ -389,6 +456,10 @@ impl SessionManager {
                     images: refs,
                 },
             );
+        }
+        // Said in the chat that found it: the project's folder had moved.
+        if let Some(from) = moved_from {
+            self.record(session_id, AgentEvent::ProjectMoved { from, to: project.clone() });
         }
         if created {
             let folder = project_path.clone();
@@ -432,6 +503,9 @@ impl SessionManager {
                         .map(|tools| tools(session_id, &project_path.to_string_lossy()))
                         .unwrap_or_default(),
                     notes: notes_for(&inner.notes, session_id),
+                    project_docs: project_docs_for(&inner.notes, session_id),
+                    memory: inner.notes.project_memory(session_id),
+                    preferences: inner.home.preferences(),
                 },
                 self.sink(session_id, run),
             );
@@ -460,19 +534,138 @@ impl SessionManager {
         // A typed `/name` for one of the app's skills goes to the agent with
         // the skill attached; the chat keeps what the user typed.
         let expanded = if show { inner.skills.expand(text) } else { None };
-        let mut text = with_app_notes(app_notes, expanded.as_deref().unwrap_or(text));
+        // Something the app left for this chat's agent (its folder moved,
+        // say) is told once, with the next message the user sends.
+        // A `/command` handed on to the agent stays exactly as typed: a note
+        // after it would be read as the command's arguments. What the app
+        // has to say waits for the next message.
+        let command = expanded.is_none() && text.trim_start().starts_with('/');
+        let mut app_notes = app_notes.to_vec();
+        if show && !created && !command {
+            app_notes.extend(inner.store.take_pending_note(session_id).ok().flatten());
+        }
+        let mut text = with_app_notes(&app_notes, expanded.as_deref().unwrap_or(text));
         // A new chat's first message carries the project's latest chats, so
         // the agent can spot a passing mention of one. Said here once, not in
         // the instructions: those are sent again on every start, and a list
         // that changes would make a resumed chat pay for its history anew.
         // It goes after the user's words: Cursor titles a chat from the start
         // of its first message.
-        if created && show {
+        if created && show && !command {
             if let Some(note) = crate::chats::titles_note(&inner.store, &project_path.to_string_lossy(), session_id) {
                 text.push_str(&format!("\n\n(From the app, not the user: {note})"));
             }
         }
+        // The user's preferences are in each agent's instructions, and a short
+        // reminder rides with every message: agents drift from them in a long
+        // chat, and Cursor hears its instructions only when a conversation
+        // starts. After the user's words, like the note above.
+        if show && !command {
+            if let Some(reminder) = self.reminder(&agent_id, &project_path.to_string_lossy()) {
+                text.push_str(&format!("\n\n(From the app, not the user: {reminder})"));
+            }
+        }
         agent.send_user_message(&text, &payloads, message_id)
+    }
+
+    /// A project's folder was moved or renamed, from `from` to `to`: the
+    /// project, and everything kept by its path, is re-pointed. Its chats
+    /// follow (they belong to the project, not the path); so do its saved
+    /// terminal tabs, each chat's worktree record and the worktrees' own
+    /// links to the repo, and its docs, memory and chat folders in the home
+    /// folder. Chats running there are closed, to start again in the new
+    /// folder, and each chat's agent is told once. When `to` is a project
+    /// already, the two become one. Returns the moved chats' IDs.
+    pub async fn relocate_project(&self, from: &str, to: &str) -> Result<Vec<String>, String> {
+        if from == to {
+            return Err("That is the folder it is in.".into());
+        }
+        if !Path::new(to).is_dir() {
+            return Err(format!("Not a folder: {to}"));
+        }
+        if Path::new(from).is_dir() {
+            return Err("That project's folder is still there.".into());
+        }
+        let inner = &self.0;
+        let new_folder = PathBuf::from(to);
+        let repo = blocking(move || worktree::repo_of(&new_folder)).await;
+        let chats = inner
+            .store
+            .relocate_project(from, to, repo.as_ref().map(|(root, subpath)| (root.as_path(), subpath.as_str())))?;
+
+        // Anything still running there was started for the old folder.
+        for chat in &chats {
+            self.close(chat);
+        }
+        for chat in &chats {
+            let _ = self.wait_for_exit(chat).await;
+        }
+        {
+            let mut sessions = inner.sessions.lock().unwrap();
+            for chat in &chats {
+                if let Some(session) = sessions.get_mut(chat) {
+                    session.repo_root = None;
+                }
+            }
+        }
+        // The chats' worktrees point at the repo where it was.
+        if let Some((root, _)) = repo {
+            if let Err(e) = blocking(move || worktree::repair(&root)).await {
+                eprintln!("harness: couldn't link the moved repo's worktrees again: {e}");
+            }
+        }
+        crate::github::forget_under(Path::new(from));
+        let (home, old, new) = (inner.home.clone(), from.to_string(), to.to_string());
+        blocking(move || home.move_project(&old, &new)).await;
+        if let Some(terminal) = inner.terminal.get() {
+            (terminal.moved)(from, to);
+        }
+        Ok(chats)
+    }
+
+    /// For a folder that isn't a project yet: the one project it is, moved.
+    /// That is a project whose folder is gone and whose repo this is, going
+    /// by the commit its newest chat noted when it began. None unless
+    /// exactly one fits: a folder that isn't a repo, or two missing clones
+    /// of one repo, are left for the user to point at.
+    async fn find_moved(&self, folder: &Path) -> Option<String> {
+        let gone: Vec<(String, String)> = self
+            .0
+            .store
+            .project_commits()
+            .ok()?
+            .into_iter()
+            .filter_map(|(path, commit)| Some((path, commit?)))
+            .filter(|(path, _)| folder_gone(Path::new(path)))
+            .collect();
+        if gone.is_empty() {
+            return None;
+        }
+        let folder = folder.to_path_buf();
+        blocking(move || {
+            let mut same = gone.into_iter().filter(|(_, commit)| worktree::has_commit(&folder, commit));
+            match (same.next(), same.next()) {
+                (Some((path, _)), None) => Some(path),
+                _ => None,
+            }
+        })
+        .await
+    }
+
+    /// What every message reminds the agent of: the user's preferences, when
+    /// there are any, and for an agent with no memory of its own, where the
+    /// project's is.
+    fn reminder(&self, agent: &str, project_path: &str) -> Option<String> {
+        let file = self.0.home.preferences_file();
+        if !std::fs::metadata(&file).is_ok_and(|m| m.is_file() && m.len() > 0) {
+            return None;
+        }
+        let mut reminder = format!("Reminder: follow the user's preferences in {}", file.display());
+        if agent != crate::agent::CLAUDE {
+            let memory = self.0.home.project_memory(project_path);
+            reminder.push_str(&format!("; the project's shared memory is in {}", memory.display()));
+        }
+        Some(reminder + ".")
     }
 
     /// The user wrote while Claude waited on a question (a plan, a tool, the
@@ -1101,7 +1294,8 @@ mod tests {
             worktree_idle: Some(worktree_idle),
             keep: Some(keep),
         };
-        let manager = SessionManager::build(fake_agents(&fake), store.clone(), out, timings, dir, lookup);
+        let home = Home::new(dir.join("home"));
+        let manager = SessionManager::build(fake_agents(&fake), store.clone(), out, timings, dir, home, lookup);
         Rig {
             fake,
             store,
@@ -1240,6 +1434,103 @@ mod tests {
             panic!("not a user message");
         };
         assert_eq!(text, "same deal as the login fix");
+    }
+
+    #[tokio::test]
+    async fn a_chats_folder_is_under_its_project_in_the_home_folder() {
+        let rig = rig(LONG);
+        // Notes typed before the first message wait outside any project.
+        rig.manager.notes().write("s1", "typed early").unwrap();
+        let waiting = rig.manager.home().unsent("s1");
+        assert!(waiting.join("notes.md").is_file());
+
+        rig.send("hello").await;
+        let folder = rig.manager.home().chat("/work", "s1");
+        assert_eq!(rig.manager.notes().folder("s1").unwrap(), folder);
+        assert_eq!(rig.manager.notes().read("s1").unwrap(), "typed early");
+        assert!(!waiting.exists());
+        // Its project's docs folder is made, for a doc saved to the project.
+        assert!(rig.manager.home().project_docs("/work").is_dir());
+    }
+
+    #[tokio::test]
+    async fn a_chat_folder_kept_the_old_way_moves_and_its_agent_is_told_once() {
+        let rig = rig(LONG);
+        rig.send("hello").await;
+        // As a build before the home folder left it: under the data folder.
+        let data = rig.manager.0.data_dir.clone();
+        let old = data.join("notes").join("s1");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("report.md"), "a doc").unwrap();
+        let new = rig.manager.home().chat("/work", "s1");
+        let _ = std::fs::remove_dir_all(&new);
+
+        rig.manager.move_chat_folders();
+        assert_eq!(std::fs::read_to_string(new.join("report.md")).unwrap(), "a doc");
+        assert!(!data.join("notes").exists());
+
+        rig.send("carry on").await;
+        rig.send("and again").await;
+        let told = rig.told();
+        assert_eq!(
+            told[1],
+            format!(
+                "say (From the app, not the user: This chat's own folder moved from {} to {}. Its notes and docs \
+are there now, so use the new paths.)\n\ncarry on",
+                old.display(),
+                new.display()
+            )
+        );
+        assert_eq!(told[2], "say and again");
+    }
+
+    #[tokio::test]
+    async fn every_message_reminds_the_agent_of_the_users_preferences() {
+        let rig = rig(LONG);
+        // No preferences: nothing is added.
+        rig.send("first").await;
+        assert_eq!(rig.told(), vec!["say first"]);
+
+        let file = rig.manager.home().preferences_file();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "- Be brief.").unwrap();
+        rig.send("second").await;
+        rig.send("third").await;
+        let reminder = format!("(From the app, not the user: Reminder: follow the user's preferences in {}.)", file.display());
+        // After the user's words, on every message; not saved with them.
+        assert_eq!(rig.told()[1], format!("say second\n\n{reminder}"));
+        assert_eq!(rig.told()[2], format!("say third\n\n{reminder}"));
+        let saved: Vec<String> = rig
+            .store
+            .events("s1")
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::UserMessage { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(saved, ["first", "second", "third"]);
+
+        // A command for the agent goes as typed: a note after it would be its arguments.
+        rig.send("/compact").await;
+        assert_eq!(rig.told()[3], "say /compact");
+
+        // An agent with no memory of its own is also reminded where the project's is.
+        let memory = rig.manager.home().project_memory("/work");
+        assert_eq!(
+            rig.manager.reminder(crate::agent::CURSOR, "/work").unwrap(),
+            format!(
+                "Reminder: follow the user's preferences in {}; the project's shared memory is in {}.",
+                file.display(),
+                memory.display()
+            )
+        );
+
+        // A blank file is no preferences.
+        std::fs::write(&file, "").unwrap();
+        rig.send("fourth").await;
+        assert_eq!(rig.told()[4], "say fourth");
     }
 
     #[tokio::test]
@@ -1750,6 +2041,7 @@ mod tests {
             rig.manager.set_terminal_hooks(TerminalHooks {
                 in_use: Arc::new(move |_: &Path| *shell_in.lock().unwrap()),
                 gone: Arc::new(move |root: &Path, why: &str| told.lock().unwrap().push((root.to_path_buf(), why.to_string()))),
+                moved: Arc::new(|_: &str, _: &str| {}),
             });
         }
         rig.manager.close("s1");

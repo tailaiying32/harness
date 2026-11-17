@@ -1,7 +1,9 @@
 //! Markdown files shown as side panel tabs: ones the chat wrote and ones a
 //! link opened. The user edits them in the tab, saved as they type. A doc an
-//! agent wrote in the chat's own folder can be saved to the project, which
-//! moves it into the project's `docs/` folder.
+//! agent wrote in the chat's own folder, and the chat's notes, can be saved
+//! to the project, which moves the file into the project's docs folder in the
+//! app's home folder (`home.rs`): outside the repo, shared by all the
+//! project's chats.
 
 use std::collections::HashSet;
 use std::fs;
@@ -67,14 +69,12 @@ impl Docs {
     }
 }
 
-/// Where saved docs go in a project.
-const PROJECT_DOCS: &str = "docs";
-
-/// Moves a doc from the chat's folder into `<project>/docs/`, keeping its name,
-/// or adding `-2`, `-3`... when that is taken: nothing is overwritten. Copied
-/// then removed, since a rename can't cross disks. Only a markdown file inside
-/// the chat's folder, and never the chat's notes. Returns the new path.
-pub fn save_to_project(chat_folder: &Path, notes: &Path, from: &Path, project: &Path) -> Result<PathBuf, String> {
+/// Moves a doc from the chat's folder into the project's docs folder (`docs`),
+/// keeping its name, or adding `-2`, `-3`... when that is taken: nothing is
+/// overwritten. Copied then removed, since a rename can't cross disks. Only a
+/// markdown file inside the chat's folder, and never the chat's notes by this
+/// way. Returns the new path.
+pub fn save_to_project(chat_folder: &Path, notes: &Path, from: &Path, docs: &Path) -> Result<PathBuf, String> {
     let bytes = read_bytes(from)?;
     let folder = fs::canonicalize(chat_folder).map_err(|e| e.to_string())?;
     let source = fs::canonicalize(from).map_err(|e| e.to_string())?;
@@ -88,19 +88,20 @@ pub fn save_to_project(chat_folder: &Path, notes: &Path, from: &Path, project: &
     let as_path = Path::new(name);
     let stem = as_path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let ext = as_path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
-    move_into_project(&bytes, &source, project, &stem, &ext)
+    move_into_project(&bytes, &source, docs, &stem, &ext)
 }
 
-/// Moves the chat's notes into `<project>/docs/`, named after the chat
-/// (`notes.md` if the title leaves nothing), so the notes start empty again.
-/// The same rules as a doc: nothing is overwritten. Returns the new path.
-pub fn save_notes_to_project(notes: &Path, title: &str, project: &Path) -> Result<PathBuf, String> {
+/// Moves the chat's notes into the project's docs folder (`docs`), named
+/// after the chat (`notes.md` if the title leaves nothing), so the notes
+/// start empty again. The same rules as a doc: nothing is overwritten.
+/// Returns the new path.
+pub fn save_notes_to_project(notes: &Path, title: &str, docs: &Path) -> Result<PathBuf, String> {
     let bytes = read_bytes(notes)?;
     if String::from_utf8_lossy(&bytes).trim().is_empty() {
         return Err("The notes are empty.".into());
     }
     let stem = file_stem_for(title);
-    move_into_project(&bytes, notes, project, if stem.is_empty() { "notes" } else { &stem }, "md")
+    move_into_project(&bytes, notes, docs, if stem.is_empty() { "notes" } else { &stem }, "md")
 }
 
 /// A title as a file name: lower case words joined by dashes, at most 60 characters.
@@ -119,15 +120,11 @@ fn file_stem_for(title: &str) -> String {
     stem
 }
 
-/// Writes `bytes` to `<project>/docs/<stem>.<ext>`, or `-2`, `-3`... when that
-/// is taken, then removes `source`. Copied then removed, since a rename can't
-/// cross disks.
-fn move_into_project(bytes: &[u8], source: &Path, project: &Path, stem: &str, ext: &str) -> Result<PathBuf, String> {
-    if !project.is_dir() {
-        return Err(format!("Not a folder: {}", project.display()));
-    }
-    let docs = project.join(PROJECT_DOCS);
-    fs::create_dir_all(&docs).map_err(|e| e.to_string())?;
+/// Writes `bytes` to `<docs>/<stem>.<ext>`, or `-2`, `-3`... when that is
+/// taken, then removes `source`. The folder is made if it isn't there. Copied
+/// then removed, since a rename can't cross disks.
+fn move_into_project(bytes: &[u8], source: &Path, docs: &Path, stem: &str, ext: &str) -> Result<PathBuf, String> {
+    fs::create_dir_all(docs).map_err(|e| e.to_string())?;
     for n in 1..1000 {
         let file = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") };
         let target = docs.join(file);
@@ -256,18 +253,18 @@ mod tests {
         fs::create_dir_all(project.join("docs")).unwrap();
         fs::write(project.join("docs/ideas.md"), "older").unwrap();
 
-        let saved = save_to_project(&chat, &notes, &doc, &project).unwrap();
+        let saved = save_to_project(&chat, &notes, &doc, &project.join("docs")).unwrap();
         assert_eq!(saved, project.join("docs/ideas-2.md"), "an existing doc isn't overwritten");
         assert_eq!(fs::read_to_string(&saved).unwrap(), "# Ideas");
         assert_eq!(fs::read_to_string(project.join("docs/ideas.md")).unwrap(), "older");
         assert!(!doc.exists());
 
-        assert!(save_to_project(&chat, &notes, &notes, &project).is_err(), "notes stay");
+        assert!(save_to_project(&chat, &notes, &notes, &project.join("docs")).is_err(), "notes stay");
         let txt = chat.join("a.txt");
         fs::write(&txt, "x").unwrap();
-        assert!(save_to_project(&chat, &notes, &txt, &project).is_err(), "markdown only");
+        assert!(save_to_project(&chat, &notes, &txt, &project.join("docs")).is_err(), "markdown only");
         let outside = project.join("docs/ideas.md");
-        assert!(save_to_project(&chat, &notes, &outside, &project).is_err(), "only from the chat folder");
+        assert!(save_to_project(&chat, &notes, &outside, &project.join("docs")).is_err(), "only from the chat folder");
 
         fs::remove_dir_all(&chat).unwrap();
         fs::remove_dir_all(&project).unwrap();
@@ -279,16 +276,16 @@ mod tests {
         let project = folder("notes-project");
         let notes = chat.join("notes.md");
         fs::write(&notes, "  \n").unwrap();
-        assert!(save_notes_to_project(&notes, "Plan", &project).is_err(), "empty notes stay");
+        assert!(save_notes_to_project(&notes, "Plan", &project.join("docs")).is_err(), "empty notes stay");
 
         fs::write(&notes, "- [ ] ship it").unwrap();
-        let saved = save_notes_to_project(&notes, "Fix: the sidebar's (scroll) bug!", &project).unwrap();
+        let saved = save_notes_to_project(&notes, "Fix: the sidebar's (scroll) bug!", &project.join("docs")).unwrap();
         assert_eq!(saved, project.join("docs/fix-the-sidebar-s-scroll-bug.md"));
         assert_eq!(fs::read_to_string(&saved).unwrap(), "- [ ] ship it");
         assert!(!notes.exists(), "the notes start empty again");
 
         fs::write(&notes, "more").unwrap();
-        let saved = save_notes_to_project(&notes, "?!", &project).unwrap();
+        let saved = save_notes_to_project(&notes, "?!", &project.join("docs")).unwrap();
         assert_eq!(saved, project.join("docs/notes.md"), "a title with no words names it notes");
 
         fs::remove_dir_all(&chat).unwrap();

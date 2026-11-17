@@ -17,6 +17,9 @@ function emit(session_id: string, event: AgentEvent) {
   callbacks.get(channel)?.({ message: { session_id, event }, index: index++ });
 }
 
+/** The user's preferences file. */
+let preferences = "# Working preferences\n\n- Be brief.\n- Ask before anything hard to undo.\n";
+
 // Each chat's browser tabs, as the core keeps them.
 type PreviewTabs = { tabs: { id: string; url: string; title: string; loading: boolean }[]; shown: string | null; next: number };
 const browsers = new Map<string, PreviewTabs>([
@@ -145,6 +148,13 @@ let projects: ProjectRow[] = [
       row("old2", `${home}/code/a-rather-long-folder-name/website`, "Draft the launch post", 2000),
       row("long", `${home}/code/a-rather-long-folder-name/website`, "A very long chat (300 turns)", 3000),
     ],
+  },
+  // A project whose folder was moved or renamed: dim, with "locate" to point at where it is now.
+  {
+    id: "p3",
+    path: `${home}/code/old-notes-app`,
+    missing: true,
+    sessions: [row("moved", `${home}/code/old-notes-app`, "Sync notes between devices", 9000)],
   },
 ];
 
@@ -424,6 +434,8 @@ const savedChat: AgentEvent[] = [
 // still waiting for an answer. For the side panel.
 const notesPath = `${home}/code/harness/docs/memory-notes.md`;
 // In the chat's own folder, so its tab has the save-to-project button.
+// Written when chat folders were still under the app's data folder: the chat's
+// folder has moved since (see `chatFolder`), and its tab shows it from there.
 const testPlanPath = `${home}/Library/Application Support/com.harness.app/notes/planning/test-plan.md`;
 const planPath = `${home}/.claude/plans/idle-timeout.md`;
 const notesText =
@@ -588,6 +600,13 @@ let keepAwake: { mode: "away" | "overnight"; ends_at: number } | null = null;
 /** Documents edited in a tab, kept for the page's life. */
 const docsByPath = new Map<string, string>();
 
+/** A project's folder in the app's home folder, named from its path as the core names it. */
+const projectHome = (project: string) => `${home}/.harness/projects/${project.replace(/[^A-Za-z0-9]/g, "-")}`;
+/** A chat's own folder: its notes and docs, under its project. */
+const chatFolder = (project: string, chatId: string) => `${projectHome(project)}/chats/${chatId}`;
+const projectOf = (chatId: string) =>
+  [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === chatId)?.project_path ?? `${home}/code/harness`;
+
 const notesByChat = new Map<string, string>([
   [
     "planning",
@@ -654,6 +673,7 @@ const commands: Record<string, (args: Args) => unknown> = {
     session: [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === args.sessionId),
     events: args.sessionId === "agents" ? (setTimeout(playAgents, 300), agentsChat) : args.sessionId === "images" ? imagesChat : args.sessionId === "planning" ? planningChat : args.sessionId === "saved" ? savedChat : args.sessionId === "long" ? longChat : args.sessionId === "looks" ? looksChat : args.sessionId === "waiting" ? askingChat : args.sessionId === "working" ? movedChat : [{ kind: "user_message", text: "(sample chat)" }, text("m", "Nothing saved for this one in the preview."), ended],
     live: args.sessionId === "planning" || args.sessionId === "waiting" || args.sessionId === "agents",
+    chat_folder: chatFolder(projectOf(args.sessionId), args.sessionId),
   }),
   title_batch: (args) => {
     setTimeout(() => emit(args.sessionId, { kind: "batch_titled", tool_id: args.toolId, title: "Measuring idle memory" }), 600);
@@ -719,6 +739,47 @@ const commands: Record<string, (args: Args) => unknown> = {
   set_mode: (args) => emit(args.sessionId, { kind: "mode_changed", mode: args.mode }),
   set_model: () => undefined,
   set_effort: () => undefined,
+  list_commands: async (args) => {
+    // Late, as from a real agent process, so the menu is seen filling in.
+    await new Promise((r) => setTimeout(r, 2500));
+    // As the core sends them (trimmed): Claude Code's, then Cursor's.
+    if (args.agent === "cursor")
+      return [
+        {"name": "autopilot", "description": "Keep a PR merge-ready by triaging comments, resolving clear conflicts, and fixing CI in a loop. (builtin skill)", "hint": null, "aliases": []},
+        {"name": "create-rule", "description": "Create Cursor rules for persistent AI guidance. (builtin skill)", "hint": null, "aliases": []},
+        {"name": "rename-chat", "description": "Rename the current chat to match its focus. (builtin skill)", "hint": null, "aliases": []},
+        {"name": "statusline", "description": "Configure a custom status line in the CLI.", "hint": null, "aliases": []},
+        {"name": "split-to-prs", "description": "Split current work into small reviewable PRs. (builtin skill)", "hint": null, "aliases": []},
+      ];
+    return [
+      {"name": "design:ux-copy", "description": "(design) Write or review UX copy \u2014 microcopy, error messages, empty states, CTAs. Trigger with \"write copy for\", \"what should this button...", "hint": "<context or copy to review>", "aliases": ["ux-copy"]},
+      {"name": "verify", "description": "Verify that a code change actually does what it's supposed to by exercising it end-to-end and observing behavior \u2014 drive the affected flo...", "hint": null, "aliases": []},
+      {"name": "debug", "description": "Enable debug logging for this session and help diagnose issues", "hint": "[issue description]", "aliases": []},
+      {"name": "code-review", "description": "Review the current diff, or a PR number/branch/path target, for correctness bugs (plus reuse/simplification/efficiency cleanups where the...", "hint": "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>] [--max-findings <n>|all]", "aliases": ["review"]},
+      {"name": "simplify", "description": "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only \u2014 it does not hu...", "hint": "[<target>]", "aliases": []},
+      {"name": "batch", "description": "Research and plan a large-scale change, then execute it in parallel across 5\u201330 isolated worktree agents that each open a PR.", "hint": "<instruction>", "aliases": []},
+      {"name": "doctor", "description": "Health-check the user's Claude Code setup and fix issues: diagnose installation health \u2014 what the `claude doctor` terminal diagnostics co...", "hint": "[prompt-audit [<path>]]", "aliases": ["checkup"]},
+      {"name": "loop", "description": "Run a prompt or slash command on a recurring interval (e.g. /loop 5m /foo). Omit the interval to let the model self-pace.", "hint": "[interval] [prompt]", "aliases": ["proactive"]},
+      {"name": "schedule", "description": "Create, update, list, or run scheduled cloud agents (routines) that execute on a cron schedule.", "hint": null, "aliases": ["routines"]},
+      {"name": "clear", "description": "Start a new session with empty context; previous session stays on disk (resumable with /resume)", "hint": "[name]", "aliases": ["reset", "new"]},
+      {"name": "color", "description": "Set the prompt bar color for this session", "hint": "[red|blue|green|yellow|purple|orange|pink|cyan|default]", "aliases": []},
+      {"name": "compact", "description": "Free up context by summarizing the conversation so far", "hint": "<optional custom summarization instructions>", "aliases": []},
+      {"name": "config", "description": "Set a setting by key", "hint": "key=value", "aliases": ["settings"]},
+      {"name": "context", "description": "Show current context usage", "hint": null, "aliases": []},
+      {"name": "effort", "description": "Set the model's effort level", "hint": "<low|medium|high|xhigh|max|auto|ultracode [on|off]>", "aliases": []},
+      {"name": "init", "description": "Initialize a new CLAUDE.md file with codebase documentation", "hint": null, "aliases": []},
+      {"name": "mcp", "description": "Manage MCP servers", "hint": "[reconnect|enable|disable [<server>|all]]", "aliases": []},
+      {"name": "model", "description": "Set the AI model for Claude Code", "hint": "<model>", "aliases": []},
+      {"name": "security-review", "description": "Complete a security review of the pending changes on the current branch", "hint": null, "aliases": []},
+      {"name": "usage", "description": "Show session cost, plan usage, and what's contributing to your limits", "hint": null, "aliases": ["cost", "stats"]},
+      {"name": "recap", "description": "Generate a one-line session recap now", "hint": null, "aliases": []},
+      {"name": "goal", "description": "Set a goal \u2014 keep working until the condition is met", "hint": null, "aliases": []},
+      {"name": "learn", "description": "Use this skill when the user wants intellectual understanding \u2014 learning how or why something works, not getting a task done or solicitin...", "hint": null, "aliases": ["anthropic-skills:learn"]},
+      {"name": "pdf", "description": "Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting text/tables from PDFs, combinin...", "hint": null, "aliases": ["anthropic-skills:pdf"]},
+      {"name": "skill-creator", "description": "Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to create a skill from scratch,...", "hint": null, "aliases": ["anthropic-skills:skill-creator"]},
+      {"name": "xlsx", "description": "Use this skill any time a spreadsheet file is the primary input or output. This means any task where the user wants to: open, read, edit,...", "hint": null, "aliases": ["anthropic-skills:xlsx"]},
+    ];
+  },
   list_models: (args) => {
     const all = ["low", "medium", "high", "xhigh", "max"];
     // Cursor's, as the core sends them: Auto first, newest of each family.
@@ -743,7 +804,9 @@ const commands: Record<string, (args: Args) => unknown> = {
   autotest: () => null,
   "plugin:path|resolve_directory": () => home,
   // Only the skill file picker answers, so the folder picker stays a cancel.
-  "plugin:dialog|open": (args) => (args.options?.filters ? "/Users/you/Downloads/pr-to-video.zip" : null),
+  // A zip for an import; a folder for "locate" (the only folder picker asked for one from a start folder).
+  "plugin:dialog|open": (args) =>
+    args.options?.filters ? "/Users/you/Downloads/pr-to-video.zip" : args.options?.directory ? `${home}/code/notes-app` : null,
   "plugin:opener|open_url": () => undefined,
   "plugin:opener|reveal_item_in_dir": () => undefined,
   // Dropped files. `__drop([...paths])` in the console stands in for a drop.
@@ -836,9 +899,23 @@ const commands: Record<string, (args: Args) => unknown> = {
     );
   },
   write_doc: (args: Args) => void docsByPath.set(String(args.path), String(args.text)),
+  read_preferences: () => preferences,
+  write_preferences: (args: Args) => void (preferences = String(args.text)),
+  relocate_project: (args: Args) => {
+    const at = projects.findIndex((p) => p.path === args.from);
+    if (at < 0) throw "That folder isn't one of the projects.";
+    // New rows, as the core's next listing would be: the window's own copy is
+    // left alone until it asks again.
+    const sessions = projects[at].sessions.map((session) => ({
+      ...session,
+      former_paths: [...(session.former_paths ?? []), String(args.from)],
+      project_path: String(args.to),
+    }));
+    projects = projects.map((p, i) => (i === at ? { ...p, path: String(args.to), missing: false, sessions } : p));
+  },
   save_doc_to_project: (args: Args) => {
     const from = String(args.path);
-    const to = `${String(args.project)}/docs/${from.split("/").pop()}`;
+    const to = `${projectHome(String(args.project))}/docs/${from.split("/").pop()}`;
     docsByPath.set(to, docsByPath.get(from) ?? "");
     docsByPath.delete(from);
     emit(String(args.chatId), { kind: "doc_saved", from, to });
@@ -846,8 +923,8 @@ const commands: Record<string, (args: Args) => unknown> = {
   },
   save_notes_to_project: (args: Args) => {
     const chatId = String(args.chatId);
-    const from = `${home}/Library/Application Support/com.harness.app/notes/${chatId}/notes.md`;
-    const to = `${String(args.project)}/docs/notes.md`;
+    const from = `${chatFolder(String(args.project), chatId)}/notes.md`;
+    const to = `${projectHome(String(args.project))}/docs/notes.md`;
     docsByPath.set(to, notesByChat.get(chatId) ?? "");
     notesByChat.delete(chatId);
     emit(chatId, { kind: "doc_saved", from, to });
