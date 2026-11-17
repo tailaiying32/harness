@@ -135,6 +135,13 @@ pub enum AgentEvent {
     MessageSeen {
         id: String,
     },
+    /// The user took back a message the agent hadn't read yet, to edit it.
+    /// `ok` is false when it was too late: the agent had taken it in already.
+    /// Only a taken-back message is saved, so history drops it.
+    MessageWithdrawn {
+        id: String,
+        ok: bool,
+    },
     TurnEnded {
         ok: bool,
         duration_ms: Option<u64>,
@@ -303,6 +310,7 @@ impl AgentEvent {
                 | AgentEvent::BrowserTabs { .. }
                 | AgentEvent::TerminalTabs { .. }
                 | AgentEvent::TabKey { .. }
+                | AgentEvent::MessageWithdrawn { ok: false, .. }
         )
     }
 
@@ -411,6 +419,9 @@ mod tests {
         assert!(AgentEvent::Interrupted.is_saved());
         assert!(AgentEvent::UserMessage { text: "hi".into(), id: None, images: vec![] }.is_saved());
         assert!(AgentEvent::MessageSeen { id: "u1".into() }.is_saved());
+        // A message taken back leaves history; a failed try leaves no trace.
+        assert!(AgentEvent::MessageWithdrawn { id: "u1".into(), ok: true }.is_saved());
+        assert!(!AgentEvent::MessageWithdrawn { id: "u1".into(), ok: false }.is_saved());
         // History saved before messages had IDs still loads.
         assert_eq!(
             serde_json::from_str::<AgentEvent>(r#"{"kind":"user_message","text":"hi"}"#).unwrap(),

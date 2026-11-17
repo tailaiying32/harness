@@ -54,6 +54,8 @@ export type AgentEvent =
   | { kind: "interrupted" }
   | { kind: "user_message"; text: string; id?: string | null; images?: ImageRef[] }
   | { kind: "message_seen"; id: string }
+  /** A message taken back to edit; `ok` is false when the agent had read it already. */
+  | { kind: "message_withdrawn"; id: string; ok: boolean }
   | { kind: "turn_ended"; ok: boolean; duration_ms: number | null }
   | { kind: "usage_update"; window: string | null; utilization: number; resets_at: number | null }
   | { kind: "background_work"; running: number; agents: number; tasks?: BackgroundTask[] }
@@ -223,6 +225,9 @@ export const readNotes = (chatId: string) => invoke<string>("read_notes", { chat
 export const writeNotes = (chatId: string, text: string) => invoke<void>("write_notes", { chatId, text });
 
 export const interrupt = (sessionId: string) => invoke<void>("interrupt", { sessionId });
+/** Take back a message the agent hasn't read yet. The answer comes as `message_withdrawn`. */
+export const withdrawMessage = (sessionId: string, messageId: string) =>
+  invoke<void>("withdraw_message", { sessionId, messageId });
 
 /**
  * Ask one of a chat's side chats something. `sideId` is `<chat id>#side-<tab>`.
@@ -237,6 +242,8 @@ export const sideSend = (
   messageId: string,
 ) => invoke<void>("side_send", { sideId, projectPath, model, effort, text, messageId });
 export const sideInterrupt = (sideId: string) => invoke<void>("side_interrupt", { sideId });
+export const sideWithdrawMessage = (sideId: string, messageId: string) =>
+  invoke<void>("side_withdraw_message", { sideId, messageId });
 /** End a side chat and forget it. */
 export const sideEnd = (sideId: string) => invoke<void>("side_end", { sideId });
 /** A fresh window: end the side chats an earlier one left running. */

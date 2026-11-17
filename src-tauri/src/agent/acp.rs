@@ -8,7 +8,7 @@
 //! the agent's lines: replies to our calls, its requests (approvals, plans,
 //! questions), and `session/update` notifications (text, tool calls).
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -256,6 +256,9 @@ struct State {
     notes: Vec<String>,
     /// A plan was approved: leave plan mode before the next prompt.
     build_after_turn: bool,
+    /// Messages sent but not yet put in a prompt. One the user takes back
+    /// leaves this set, and the driver skips it.
+    queued: HashSet<String>,
 }
 
 struct Shared {
@@ -582,40 +585,49 @@ async fn drive(
             batch.push(item);
         }
         let closing = batch.iter().any(|i| matches!(i, Item::Close));
-        let mut prompt: Vec<Value> = Vec::new();
+        let mut body: Vec<Value> = Vec::new();
         let mut seen = Vec::new();
-        if let Some(text) = intro.take() {
-            prompt.push(json!({ "type": "text", "text": text }));
-        }
-        let build = std::mem::take(&mut shared.state.lock().unwrap().build_after_turn);
-        let leave_plan = build && shared.state.lock().unwrap().config.modes.iter().any(|m| m == "agent");
-        if leave_plan
-            && shared
-                .rpc
-                .call("session/set_mode", json!({ "sessionId": session_id, "modeId": "agent" }))
-                .await
-                .is_ok()
-        {
-            shared.state.lock().unwrap().mode = Some("agent".to_string());
-            shared.emit(AgentEvent::ModeChanged { mode: "agent".to_string() });
-        }
-        for note in std::mem::take(&mut shared.state.lock().unwrap().notes) {
-            prompt.push(json!({ "type": "text", "text": note }));
-        }
         for item in batch {
             match item {
                 // An empty note only wakes the loop for notes saved during a turn.
                 Item::Note(text) if text.is_empty() => {}
-                Item::Note(text) => prompt.push(json!({ "type": "text", "text": text })),
+                Item::Note(text) => body.push(json!({ "type": "text", "text": text })),
                 Item::User { text, images, id } => {
-                    for (media_type, data) in images {
-                        prompt.push(json!({ "type": "image", "mimeType": media_type, "data": data }));
+                    // Taken back by the user while it waited.
+                    if !shared.state.lock().unwrap().queued.remove(&id) {
+                        continue;
                     }
-                    prompt.push(json!({ "type": "text", "text": text }));
+                    for (media_type, data) in images {
+                        body.push(json!({ "type": "image", "mimeType": media_type, "data": data }));
+                    }
+                    body.push(json!({ "type": "text", "text": text }));
                     seen.push(id);
                 }
                 Item::Close => {}
             }
+        }
+        let notes = std::mem::take(&mut shared.state.lock().unwrap().notes);
+        // Nothing to say (every message was taken back): no turn, and the
+        // intro and a pending plan switch wait for the next real prompt.
+        let mut prompt: Vec<Value> = Vec::new();
+        if !body.is_empty() || !notes.is_empty() {
+            if let Some(text) = intro.take() {
+                prompt.push(json!({ "type": "text", "text": text }));
+            }
+            let build = std::mem::take(&mut shared.state.lock().unwrap().build_after_turn);
+            let leave_plan = build && shared.state.lock().unwrap().config.modes.iter().any(|m| m == "agent");
+            if leave_plan
+                && shared
+                    .rpc
+                    .call("session/set_mode", json!({ "sessionId": session_id, "modeId": "agent" }))
+                    .await
+                    .is_ok()
+            {
+                shared.state.lock().unwrap().mode = Some("agent".to_string());
+                shared.emit(AgentEvent::ModeChanged { mode: "agent".to_string() });
+            }
+            prompt.extend(notes.into_iter().map(|note| json!({ "type": "text", "text": note })));
+            prompt.extend(body);
         }
         if !prompt.is_empty() {
             for id in seen {
@@ -1257,14 +1269,17 @@ impl AcpProcess {
 impl RunningAgent for AcpProcess {
     fn send_user_message(&self, text: &str, images: &[ImagePayload], id: &str) -> Result<(), String> {
         let images = images.iter().map(|i| (i.media_type.clone(), i.data_b64.clone())).collect();
-        self.shared
-            .items
-            .send(Item::User {
-                text: text.to_string(),
-                images,
-                id: id.to_string(),
-            })
-            .map_err(|_| format!("{} is no longer running", self.shared.label))?;
+        // Before sending: the driver drops a message it finds missing here.
+        self.shared.state.lock().unwrap().queued.insert(id.to_string());
+        let item = Item::User {
+            text: text.to_string(),
+            images,
+            id: id.to_string(),
+        };
+        if self.shared.items.send(item).is_err() {
+            self.shared.state.lock().unwrap().queued.remove(id);
+            return Err(format!("{} is no longer running", self.shared.label));
+        }
         self.shared.emit(AgentEvent::Status {
             state: SessionState::Working,
         });
@@ -1412,6 +1427,14 @@ not your original:\n\n{plan}"
         Ok(())
     }
 
+    // The message waits in this app's own queue, so taking it back is only
+    // a matter of the driver skipping it.
+    fn withdraw_message(&self, id: &str) -> Result<(), String> {
+        let ok = self.shared.state.lock().unwrap().queued.remove(id);
+        self.shared.emit(AgentEvent::MessageWithdrawn { id: id.to_string(), ok });
+        Ok(())
+    }
+
     fn close(&self) {
         let _ = self.shared.items.send(Item::Close);
     }
@@ -1490,6 +1513,19 @@ mod tests {
 
     fn take(seen: &Mutex<Vec<AgentEvent>>) -> Vec<AgentEvent> {
         std::mem::take(&mut seen.lock().unwrap())
+    }
+
+    #[test]
+    fn a_waiting_message_can_be_taken_back_once() {
+        let (shared, _rx, seen) = rig();
+        let process = AcpProcess { shared: shared.clone() };
+        // As `send_user_message` leaves it (the rig has no driver to send to).
+        shared.state.lock().unwrap().queued.insert("m1".into());
+        process.withdraw_message("m1").unwrap();
+        assert_eq!(take(&seen), vec![AgentEvent::MessageWithdrawn { id: "m1".into(), ok: true }]);
+        assert!(shared.state.lock().unwrap().queued.is_empty(), "the driver will skip it");
+        process.withdraw_message("m1").unwrap();
+        assert_eq!(take(&seen), vec![AgentEvent::MessageWithdrawn { id: "m1".into(), ok: false }]);
     }
 
     const SHELL: &str = r#"{"sessionUpdate":"tool_call","toolCallId":"call-1\nfc_1","title":"Terminal","kind":"execute","status":"pending","rawInput":{}}"#;

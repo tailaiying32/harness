@@ -205,6 +205,12 @@ impl SideChats {
         }
     }
 
+    /// Take back a message the side chat hasn't read yet; see `Sessions::withdraw_message`.
+    pub fn withdraw_message(&self, side_id: &str, message_id: &str) -> Result<(), String> {
+        let agent = self.0.sides.lock().unwrap().get(side_id).and_then(|s| s.agent.clone());
+        agent.ok_or("This side chat isn't running")?.withdraw_message(message_id)
+    }
+
     pub fn interrupt(&self, side_id: &str) -> Result<(), String> {
         let agent = self.0.sides.lock().unwrap().get(side_id).and_then(|s| s.agent.clone());
         match agent {
@@ -431,6 +437,9 @@ mod tests {
         }
         fn open_requests(&self) -> Vec<String> {
             Vec::new()
+        }
+        fn withdraw_message(&self, _: &str) -> Result<(), String> {
+            Ok(())
         }
         fn interrupt(&self) -> Result<(), String> {
             self.told.lock().unwrap().push("interrupt".into());

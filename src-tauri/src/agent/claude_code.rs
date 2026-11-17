@@ -28,6 +28,9 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 /// The request ID of the context-usage question asked after each turn.
 const CONTEXT_REQUEST: &str = "harness-context-usage";
 
+/// The start of a take-back request's ID; the message's ID follows.
+const WITHDRAW_REQUEST: &str = "harness-withdraw:";
+
 /// Asks how full the context window is. "summary" answers from the last
 /// reply's usage without extra counting calls (about 20 ms on CLI 2.1.325).
 fn context_request() -> String {
@@ -258,7 +261,10 @@ fn side_args(opts: &SpawnOptions, side: &SideOptions) -> Vec<String> {
 fn acknowledge(events: Vec<AgentEvent>, sent: &Sent) -> Vec<AgentEvent> {
     let mut out = Vec::with_capacity(events.len());
     for event in events {
-        if let AgentEvent::MessageSeen { id } = &event {
+        if let AgentEvent::MessageWithdrawn { id, ok: true } = &event {
+            sent.lock().unwrap().remove(id);
+            out.push(event);
+        } else if let AgentEvent::MessageSeen { id } = &event {
             if !sent.lock().unwrap().remove(id) {
                 continue;
             }
@@ -898,6 +904,16 @@ impl RunningAgent for ClaudeCodeProcess {
         self.pending.lock().unwrap().keys().cloned().collect()
     }
 
+    // Claude Code drops it from its queue and answers whether it was still
+    // there (see the `WITHDRAW_REQUEST` reply).
+    fn withdraw_message(&self, id: &str) -> Result<(), String> {
+        self.send(json!({
+            "type": "control_request",
+            "request_id": format!("{WITHDRAW_REQUEST}{id}"),
+            "request": { "subtype": "cancel_async_message", "message_uuid": id },
+        }))
+    }
+
     fn interrupt(&self) -> Result<(), String> {
         self.send(json!({
             "type": "control_request",
@@ -1235,6 +1251,17 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
                 parts.sort_by(|a, b| b.tokens.cmp(&a.tokens));
                 out.events.push(AgentEvent::ContextUsage { used, max, parts });
             }
+        }
+
+        // The answer to taking back a waiting message. "cancelled" is false
+        // when Claude Code had already taken it in; a refusal (an older CLI)
+        // counts the same, with no error shown.
+        "control_response" if text_of(&v["response"]["request_id"]).starts_with(WITHDRAW_REQUEST) => {
+            let request_id = text_of(&v["response"]["request_id"]);
+            out.events.push(AgentEvent::MessageWithdrawn {
+                id: request_id[WITHDRAW_REQUEST.len()..].to_string(),
+                ok: v["response"]["subtype"] == "success" && v["response"]["response"]["cancelled"] == true,
+            });
         }
 
         // Claude Code withdrew a request, e.g. the turn was stopped while it waited.
@@ -2156,6 +2183,23 @@ mod tests {
         assert!(acknowledge(events(echo, &pending), &sent).is_empty());
         let completed = r#"{"type":"command_lifecycle","command_uuid":"c1","state":"completed"}"#;
         assert!(events(completed, &pending).is_empty());
+    }
+
+    #[test]
+    fn a_message_taken_back_in_time_is_reported_and_too_late_is_not_an_error() {
+        let pending = Pending::default();
+        let sent = Sent::default();
+        sent.lock().unwrap().insert("m1".into());
+        let taken = r#"{"type":"control_response","response":{"subtype":"success","request_id":"harness-withdraw:m1","response":{"cancelled":true}}}"#;
+        assert_eq!(
+            acknowledge(events(taken, &pending), &sent),
+            vec![AgentEvent::MessageWithdrawn { id: "m1".into(), ok: true }]
+        );
+        assert!(sent.lock().unwrap().is_empty(), "no echo will come for it");
+        let late = r#"{"type":"control_response","response":{"subtype":"success","request_id":"harness-withdraw:m2","response":{"cancelled":false}}}"#;
+        assert_eq!(events(late, &pending), vec![AgentEvent::MessageWithdrawn { id: "m2".into(), ok: false }]);
+        let refused = r#"{"type":"control_response","response":{"subtype":"error","request_id":"harness-withdraw:m3","error":"Unsupported"}}"#;
+        assert_eq!(events(refused, &pending), vec![AgentEvent::MessageWithdrawn { id: "m3".into(), ok: false }]);
     }
 
     #[test]

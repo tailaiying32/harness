@@ -656,6 +656,14 @@ const commands: Record<string, (args: Args) => unknown> = {
     }, 300);
   },
   side_interrupt: () => undefined,
+  side_withdraw_message: (args) => emit(args.sideId, { kind: "message_withdrawn", id: args.messageId, ok: false }),
+  // A message still waiting for the scripted answer can be taken back.
+  withdraw_message: (args) => {
+    const waiting = playing.get(args.sessionId) ?? [];
+    const at = waiting.indexOf(args.messageId);
+    if (at >= 0) waiting.splice(at, 1);
+    emit(args.sessionId, { kind: "message_withdrawn", id: args.messageId, ok: at >= 0 });
+  },
   side_end: () => undefined,
   side_end_all: () => undefined,
   // Notes live in memory here; the "planning" chat starts with some.

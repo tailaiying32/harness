@@ -1094,6 +1094,21 @@ Mocked up on the same board:
   `Status: Working`, which covers a message taken in after a turn has ended.
   Replay gives the same order. A chat reloaded with no live process clears
   every mark; a message lost because the process died gets no warning.
+- **Edit a queued message in place** (2026-11-16, the user's request).
+  Double-clicking a message that still has its queued mark takes it back
+  from the agent (`withdraw_message`) and, once that worked, turns the
+  bubble into a text box. Enter sends the edit as a new message at the end
+  of the queue, Shift+Enter and Tab work as in the message box, Escape sends
+  the original back, and an emptied message is dropped. Clicking away keeps
+  the box open. Taken back first, so the agent can't read the old version
+  mid-edit; if it read the message already (`MessageWithdrawn { ok: false }`,
+  not saved), nothing opens. Only a taken-back message is saved, so replay
+  drops it; a chat reloaded mid-edit loses the unsent edit. Claude Code:
+  control request `cancel_async_message` with `message_uuid`, answered
+  `{ cancelled }` (**Tested** on CLI 2.1.325: `cancelled: true`, and the
+  message was never answered). Cursor: the app's own queue drops the ID and
+  the driver skips it. Side chats too. Checked in the preview; not tried in
+  the real app yet.
 - **A message answers what Claude waits on** (2026-11-14). Sent while a plan,
   tool approval or question is open, it first turns each one down with "the
   user sent a message instead; read it and go by it" (a plan: keep

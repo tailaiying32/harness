@@ -206,6 +206,9 @@ pub trait RunningAgent: Send + Sync {
     ) -> Result<(), String>;
     /// The requests still waiting for the user's answer, by request ID.
     fn open_requests(&self) -> Vec<String>;
+    /// Take back a message sent mid-turn that the agent hasn't read yet. The
+    /// answer comes as `MessageWithdrawn`.
+    fn withdraw_message(&self, id: &str) -> Result<(), String>;
     /// Stop the current turn. The chat stays usable.
     fn interrupt(&self) -> Result<(), String>;
     fn set_mode(&self, mode: &str) -> Result<(), String>;
