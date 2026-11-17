@@ -98,6 +98,9 @@ export type AgentEvent =
   | { kind: "doc_saved"; from: string; to: string }
   | { kind: "worktree_ask"; request_id: string; repo_root: string; tool_id: string | null; name?: string | null }
   | { kind: "worktree_chosen"; choice: WorktreeChoice }
+  | { kind: "new_chats_ask"; request_id: string; tool_id: string | null; from: string; parts: NewChatPart[] }
+  | { kind: "new_chats_chosen"; request_id: string; choice: NewChatsChoice }
+  | { kind: "new_chats_started"; request_id: string; chats: StartedChat[] }
   | { kind: "worktree_changed"; status: WorktreeStatus; branch: string | null }
   | { kind: "prs_changed"; prs: PrInfo[] }
   | { kind: "plan_edited"; request_id: string; plan: string }
@@ -115,6 +118,11 @@ export type ImageRef = { n: number; media_type: string };
 
 /** The answer to Claude's request for a worktree. */
 export type WorktreeChoice = "worktree" | "here";
+/** One part of a piece of work, to be done in a chat of its own. */
+export type NewChatPart = { title: string; summary: string; why: string; brief: string; agent?: string | null };
+/** A chat started for one part, or why it couldn't be. */
+export type StartedChat = { title: string; session_id: string | null; error: string | null };
+export type NewChatsChoice = "start" | "no";
 export type WorktreeStatus = "created" | "restored" | "put_away" | "merged" | "gone";
 
 /** One of a chat's pull requests. Mirrors `PrInfo` in src-tauri/src/worktree.rs. */
@@ -211,9 +219,12 @@ export const restoreChat = (sessionId: string) => invoke<void>("restore_chat", {
 /** Deletes every chat in the trash for good. */
 export const emptyTrash = () => invoke<void>("empty_trash");
 
-/** The answer to Claude's request for a worktree: a new one, or keep working here. */
+/** The answer to an agent's request for a worktree: a new one, or keep working here. */
 export const chooseWorktree = (sessionId: string, requestId: string, choice: WorktreeChoice) =>
   invoke<void>("choose_worktree", { sessionId, requestId, choice });
+/** The answer to an agent's request to start chats. */
+export const chooseNewChats = (sessionId: string, requestId: string, choice: NewChatsChoice) =>
+  invoke<void>("choose_new_chats", { sessionId, requestId, choice });
 
 /** Saves the chat on its first message. `mode` and `model` are saved with it, and
  *  are passed to the agent when this message has to start the chat's process. */

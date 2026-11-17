@@ -41,6 +41,30 @@ pub struct ContextPart {
     pub tokens: u64,
 }
 
+/// One part of a piece of work, to be done in a chat of its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewChatPart {
+    /// Becomes the chat's title.
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub why: String,
+    /// The chat's first message.
+    pub brief: String,
+    /// The agent the chat runs on; None = the asking chat's.
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+/// A chat started for one part, or why it couldn't be.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StartedChat {
+    pub title: String,
+    pub session_id: Option<String>,
+    pub error: Option<String>,
+}
+
 /// What kind of answer an approval request wants from the user.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -262,6 +286,26 @@ pub enum AgentEvent {
     /// The user's pick: "worktree" or "here".
     WorktreeChosen {
         choice: String,
+    },
+    /// The agent asked to start a chat for each part of a piece of work; the
+    /// question waits for the user. `from`: "main" or "this_chat", where the
+    /// new chats' branches start.
+    NewChatsAsk {
+        request_id: String,
+        /// The request's tool call, so the chat can fold it away.
+        tool_id: Option<String>,
+        from: String,
+        parts: Vec<NewChatPart>,
+    },
+    /// The user's answer: "start" or "no".
+    NewChatsChosen {
+        request_id: String,
+        choice: String,
+    },
+    /// The chats asked for were started (or failed), one entry per part.
+    NewChatsStarted {
+        request_id: String,
+        chats: Vec<StartedChat>,
     },
     /// The chat's worktree changed: "created", "restored", "put_away",
     /// "merged" or "gone".

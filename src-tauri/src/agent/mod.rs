@@ -47,6 +47,12 @@ impl Agents {
         }
     }
 
+    /// The agents whose program was found.
+    pub fn installed(&self) -> Vec<String> {
+        let agents = self.0.lock().unwrap();
+        agents.iter().filter(|(_, (_, binary))| binary.is_some()).map(|(id, _)| id.clone()).collect()
+    }
+
     /// The agent and its program, or why it can't be used.
     pub fn get(&self, id: &str) -> Result<(Arc<dyn AgentAdapter>, PathBuf), String> {
         let agents = self.0.lock().unwrap();

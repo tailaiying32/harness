@@ -9,6 +9,7 @@ import {
   browserPick,
   browserCurrent,
   closeSession,
+  chooseNewChats,
   chooseWorktree,
   interrupt,
   readDoc,
@@ -33,9 +34,12 @@ import {
   type Decision,
   type ImageRef,
   type Mode,
+  type NewChatPart,
+  type NewChatsChoice,
   type PrInfo,
   type SessionRow,
   type SessionState,
+  type StartedChat,
   type WorktreeChoice,
   type WorktreeStatus,
   writeDoc,
@@ -92,8 +96,9 @@ export type ApprovalItem = {
   id: number;
   type: "approval";
   requestId: string;
-  /** "worktree": Claude asked for a worktree; the app shows it as its own card. */
-  approval: ApprovalKind | "worktree";
+  /** "worktree": the agent asked for a worktree; "new_chats": to start chats.
+   *  The app shows each as its own card. */
+  approval: ApprovalKind | "worktree" | "new_chats";
   toolName: string;
   title: string;
   input: unknown;
@@ -110,6 +115,12 @@ export type ApprovalItem = {
   repoRoot?: string;
   workName?: string;
   choice?: WorktreeChoice;
+  /** For the new-chats question: the parts, where their branches start, what
+   *  was picked, and once done, the chats started. */
+  parts?: NewChatPart[];
+  from?: string;
+  chatsChoice?: NewChatsChoice;
+  started?: StartedChat[];
 };
 export type ErrorItem = { id: number; type: "error"; text: string };
 /** A faint one-line remark from the app, e.g. "stopped". */
@@ -968,6 +979,8 @@ export class Chat {
   autoPlanEdit: string | null = null;
   /** Answer the worktree question this way. Used by the self-test only. */
   autoWorktree: WorktreeChoice | null = null;
+  /** Answer the new-chats question this way. Used by the self-test only. */
+  autoNewChats: NewChatsChoice | null = null;
 
   private nextId = 0;
   // Live text arrives in many small pieces. They are collected here and applied
@@ -985,9 +998,10 @@ export class Chat {
     for (const item of this.items) {
       if (item.type === "text") item.streaming = false;
       if (item.type === "tool" && item.result === undefined) item.result = "";
-      // The worktree question outlives the turn: the agent ends its turn
-      // to wait for it, and the answer comes as its next message.
-      if (item.type === "approval" && item.approval !== "worktree" && !item.answered && !item.cancelled) this.cancel(item);
+      // The worktree and new-chats questions outlive the turn: the agent
+      // ends its turn to wait for them, and the answer comes as a message.
+      if (item.type === "approval" && item.approval !== "worktree" && item.approval !== "new_chats" && !item.answered && !item.cancelled)
+        this.cancel(item);
     }
     this.drafts.clear();
     this.turnStartedAt = null;
@@ -1172,6 +1186,36 @@ export class Chat {
           workName: event.name ?? undefined,
         });
         if (this.autoWorktree) void this.chooseWorktree(item, this.autoWorktree);
+        break;
+      }
+
+      case "new_chats_ask": {
+        const item = this.push<ApprovalItem>({
+          type: "approval",
+          requestId: event.request_id,
+          approval: "new_chats",
+          toolName: "",
+          title: "",
+          input: null,
+          toolId: event.tool_id,
+          alwaysLabel: null,
+          parts: event.parts,
+          from: event.from,
+        });
+        if (this.autoNewChats) void this.chooseNewChats(item, this.autoNewChats);
+        break;
+      }
+
+      // The core's record of the pick. Live, the card already shows it.
+      case "new_chats_chosen": {
+        const item = this.newChatsCard(event.request_id);
+        if (item && !item.answered) this.markChatsChosen(item, event.choice);
+        break;
+      }
+
+      case "new_chats_started": {
+        const item = this.newChatsCard(event.request_id);
+        if (item) item.started = event.chats;
         break;
       }
 
@@ -1489,6 +1533,27 @@ export class Chat {
     } catch (e) {
       this.push({ type: "error", text: String(e) });
     }
+  }
+
+  /** The answer to the agent's request to start chats. */
+  async chooseNewChats(item: ApprovalItem, choice: NewChatsChoice): Promise<void> {
+    try {
+      await chooseNewChats(this.sessionId, item.requestId, choice);
+      if (!item.answered) this.markChatsChosen(item, choice);
+    } catch (e) {
+      this.push({ type: "error", text: String(e) });
+    }
+  }
+
+  private newChatsCard(requestId: string): ApprovalItem | undefined {
+    return this.items.find(
+      (i): i is ApprovalItem => i.type === "approval" && i.approval === "new_chats" && i.requestId === requestId,
+    );
+  }
+
+  private markChatsChosen(item: ApprovalItem, choice: NewChatsChoice): void {
+    item.answered = "allow";
+    item.chatsChoice = choice;
   }
 
   private markChosen(item: ApprovalItem, choice: WorktreeChoice): void {

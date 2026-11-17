@@ -6,6 +6,8 @@
   import { agentLabel } from "../ipc";
   import { diffLines, title } from "../tools";
   import Clipped from "./Clipped.svelte";
+  import FileWord from "./FileWord.svelte";
+  import Markdown from "./Markdown.svelte";
 
   let { item, chat }: { item: ApprovalItem; chat: Chat } = $props();
 
@@ -70,9 +72,65 @@
     return "denied";
   });
   const closed = $derived(Boolean(item.answered) || Boolean(item.cancelled));
+
+  /** For the new-chats question: the parts, and which part's brief is open. */
+  const parts = $derived(item.parts ?? []);
+  let openBrief = $state<number | null>(null);
+  const plural = (n: number) => (n === 1 ? "1 chat" : `${n} chats`);
+  const startedCount = $derived((item.started ?? []).filter((c) => c.session_id).length);
 </script>
 
-{#if item.approval === "worktree"}
+{#if item.approval === "new_chats"}
+  {#if closed}
+    {#if item.cancelled}
+      <div class="done">cancelled · new chats</div>
+    {:else if item.chatsChoice === "no"}
+      <div class="done">declined · new chats</div>
+    {:else if item.chatsChoice === "start" && !item.started}
+      <div class="done">starting {plural(parts.length)}…</div>
+    {:else if item.started}
+      <div class="done">started {plural(startedCount)}</div>
+      <div class="started">
+        {#each item.started as c}
+          {#if c.session_id}
+            <FileWord word={`[@${c.title}]`} path={`chat:${c.session_id}`} onopen={(p) => chat.openDropped(p)} />
+          {:else}
+            <div class="faint">{c.title} <span class="denied">couldn't start: {c.error}</span></div>
+          {/if}
+        {/each}
+      </div>
+    {:else if item.answered === "deny"}
+      <!-- The user wrote instead; the agent revises and asks again if wanted. -->
+      <div class="done">skipped · new chats</div>
+    {/if}
+  {:else}
+    <div class="approval">
+      <div class="head">
+        <span class="accent">New chats</span> · {agentLabel(chat.agent)} wants to start {plural(parts.length)}{item.from ===
+        "this_chat"
+          ? " from this chat's branch"
+          : ""}
+      </div>
+      {#each parts as part, i}
+        <div class="part">
+          <button class="part-head" onclick={() => (openBrief = openBrief === i ? null : i)}>
+            <span class="bright">{part.title}</span>
+            {#if part.agent && part.agent !== chat.agent}<span class="faint"> · {agentLabel(part.agent)}</span>{/if}
+          </button>
+          {#if part.summary}<div>{part.summary}</div>{/if}
+          {#if part.why}<div class="dim">{part.why}</div>{/if}
+          {#if openBrief === i}
+            <div class="brief"><Markdown text={part.brief} /></div>
+          {/if}
+        </div>
+      {/each}
+      <div class="actions">
+        <button class="primary" onclick={() => chat.chooseNewChats(item, "start")}>Start {plural(parts.length)}</button>
+        <button onclick={() => chat.chooseNewChats(item, "no")}>Don't start</button>
+      </div>
+    </div>
+  {/if}
+{:else if item.approval === "worktree"}
   {#if closed}
     <!-- "New worktree" is followed by the chat's own note naming the branch. -->
     {#if item.cancelled}
@@ -188,6 +246,28 @@
   }
   .denied {
     color: var(--bad);
+  }
+  .started {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    margin-left: 1ch;
+  }
+  .part + .part {
+    margin-top: 0.4em;
+  }
+  .part-head {
+    text-align: left;
+    cursor: pointer;
+  }
+  .part-head:hover .bright {
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+  }
+  .brief {
+    margin: 0.3em 0 0 1ch;
+    padding-left: 1ch;
+    border-left: 1px solid var(--line);
   }
   .head {
     color: var(--dim);

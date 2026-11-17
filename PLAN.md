@@ -739,6 +739,63 @@ Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-roll
   ends the one on show. The report has `side` (the shown one's items),
   `sides` (every tab's title), `panelView` and `planPending`.
 
+### Starting chats from a plan (`sessions/new_chats.rs`, built 2026-11-17)
+
+When the user asks, an agent splits work into parts and asks to start a chat
+for each. One card covers them all. Once started, each is an ordinary chat:
+the user manages them, and the chat that asked doesn't follow them.
+
+- **The request**: the app's `harness_new_chats` tool group, one tool
+  `start` (`mcp__harness_new_chats__start` for both agents), offered to every
+  main chat next to the worktree tool. Input: `parts` (1 to 8 of `title`,
+  `summary`, `why`, `brief`, optional `agent`) and optional `from` (`main`, the
+  default, or `this_chat`). The brief shape follows Claude Code's
+  send-to-project handoff. The rule (only when the user explicitly asks; not
+  for subagents; briefs stand alone; `from` only when asked, commit first) is
+  in both the instructions and the tool's description, like the worktree
+  rule. It has `anthropic/alwaysLoad` for the same reason.
+- **Returns at once**, like the worktree tool (Cursor's 60 s limit on a tool
+  call). Refused at once, with no card: no parts, a part without a title or
+  brief, more than 8, an agent that isn't installed, a folder outside a git
+  repo, or a card already open.
+- **The card** (`NewChatsAsk`, saved) lists each part's title, summary and
+  why. A click opens the full brief. "Start n chats" or "Don't start". It
+  outlives the turn and an app restart, like the worktree card.
+- **Start** (`NewChatsChosen`, then `NewChatsStarted` with one entry per
+  part): in the background, one part at a time. Each gets:
+  - a worktree from `worktree::create`;
+  - a saved row (title, agent, start, worktree "live", choice "worktree");
+  - then its brief as its first message, through `send_inner`. The row
+    already exists, so no written title or project-chats note.
+  A hidden note goes with the brief: the chat was started from another chat
+  (linked) to do one part; read the brief and the code, reply with what you
+  understood, how you'd do it and any questions; change no files until the
+  user says go. A part that fails is cleaned up (folder, branch, row) and
+  listed with its error, and the others carry on. The asking chat's agent
+  hears which chats started (as `[@Title](<chat:ID>)` links) with the user's
+  next message (a pending note), so starting costs it no turn.
+- **Don't start**: a pending note says so. **A message instead**: the card
+  closes as skipped, and the message goes with a note to change the briefs
+  and ask again if still wanted.
+- **Branches start** where a new chat in the project would (`head_of` on the
+  main folder), or with `this_chat` from the asking chat's worktree branch
+  (its commits only). With no worktree, it falls back to the main folder.
+- **Agent**: the asking chat's agent, mode, model and effort; a part naming
+  another agent gets that agent's defaults.
+- **Not covered**: parts that clash or depend on each other (the user's
+  call), coordinating the children, folders outside git.
+- **Tested live** (2026-11-17, self-test with `HARNESS_DATA_DIR`):
+  - Haiku split two parts. On start, both chats showed in the sidebar, each
+    in its own worktree, and each replied with its understanding and plan.
+    Neither changed any files.
+  - A large task with no request for chats asked for a worktree, not chats.
+  - A typed "make it three parts, branch them off this chat" closed the card
+    as skipped, and Haiku asked again with three parts and `from:
+    this_chat`.
+  - Cursor (GPT-5.3 Codex) as the asking chat gave the README part to
+    Claude Code as asked. Both children replied without edits.
+- **Self-test step**: `@newchats <start|no|none>` answers the card.
+
 ### Session lifecycle (`sessions.rs`)
 
 As built. Per chat the manager keeps: the live process (if any), `busy` (a

@@ -1,8 +1,10 @@
 //! Keeps track of chats and their live agent processes: start on the first
 //! message, resume after an exit, shut a process down once its chat has been
 //! idle for a while, and save what happens. See PLAN.md, "Session lifecycle".
-//! Worktrees and the trash are in `sessions/worktrees.rs`.
+//! Worktrees and the trash are in `sessions/worktrees.rs`; chats started
+//! from another chat in `sessions/new_chats.rs`.
 
+mod new_chats;
 mod worktrees;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -150,6 +152,12 @@ struct Session {
     /// The worktree tool's latest call, until its question goes on screen,
     /// so the chat can fold the call under the question.
     worktree_tool_id: Option<String>,
+    /// The agent's request to start chats, while it waits for the user.
+    chats_ask: Option<new_chats::ChatsAsk>,
+    /// The saved history was checked for a new-chats question left open.
+    chats_ask_checked: bool,
+    /// The new-chats tool's latest call, until its question goes on screen.
+    new_chats_tool_id: Option<String>,
     /// Tool calls that run `gh pr create`, until their results arrive: what
     /// they print names the chat's new pull request.
     pr_calls: HashSet<String>,
@@ -516,6 +524,8 @@ impl SessionManager {
                             .unwrap_or_default();
                         // Every main chat's agent asks for a worktree this way.
                         tools.push(self.worktree_tools(session_id));
+                        // ...and starts chats for parts of a piece of work this way.
+                        tools.push(self.new_chats_tools(session_id));
                         tools
                     },
                     notes: notes_for(&inner.notes, session_id),
@@ -546,7 +556,7 @@ impl SessionManager {
         }
 
         let agent = self.agent(session_id)?;
-        let replied = if show { self.answer_by_message(session_id, agent.as_ref()) } else { None };
+        let replied = if show { self.answer_by_message(session_id, agent.as_ref()) } else { Vec::new() };
         // A typed `/name` for one of the app's skills goes to the agent with
         // the skill attached; the chat keeps what the user typed.
         let expanded = if show { inner.skills.expand(text) } else { None };
@@ -560,10 +570,10 @@ impl SessionManager {
         if show && !created && !command {
             app_notes.extend(inner.store.take_pending_note(session_id).ok().flatten());
         }
-        // The message answered the worktree question; a command can't carry
-        // the note, so the agent hears of it only by the question closing.
-        if let Some(note) = replied.filter(|_| !command) {
-            app_notes.push(note.to_string());
+        // The message answered the worktree or new-chats question; a command
+        // can't carry the note, so the agent hears of it only by the question closing.
+        if !command {
+            app_notes.extend(replied.iter().map(|note| note.to_string()));
         }
         let mut text = with_app_notes(&app_notes, expanded.as_deref().unwrap_or(text));
         // A new chat's first message carries the project's latest chats, so
@@ -693,10 +703,15 @@ impl SessionManager {
     /// the worktree question...). The message is the answer: each open
     /// request is turned down with a note pointing the agent at the message,
     /// which follows. Left open, they would hold the turn, and the message
-    /// queued behind it. Returns a note to put before the message when the
-    /// worktree question was open (that call has already returned).
-    fn answer_by_message(&self, session_id: &str, agent: &dyn RunningAgent) -> Option<&'static str> {
-        let note = self.reply_closes_ask(session_id);
+    /// queued behind it. Returns notes to put before the message when the
+    /// worktree or new-chats question was open (those calls have already
+    /// returned).
+    fn answer_by_message(&self, session_id: &str, agent: &dyn RunningAgent) -> Vec<&'static str> {
+        let note: Vec<&'static str> = self
+            .reply_closes_ask(session_id)
+            .into_iter()
+            .chain(self.reply_closes_chats_ask(session_id))
+            .collect();
         for request_id in agent.open_requests() {
             if agent
                 .answer_approval(&request_id, Decision::Deny, Some(REPLIED.to_string()), None, None)
@@ -816,6 +831,21 @@ impl SessionManager {
                 } if name == worktrees::CALL_NAME => {
                     if let Some(session) = manager.0.sessions.lock().unwrap().get_mut(&id) {
                         session.worktree_tool_id = Some(tool_id.clone());
+                    }
+                }
+                AgentEvent::AssistantBlock {
+                    block: Block::ToolCall { tool_id, name, .. },
+                    parent_tool_id: None,
+                    ..
+                }
+                | AgentEvent::ToolInput {
+                    tool_id,
+                    name,
+                    parent_tool_id: None,
+                    ..
+                } if name == new_chats::CALL_NAME => {
+                    if let Some(session) = manager.0.sessions.lock().unwrap().get_mut(&id) {
+                        session.new_chats_tool_id = Some(tool_id.clone());
                     }
                 }
                 AgentEvent::AssistantBlock {
@@ -2285,5 +2315,207 @@ are there now, so use the new paths.)\n\ncarry on",
         assert!(!rig.manager.is_live("s1") && !rig.manager.is_live("s2"));
         assert_eq!(rig.count("kill"), 1, "the background chat is stopped");
         assert_eq!(rig.count("close"), 1, "the plain chat is closed");
+    }
+
+    // Chats started from another chat.
+
+    impl Rig {
+        /// The agent calls the new-chats tool; returns what the call answers.
+        async fn ask_chats(&self, args: serde_json::Value) -> String {
+            let tools = self.manager.new_chats_tools("s1");
+            let content = (tools.call)("start".into(), args).await.unwrap();
+            content[0]["text"].as_str().unwrap().to_string()
+        }
+        fn chats_card(&self) -> String {
+            self.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find_map(|e| match e {
+                    AgentEvent::NewChatsAsk { request_id, .. } => Some(request_id.clone()),
+                    _ => None,
+                })
+                .expect("a question")
+        }
+        /// Waits for the chats to be started; returns what was started.
+        async fn started(&self) -> Vec<crate::events::StartedChat> {
+            for _ in 0..200 {
+                let found = self.seen.lock().unwrap().iter().find_map(|e| match e {
+                    AgentEvent::NewChatsStarted { chats, .. } => Some(chats.clone()),
+                    _ => None,
+                });
+                if let Some(chats) = found {
+                    return chats;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!("the chats never started");
+        }
+    }
+
+    fn two_parts() -> serde_json::Value {
+        serde_json::json!({ "parts": [
+            { "title": "Window part", "summary": "The card", "why": "Users see it", "brief": "Build the card." },
+            { "title": "Core part", "summary": "The tool", "why": "Agents call it", "brief": "Build the tool." },
+        ]})
+    }
+
+    #[tokio::test]
+    async fn started_chats_each_get_a_worktree_and_their_brief() {
+        let rig = rig(LONG);
+        let repo = scratch_repo();
+        rig.send_at(&repo, "auto", "split it up").await;
+
+        assert!(rig.ask_chats(two_parts()).await.contains("End your turn"));
+        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::NewChatsAsk { parts, from, .. } if parts.len() == 2 && from == "main")), 1);
+        // Asked again while it's open: no second question.
+        assert!(rig.ask_chats(two_parts()).await.contains("already being asked"));
+
+        rig.manager.choose_new_chats("s1", &rig.chats_card(), "start").await.unwrap();
+        let chats = rig.started().await;
+        assert_eq!(chats.len(), 2);
+        let main_commit = worktree::head_of(&repo).unwrap().1;
+        for (chat, brief) in chats.iter().zip(["Build the card.", "Build the tool."]) {
+            assert_eq!(chat.error, None);
+            let id = chat.session_id.clone().unwrap();
+            let row = rig.store.session(&id).unwrap().unwrap();
+            assert_eq!(row.title, chat.title);
+            assert_eq!(row.agent, crate::agent::CLAUDE);
+            assert_eq!(row.mode, "auto", "same agent: the asking chat's mode");
+            let git = rig.store.chat_git(&id).unwrap().unwrap();
+            assert_eq!(git.status.as_deref(), Some("live"));
+            let wt = git.worktree.unwrap();
+            assert_eq!(wt.base_commit, main_commit);
+            assert!(wt.work_path().join("app.py").exists());
+            // The brief is the chat's first message; the app's note rides along unsaved.
+            let saved = rig.store.events(&id).unwrap();
+            assert!(saved.iter().any(|e| matches!(e, AgentEvent::UserMessage { text, .. } if text == brief)));
+            let said = rig.told().into_iter().find(|t| t.contains(brief)).unwrap();
+            assert!(said.contains("This chat was started from another chat") && said.contains("<chat:s1>"), "{said}");
+        }
+        // Each started in its own worktree.
+        let folders = rig.fake.folders.lock().unwrap().clone();
+        assert_eq!(folders.len(), 3);
+        assert_ne!(folders[1], folders[2]);
+        assert!(folders[1..].iter().all(|f| f != &repo));
+
+        // The asking agent hears of them with the next message.
+        rig.send_at(&repo, "auto", "thanks").await;
+        let said = rig.told().into_iter().find(|t| t.contains("thanks")).unwrap();
+        assert!(said.contains("The user started the chats you proposed") && said.contains("[@Window part](<chat:"), "{said}");
+    }
+
+    #[tokio::test]
+    async fn chats_can_branch_off_the_asking_chat() {
+        let rig = rig(LONG);
+        let repo = scratch_repo();
+        let wt = rig.into_worktree(&repo).await;
+        std::fs::write(wt.path.join("new.py"), "two\n").unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(&wt.path).args(args).output().unwrap().status.success());
+        };
+        git(&["add", "-A"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "two"]);
+        let parent_commit = worktree::head_of(&wt.path).unwrap().1;
+
+        let mut args = two_parts();
+        args["from"] = "this_chat".into();
+        rig.ask_chats(args).await;
+        rig.manager.choose_new_chats("s1", &rig.chats_card(), "start").await.unwrap();
+        for chat in rig.started().await {
+            let child = rig.store.chat_git(&chat.session_id.unwrap()).unwrap().unwrap().worktree.unwrap();
+            assert_eq!(child.base_commit, parent_commit);
+            assert!(child.work_path().join("new.py").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_part_can_name_another_agent() {
+        let rig = rig(LONG);
+        let cursor = Arc::new(Fake::default());
+        rig.manager.0.agents.add(crate::agent::CURSOR, cursor.clone(), Some("cursor".into()));
+        let repo = scratch_repo();
+        rig.send_at(&repo, "auto", "split it up").await;
+        let mut args = two_parts();
+        args["parts"][1]["agent"] = crate::agent::CURSOR.into();
+        rig.ask_chats(args).await;
+        rig.manager.choose_new_chats("s1", &rig.chats_card(), "start").await.unwrap();
+        let chats = rig.started().await;
+        let row = rig.store.session(chats[1].session_id.as_ref().unwrap()).unwrap().unwrap();
+        assert_eq!((row.agent.as_str(), row.model.as_str(), row.mode.as_str()), (crate::agent::CURSOR, "default", "default"));
+        assert_eq!(cursor.folders.lock().unwrap().len(), 1);
+        let first = rig.store.session(chats[0].session_id.as_ref().unwrap()).unwrap().unwrap();
+        assert_eq!(first.agent, crate::agent::CLAUDE);
+    }
+
+    #[tokio::test]
+    async fn declining_starts_nothing_and_the_agent_hears_later() {
+        let rig = rig(LONG);
+        let repo = scratch_repo();
+        rig.send_at(&repo, "auto", "split it up").await;
+        rig.ask_chats(two_parts()).await;
+        let card = rig.chats_card();
+        assert!(rig.manager.choose_new_chats("s1", "nope", "start").await.is_err());
+        rig.manager.choose_new_chats("s1", &card, "no").await.unwrap();
+        assert!(rig.manager.choose_new_chats("s1", &card, "start").await.is_err());
+        assert_eq!(rig.fake.folders.lock().unwrap().len(), 1);
+        assert_eq!(rig.store.session_ids().unwrap().len(), 1);
+        rig.send_at(&repo, "auto", "ok").await;
+        assert!(rig.told().iter().any(|t| t.contains("declined to start the chats") && t.contains("ok")));
+    }
+
+    #[tokio::test]
+    async fn a_message_instead_of_an_answer_asks_for_new_briefs() {
+        let rig = rig(LONG);
+        let repo = scratch_repo();
+        rig.send_at(&repo, "auto", "split it up").await;
+        rig.ask_chats(two_parts()).await;
+        let card = rig.chats_card();
+        rig.send_at(&repo, "auto", "make it three parts").await;
+        let said = rig.told().into_iter().find(|t| t.contains("make it three parts")).unwrap();
+        assert!(said.contains("instead of answering whether to start the chats"), "{said}");
+        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::ApprovalAnswered { request_id, .. } if *request_id == card)), 1);
+        assert!(rig.manager.choose_new_chats("s1", &card, "start").await.is_err());
+        // It may ask again.
+        assert!(rig.ask_chats(two_parts()).await.contains("End your turn"));
+    }
+
+    #[tokio::test]
+    async fn a_request_that_cant_be_met_is_turned_down_at_once() {
+        let rig = rig(LONG);
+        let repo = scratch_repo();
+        rig.send_at(&repo, "auto", "split it up").await;
+        assert!(rig.ask_chats(serde_json::json!({ "parts": [] })).await.contains("at least one part"));
+        assert!(rig.ask_chats(serde_json::json!({ "parts": [{ "title": "x" }] })).await.contains("needs a title and a brief"));
+        let mut args = two_parts();
+        args["parts"][0]["agent"] = crate::agent::CURSOR.into();
+        assert!(rig.ask_chats(args).await.contains("isn't installed"));
+        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::NewChatsAsk { .. })), 0);
+
+        // Outside a repo.
+        let rig = rig_with(LONG, LONG, LONG, PrLookup::none());
+        let plain = std::env::temp_dir().join(format!("harness-plain-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&plain).unwrap();
+        rig.send_at(&plain, "auto", "split it up").await;
+        assert!(rig.ask_chats(two_parts()).await.contains("isn't in a git repo"));
+    }
+
+    #[tokio::test]
+    async fn an_open_chats_question_survives_a_restart() {
+        let rig = rig(LONG);
+        let repo = scratch_repo();
+        rig.send_at(&repo, "auto", "split it up").await;
+        rig.ask_chats(two_parts()).await;
+        let card = rig.chats_card();
+        // What a restart loses: the question in memory.
+        {
+            let mut sessions = rig.manager.0.sessions.lock().unwrap();
+            let session = sessions.get_mut("s1").unwrap();
+            session.chats_ask = None;
+            session.chats_ask_checked = false;
+        }
+        rig.manager.choose_new_chats("s1", &card, "start").await.unwrap();
+        assert_eq!(rig.started().await.len(), 2);
     }
 }
