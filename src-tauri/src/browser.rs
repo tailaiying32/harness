@@ -31,8 +31,8 @@ pub const INSTRUCTION: &str = "This app has a browser in its side panel for loca
 check a web UI you are building, use the harness_browser tools (open, read, click, type, console, \
 screenshot, resize, tabs, close); the user sees the same pages. It has tabs: open loads into the \
 tab on show unless you ask for a new one, and every tool takes an optional tab id (see tabs). The \
-panel is narrow, so pages show their small-screen layout; use resize (e.g. 1440 x 900) to check \
-the desktop layout.";
+panel is narrow, so pages show their small-screen layout; use resize to give a page a window \
+size of your choosing.";
 
 /// How long an action may take before it is given up.
 const ACTION_WAIT: Duration = Duration::from_secs(15);
@@ -144,12 +144,12 @@ pub fn tools() -> Value {
         },
         {
             "name": "resize",
-            "description": "Set a page's window size in CSS pixels, like resizing a browser window: the page lays out at exactly this size (window.innerWidth/innerHeight), and the side panel shows it shrunk to fit. Screenshots come out at this size. E.g. 1440 x 900 for desktop, 390 x 844 for a phone. Stays with the tab until changed, across loads. Omit height to fill the panel's height; omit width (or 0) to go back to the panel's own size.",
+            "description": "Set a page's window size in CSS pixels, like resizing a browser window: the page lays out at exactly this size (window.innerWidth/innerHeight), and the side panel shows it shrunk to fit. Screenshots come out at this size. Stays with the tab until changed, across loads. Omit height to fill the panel's height; omit width (or 0) to go back to the panel's own size.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "width": { "type": "number", "description": "Window width in CSS pixels, e.g. 1440" },
-                    "height": { "type": "number", "description": "Window height in CSS pixels, e.g. 900" },
+                    "width": { "type": "number", "description": "Window width in CSS pixels" },
+                    "height": { "type": "number", "description": "Window height in CSS pixels" },
                     "tab": tab_param(),
                 },
             },
@@ -1188,6 +1188,17 @@ fn apply_place(webview: &Webview, place: Place) {
     let x = if place.visible { frame.x } else { PARK_X };
     let _ = webview.set_size(LogicalSize::new(frame.width, frame.height));
     let _ = webview.set_position(LogicalPosition::new(x, frame.y));
+    // On Mac the page is shrunk with WebKit's view scale, laid out at view
+    // size / scale. Page zoom (the other way, used elsewhere) makes WebKit's
+    // "smart minimum" text size kick in: text of 9 px or more is kept at
+    // least 9 points on screen, so at 28% a 12.5 px font became 32 px and the
+    // whole page ballooned.
+    #[cfg(target_os = "macos")]
+    {
+        let scale = frame.zoom;
+        let _ = webview.with_webview(move |platform| mac::set_view_scale(platform.inner(), scale));
+    }
+    #[cfg(not(target_os = "macos"))]
     let _ = webview.set_zoom(frame.zoom);
 }
 
@@ -1356,6 +1367,25 @@ mod mac {
         }
         // SAFETY: both are live NSViews, on the main thread.
         unsafe { msg_send![&*hit, isDescendantOf: view as *mut AnyObject] }
+    }
+
+    /// Draws the page `scale` times its size, laid out at the view's size /
+    /// `scale` (WebKit's `_setViewScale:` with layout mode "dynamic size
+    /// computed from view scale"). Text sizes are left as the page set them.
+    pub fn set_view_scale(view: *mut c_void, scale: f64) {
+        // SAFETY: as in `snapshot`: wry's live WKWebView, on the main thread.
+        let view: &WKWebView = unsafe { &*(view as *const WKWebView) };
+        let known = |sel| -> bool { unsafe { msg_send![view, respondsToSelector: sel] } };
+        if !known(objc2::sel!(_setViewScale:)) || !known(objc2::sel!(_setLayoutMode:)) {
+            return;
+        }
+        // _WKLayoutModeViewSize = 0, _WKLayoutModeDynamicSizeComputedFromViewScale = 2.
+        let mode: usize = if scale < 1.0 { 2 } else { 0 };
+        // SAFETY: both checked above; they take an NSUInteger and a CGFloat.
+        unsafe {
+            let _: () = msg_send![view, _setLayoutMode: mode];
+            let _: () = msg_send![view, _setViewScale: scale];
+        }
     }
 
     /// Leaves `script` as the page's only start-up script, for every load from now on.

@@ -1421,7 +1421,14 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   Claude to see a page as a desktop user would, not the narrow panel's shape;
   the old width-only zoom gave a tall page (1440 × 2160) and a blurry
   screenshot. How: the web view is the size times a zoom, and the page is
-  zoomed the same (`Place::frame`). wry and WebKit drop fractions of a point
+  zoomed the same (`Place::frame`). On Mac the zoom is WebKit's view scale
+  (`_setViewScale:` with `_setLayoutMode:` 2, "dynamic size computed from view
+  scale"; private, checked with `respondsToSelector:`), not page zoom: page
+  zoom brings in WebKit's "smart minimum" text size (text of 9 px or more is
+  kept at least 9 points on screen), so at 28% a 12.5 px font became 32 px
+  and the page ballooned (the user caught it, 2026-11-16). View scale alone
+  (mode 0) laid fixed elements and media queries out at the small view.
+  Elsewhere it is still page zoom. wry and WebKit drop fractions of a point
   and WebKit rounds the layout down, so the view gets whole-point sizes picked
   to map back exactly (live, a 521.09 px panel first gave 1439 × 900). No
   height: as tall as the panel holds. No width: fits the panel again. Stays
@@ -1432,7 +1439,10 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   1568 × 980 sharp screenshot with 11 px text readable. A page that isn't on
   screen (window hidden, display off; parked likely too) gets no frames, so
   its resize handlers wait until it shows; CSS layout is right at once. Not
-  checked by eye: the shrunk page in the panel (the display was off).
+  checked by eye: the shrunk page in the panel (the display was off). The
+  tool text and instruction line name no sizes: with "e.g. 1440 x 900" there,
+  every agent copied it, and the user found it too small. Claude picks the
+  size itself (user, 2026-11-16).
 - **Window side:** `Chat.browserTabs` and `browserShownTab`, sent whole by
   the core in a `browser_tabs` event on every change (an empty list = closed);
   `Chat.browser` is the tab on show; `browserOn` (view open, maybe with no tab
