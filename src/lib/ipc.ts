@@ -91,6 +91,7 @@ export type AgentEvent =
   | { kind: "sign_in_needed"; message: string }
   | { kind: "title_changed"; title: string }
   | { kind: "batch_titled"; tool_id: string; title: string }
+  | { kind: "doc_saved"; from: string; to: string }
   | { kind: "worktree_ask"; request_id: string; repo_root: string; tool_id: string | null; name?: string | null }
   | { kind: "worktree_chosen"; choice: WorktreeChoice }
   | { kind: "worktree_changed"; status: WorktreeStatus; branch: string | null }

@@ -802,6 +802,7 @@ const commands: Record<string, (args: Args) => unknown> = {
     const to = `${String(args.project)}/docs/${from.split("/").pop()}`;
     docsByPath.set(to, docsByPath.get(from) ?? "");
     docsByPath.delete(from);
+    emit(String(args.chatId), { kind: "doc_saved", from, to });
     return to;
   },
 };
