@@ -9,7 +9,7 @@
 import { defaultKeymap, history, historyKeymap, insertNewline } from "@codemirror/commands";
 import { defineLanguageFacet, forceParsing, Language, LanguageSupport, syntaxTree } from "@codemirror/language";
 import { GFM, parser as markdownParser } from "@lezer/markdown";
-import { indent, newLine, outdent, renumbered, type Edit } from "./editing";
+import { indent, newLine, outdent, renumbered, todo, type Edit } from "./editing";
 import { renderMarkdown } from "../markdown";
 import { EditorState, type Range, StateEffect, StateField } from "@codemirror/state";
 import {
@@ -152,8 +152,16 @@ function decorate(view: EditorView): DecorationSet {
             out.push(mark("cm-md-mark").range(node.from, node.to));
             return;
           }
+          case "TaskMarker": {
+            // The box toggles on click (see the mousedown handler); a done
+            // item's text goes dim.
+            const done = /x/i.test(doc.sliceString(node.from, node.to));
+            out.push(mark(done ? "cm-md-task cm-md-task-done" : "cm-md-task").range(node.from, node.to));
+            const task = node.node.parent;
+            if (done && task && task.to > node.to) out.push(mark("cm-md-done").range(node.to, task.to));
+            return;
+          }
           case "QuoteMark":
-          case "TaskMarker":
           case "TableDelimiter":
           case "CodeInfo":
           case "HorizontalRule":
@@ -182,6 +190,13 @@ function decorate(view: EditorView): DecorationSet {
   return Decoration.set(out, true);
 }
 
+/** Ticks or clears the to-do box ("[ ]" or "[x]") starting at `at`. */
+function toggleTask(view: EditorView, at: number): void {
+  const box = view.state.doc.sliceString(at, at + 3);
+  if (!/^\[[ xX]\]$/.test(box)) return;
+  view.dispatch({ changes: { from: at + 1, to: at + 2, insert: box[1] === " " ? "x" : " " }, userEvent: "input" });
+}
+
 const livePreview = ViewPlugin.fromClass(
   class {
     decorations: DecorationSet;
@@ -202,10 +217,17 @@ const livePreview = ViewPlugin.fromClass(
     eventHandlers: {
       // A shown link is followed, not edited: CodeMirror leaves the press
       // alone, and the click goes on to the panel's own link handling.
-      mousedown(event) {
+      // A to-do's box is ticked or cleared, and the cursor stays put.
+      mousedown(event, view) {
         const target = event.target as HTMLElement;
         if (target.closest("a.cm-md-link")) {
           event.preventDefault();
+          return true;
+        }
+        const box = target.closest(".cm-md-task");
+        if (box && event.button === 0) {
+          event.preventDefault();
+          toggleTask(view, view.posAtDOM(box));
           return true;
         }
         return false;
@@ -344,6 +366,10 @@ const look = EditorView.theme({
   ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)" },
   ".cm-placeholder": { color: "var(--faint)" },
   ".cm-md-mark": { color: "var(--faint)" },
+  ".cm-md-task": { color: "var(--faint)", cursor: "pointer" },
+  ".cm-md-task:hover": { color: "var(--bright)" },
+  ".cm-md-task-done": { color: "var(--accent)" },
+  ".cm-md-done": { color: "var(--dim)" },
   ".cm-md-h": { fontWeight: "700" },
   ".cm-md-h1": { color: "var(--accent)", borderBottom: "1px solid var(--line)", paddingBottom: "0.3em" },
   ".cm-md-h2": { color: "var(--bright)" },
@@ -404,6 +430,8 @@ export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): Edi
           { key: "ArrowDown", run: intoTable(true) },
           { key: "ArrowUp", run: intoTable(false) },
           { key: "Shift-Tab", run: (view) => listCommand(outdent)(view) || true },
+          // Cmd+L: to-do boxes on the lines touched, or off if they all have them.
+          { key: "Mod-l", run: listCommand(todo), preventDefault: true },
           ...historyKeymap,
           ...defaultKeymap,
         ]),
