@@ -265,9 +265,11 @@ export class Chat {
     chat.replaying = true;
     for (const event of events) chat.handle(event);
     chat.replaying = false;
-    // Docs in the chat's folder are read as they are now; one that was saved
-    // to the project (or deleted) since loses its tab.
-    for (const doc of chat.docs) if (chat.isChatDoc(doc.path)) void chat.refreshDoc(doc.path);
+    // Docs in the chat's folder are read as they are now; one deleted since
+    // loses its tab. Saved ones are read at their new place.
+    for (const doc of chat.docs) {
+      if (chat.isChatDoc(doc.path) || chat.wasSaved(doc.path)) void chat.refreshDoc(doc.path);
+    }
     chat.mode = row.mode as Mode;
     chat.modelChoice = row.model;
     chat.effortChoice = row.effort ?? "default";
@@ -657,11 +659,40 @@ export class Chat {
       this.showError(`Couldn't save it to the project: ${e}`);
       return;
     }
-    const doc = this.docs.find((d) => d.path === path);
-    if (doc) doc.path = saved;
-    if (this.panelTab === path) this.panelTab = saved;
+    this.docSaved(path, saved);
     this.appNotes.push(`The user saved the doc ${path} to the project; it is now ${saved}, so edit it there.`);
     void this.refreshDoc(saved);
+  }
+
+  /** Docs saved to the project: where each went, by its old path. Rebuilt on reopen from the history. */
+  private savedTo = new Map<string, string>();
+
+  /** A doc's path now, following any saves to the project. */
+  private currentPath(path: string): string {
+    for (let i = 0; i < 10 && this.savedTo.has(path); i++) path = this.savedTo.get(path)!;
+    return path;
+  }
+
+  /** A path a doc was saved to (so it is read from disk, like a chat doc). */
+  wasSaved(path: string): boolean {
+    for (const to of this.savedTo.values()) if (to === path) return true;
+    return false;
+  }
+
+  /**
+   * A doc moved from the chat's folder to the project: its tab and links to
+   * it follow. Done when saving and again by the saved event (live, or
+   * replayed on reopen); the second time changes nothing.
+   */
+  private docSaved(from: string, to: string): void {
+    this.savedTo.set(from, to);
+    const doc = this.docs.find((d) => d.path === from);
+    if (doc) {
+      // A tab at the new path already (opened by a link) wins; the old one goes.
+      if (this.docs.some((d) => d.path === to)) this.docs = this.docs.filter((d) => d !== doc);
+      else doc.path = to;
+    }
+    if (this.panelTab === from) this.panelTab = to;
   }
 
   /** Keeps the notes as typed and saves them. */
@@ -744,6 +775,8 @@ export class Chat {
    */
   async openFile(path: string): Promise<void> {
     if (this.owner) return this.owner.openFile(path);
+    // A link to a doc since saved to the project opens it there.
+    path = this.currentPath(path);
     if (path === this.planPath && this.plan) {
       this.openPanel(PLAN_TAB);
       return;
@@ -1114,6 +1147,10 @@ export class Chat {
 
       case "title_changed":
         this.title = event.title;
+        break;
+
+      case "doc_saved":
+        this.docSaved(event.from, event.to);
         break;
 
       // Claude or the user opened, moved or closed a page. The panel isn't

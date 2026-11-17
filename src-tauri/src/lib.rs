@@ -475,8 +475,10 @@ async fn save_doc_to_project(state: State<'_, AppState>, chat_id: String, path: 
     tauri::async_runtime::spawn_blocking(move || {
         let notes = sessions.notes();
         let saved = docs::save_to_project(&notes.folder(&chat_id)?, &notes.path(&chat_id)?, Path::new(&path), Path::new(&project))?;
-        docs.read(&saved)?;
-        Ok(saved.display().to_string())
+        let saved = saved.display().to_string();
+        sessions.doc_saved(&chat_id, &path, &saved);
+        docs.read(Path::new(&saved))?;
+        Ok(saved)
     })
     .await
     .map_err(|e| e.to_string())?
