@@ -141,17 +141,21 @@ struct Session {
     repo_root: Option<PathBuf>,
     /// The agent's request for a worktree, while it waits for the user.
     ask: Option<Ask>,
+    /// The saved history was checked for a worktree question left open
+    /// before the app restarted (see `load_open_ask`).
+    ask_checked: bool,
+    /// The worktree tool's latest call, until its question goes on screen,
+    /// so the chat can fold the call under the question.
+    worktree_tool_id: Option<String>,
     /// Tool calls that run `gh pr create`, until their results arrive: what
     /// they print names the chat's new pull request.
     pr_calls: HashSet<String>,
 }
 
-/// The agent asked for a worktree, and waits for the user's answer.
+/// The agent asked for a worktree; the question waits for the user.
 struct Ask {
     repo_root: PathBuf,
-    /// Requests waiting for the answer, as (request ID, the request).
-    held: Vec<(String, AgentEvent)>,
-    /// The request ID naming the question on screen.
+    /// The ID naming the question on screen.
     card: String,
     /// The name the agent suggested, used for the branch.
     name: Option<String>,
@@ -497,11 +501,16 @@ impl SessionManager {
                     model,
                     effort: saved.map(|s| s.effort),
                     side: None,
-                    tools: inner
-                        .app_tools
-                        .get()
-                        .map(|tools| tools(session_id, &project_path.to_string_lossy()))
-                        .unwrap_or_default(),
+                    tools: {
+                        let mut tools = inner
+                            .app_tools
+                            .get()
+                            .map(|tools| tools(session_id, &project_path.to_string_lossy()))
+                            .unwrap_or_default();
+                        // Every main chat's agent asks for a worktree this way.
+                        tools.push(self.worktree_tools(session_id));
+                        tools
+                    },
                     notes: notes_for(&inner.notes, session_id),
                     project_docs: project_docs_for(&inner.notes, session_id),
                     memory: inner.notes.project_memory(session_id),
@@ -528,9 +537,7 @@ impl SessionManager {
         }
 
         let agent = self.agent(session_id)?;
-        if show {
-            self.answer_by_message(session_id, agent.as_ref());
-        }
+        let replied = if show { self.answer_by_message(session_id, agent.as_ref()) } else { None };
         // A typed `/name` for one of the app's skills goes to the agent with
         // the skill attached; the chat keeps what the user typed.
         let expanded = if show { inner.skills.expand(text) } else { None };
@@ -543,6 +550,11 @@ impl SessionManager {
         let mut app_notes = app_notes.to_vec();
         if show && !created && !command {
             app_notes.extend(inner.store.take_pending_note(session_id).ok().flatten());
+        }
+        // The message answered the worktree question; a command can't carry
+        // the note, so the agent hears of it only by the question closing.
+        if let Some(note) = replied.filter(|_| !command) {
+            app_notes.push(note.to_string());
         }
         let mut text = with_app_notes(&app_notes, expanded.as_deref().unwrap_or(text));
         // A new chat's first message carries the project's latest chats, so
@@ -668,12 +680,14 @@ impl SessionManager {
         Some(reminder + ".")
     }
 
-    /// The user wrote while Claude waited on a question (a plan, a tool, the
-    /// worktree question...). The message is the answer: each open request is
-    /// turned down with a note pointing Claude at the message, which follows.
-    /// Left open, they would hold the turn, and the message queued behind it.
-    fn answer_by_message(&self, session_id: &str, agent: &dyn RunningAgent) {
-        self.reply_closes_ask(session_id, agent);
+    /// The user wrote while the agent waited on a question (a plan, a tool,
+    /// the worktree question...). The message is the answer: each open
+    /// request is turned down with a note pointing the agent at the message,
+    /// which follows. Left open, they would hold the turn, and the message
+    /// queued behind it. Returns a note to put before the message when the
+    /// worktree question was open (that call has already returned).
+    fn answer_by_message(&self, session_id: &str, agent: &dyn RunningAgent) -> Option<&'static str> {
+        let note = self.reply_closes_ask(session_id);
         for request_id in agent.open_requests() {
             if agent
                 .answer_approval(&request_id, Decision::Deny, Some(REPLIED.to_string()), None, None)
@@ -689,6 +703,7 @@ impl SessionManager {
                 );
             }
         }
+        note
     }
 
     /// Waits for the chat's process to be gone, after a stop.
@@ -754,10 +769,6 @@ impl SessionManager {
             if !manager.0.sessions.lock().unwrap().contains_key(&id) {
                 return;
             }
-            // The agent's request for a worktree waits for the user's answer.
-            let Some(event) = manager.screen_worktree_call(&id, event) else {
-                return;
-            };
             let mut event = event;
             match &event {
                 // Saved at once, so a crash before the turn ends can still resume.
@@ -783,6 +794,21 @@ impl SessionManager {
                 AgentEvent::Status { state } => manager.on_state(&id, run, state),
                 AgentEvent::BackgroundWork { running, .. } => manager.on_background(&id, run, *running > 0),
                 AgentEvent::TurnEnded { .. } => manager.after_turn(&id),
+                AgentEvent::AssistantBlock {
+                    block: Block::ToolCall { tool_id, name, .. },
+                    parent_tool_id: None,
+                    ..
+                }
+                | AgentEvent::ToolInput {
+                    tool_id,
+                    name,
+                    parent_tool_id: None,
+                    ..
+                } if name == worktrees::CALL_NAME => {
+                    if let Some(session) = manager.0.sessions.lock().unwrap().get_mut(&id) {
+                        session.worktree_tool_id = Some(tool_id.clone());
+                    }
+                }
                 AgentEvent::AssistantBlock {
                     block: Block::ToolCall { tool_id, name, input },
                     ..
@@ -1798,7 +1824,6 @@ are there now, so use the new paths.)\n\ncarry on",
 
     // ---- Worktrees ----
 
-    use crate::events::ApprovalKind;
     use std::process::Command;
 
     /// A scratch git repo with one commit on main.
@@ -1815,31 +1840,6 @@ are there now, so use the new paths.)\n\ncarry on",
         git(&["add", "-A"]);
         git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]);
         root
-    }
-
-    /// The agent asking for a worktree (Claude Code's own tool, which asks).
-    fn worktree_call(id: &str, name: &str) -> AgentEvent {
-        AgentEvent::ApprovalRequest {
-            request_id: id.into(),
-            approval: ApprovalKind::Tool,
-            tool_name: "EnterWorktree".into(),
-            title: "EnterWorktree".into(),
-            input: serde_json::json!({ "name": name }),
-            tool_id: Some(format!("t-{id}")),
-            always_label: None,
-        }
-    }
-
-    fn edit(id: &str, path: &Path) -> AgentEvent {
-        AgentEvent::ApprovalRequest {
-            request_id: id.into(),
-            approval: ApprovalKind::Tool,
-            tool_name: "Edit".into(),
-            title: "Edit".into(),
-            input: serde_json::json!({ "file_path": path }),
-            tool_id: None,
-            always_label: None,
-        }
     }
 
     impl Rig {
@@ -1861,7 +1861,30 @@ are there now, so use the new paths.)\n\ncarry on",
             drop(self.manager.0.sweep_lock.lock().await);
             self.manager.sweep().await;
         }
-        /// Starts a chat in `repo`, asks for an edit, and picks a new worktree.
+        /// The agent calls the worktree tool; returns what the call answers.
+        async fn ask(&self, name: &str) -> String {
+            let tools = self.manager.worktree_tools("s1");
+            let content = (tools.call)("ask".into(), serde_json::json!({ "name": name })).await.unwrap();
+            content[0]["text"].as_str().unwrap().to_string()
+        }
+        /// The questions shown so far.
+        fn asks(&self) -> usize {
+            self.saw(|e| matches!(e, AgentEvent::WorktreeAsk { .. }))
+        }
+        /// The latest question's ID.
+        fn card(&self) -> String {
+            self.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find_map(|e| match e {
+                    AgentEvent::WorktreeAsk { request_id, .. } => Some(request_id.clone()),
+                    _ => None,
+                })
+                .expect("a question")
+        }
+        /// Starts a chat in `repo`, asks for a worktree, and picks a new one.
         async fn into_worktree(&self, repo: &Path) -> worktree::Worktree {
             self.send_at(repo, "auto", "fix it").await;
             self.agent_says(AgentEvent::SessionStarted {
@@ -1869,9 +1892,9 @@ are there now, so use the new paths.)\n\ncarry on",
                 model: None,
                 mode: Some("auto".into()),
             });
-            self.agent_says(worktree_call("r1", "fix it"));
+            self.ask("fix it").await;
             self.manager
-                .choose_worktree("s1", "r1", "worktree")
+                .choose_worktree("s1", &self.card(), "worktree")
                 .await
                 .unwrap();
             self.worktree().expect("a worktree")
@@ -1879,34 +1902,32 @@ are there now, so use the new paths.)\n\ncarry on",
     }
 
     #[tokio::test]
-    async fn a_worktree_request_waits_and_work_here_turns_it_down() {
+    async fn a_worktree_request_shows_a_question_and_work_here_says_so() {
         let rig = rig(LONG);
         let repo = scratch_repo();
         rig.send_at(&repo, "default", "fix it").await;
-        let shown = |r: &Rig| r.saw(|e| matches!(e, AgentEvent::ApprovalRequest { .. }));
 
-        // Ordinary edits are not held.
-        rig.agent_says(edit("e1", &repo.join("app.py")));
-        assert_eq!(shown(&rig), 1);
-
-        rig.agent_says(worktree_call("r1", "fix it"));
-        rig.agent_says(worktree_call("r2", "fix it"));
-        let asks = |r: &Rig| r.saw(|e| matches!(e, AgentEvent::WorktreeAsk { .. }));
-        assert_eq!(asks(&rig), 1, "one question for both requests");
-        assert_eq!(shown(&rig), 1, "requests aren't shown as approvals");
-        assert!(rig.saw(|e| matches!(e, AgentEvent::WorktreeAsk { name, .. } if name.as_deref() == Some("fix it"))) == 1);
+        // The call returns at once, telling the agent to end its turn.
+        assert!(rig.ask("fix it").await.contains("End your turn"));
+        assert_eq!(rig.asks(), 1);
+        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::WorktreeAsk { name, .. } if name.as_deref() == Some("fix it"))), 1);
+        // Asked again while it's open: no second question.
+        assert!(rig.ask("fix it").await.contains("already being asked"));
+        assert_eq!(rig.asks(), 1);
 
         // A wrong ID is refused.
-        assert!(rig.manager.choose_worktree("s1", "r2", "here").await.is_err());
-        rig.manager.choose_worktree("s1", "r1", "here").await.unwrap();
-        assert!(rig.told().contains(&"answer r1 deny".to_string()));
-        assert!(rig.told().contains(&"answer r2 deny".to_string()));
+        assert!(rig.manager.choose_worktree("s1", "nope", "here").await.is_err());
+        rig.manager.choose_worktree("s1", &rig.card(), "here").await.unwrap();
+        assert!(rig.told().iter().any(|t| t.starts_with("say The user answered the worktree question: do this work here")));
         assert!(rig.worktree().is_none());
         assert_eq!(rig.store.chat_git("s1").unwrap().unwrap().choice.as_deref(), Some("here"));
+        // The note isn't saved as a message from the user.
+        let saved = rig.store.events("s1").unwrap();
+        assert!(!saved.iter().any(|e| matches!(e, AgentEvent::UserMessage { text, .. } if text.contains("worktree question"))));
 
         // The agent may ask again later, for other work.
-        rig.agent_says(worktree_call("r3", "other"));
-        assert_eq!(asks(&rig), 2);
+        rig.ask("other").await;
+        assert_eq!(rig.asks(), 2);
     }
 
     #[tokio::test]
@@ -1914,27 +1935,59 @@ are there now, so use the new paths.)\n\ncarry on",
         let rig = rig(LONG);
         let repo = scratch_repo();
         rig.send_at(&repo, "default", "fix it").await;
-        rig.agent_says(worktree_call("r1", "fix it"));
-        rig.agent_says(worktree_call("r2", "fix it"));
+        rig.ask("fix it").await;
+        let card = rig.card();
         rig.send_at(&repo, "default", "actually, rename it too").await;
 
-        let told = rig.told();
-        let at = |line: &str| told.iter().position(|t| t == line).unwrap_or_else(|| panic!("{line}: {told:?}"));
-        assert!(at("answer r1 deny") < at("say actually, rename it too"));
-        assert!(at("answer r2 deny") < at("say actually, rename it too"));
-        // Each request is answered once: the worktree's note, not the general one.
-        assert_eq!(told.iter().filter(|t| t.starts_with("answer r1")).count(), 1);
-        assert_eq!(
-            rig.saw(|e| matches!(e, AgentEvent::ApprovalAnswered { request_id, .. } if request_id == "r1")),
-            1
-        );
-        assert!(rig.manager.choose_worktree("s1", "r1", "here").await.is_err());
+        // The message goes with a note saying it answers the question.
+        let said = rig.told().into_iter().find(|t| t.contains("actually, rename it too")).unwrap();
+        assert!(said.starts_with("say (From the app, not the user: The user sent the message below instead of answering the worktree question."), "{said}");
+        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::ApprovalAnswered { request_id, .. } if *request_id == card)), 1);
+        assert!(rig.manager.choose_worktree("s1", &card, "here").await.is_err());
         assert!(rig.worktree().is_none());
         assert_eq!(rig.store.chat_git("s1").unwrap().unwrap().choice, None);
+        // The saved message is the user's own words.
+        let saved = rig.store.events("s1").unwrap();
+        assert!(saved.iter().any(|e| matches!(e, AgentEvent::UserMessage { text, .. } if text == "actually, rename it too")));
 
-        // Claude may ask again after reading the message.
-        rig.agent_says(worktree_call("r3", "fix it"));
-        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::WorktreeAsk { .. })), 2);
+        // A later message carries no note.
+        rig.send_at(&repo, "default", "and one more").await;
+        assert!(rig.told().iter().any(|t| t == "say and one more"));
+
+        // The agent may ask again after reading the message.
+        rig.ask("fix it").await;
+        assert_eq!(rig.asks(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_open_question_survives_a_restart() {
+        let rig = rig(LONG);
+        let repo = scratch_repo();
+        rig.send_at(&repo, "auto", "fix it").await;
+        rig.ask("fix it").await;
+        let card = rig.card();
+        rig.agent_says(AgentEvent::TurnEnded { ok: true, duration_ms: Some(1) });
+        // What a restart loses: the question in memory.
+        let forget = |r: &Rig| {
+            let mut sessions = r.manager.0.sessions.lock().unwrap();
+            let session = sessions.get_mut("s1").unwrap();
+            session.ask = None;
+            session.ask_checked = false;
+        };
+        forget(&rig);
+        // It comes back from the saved history, and can be answered.
+        rig.manager.choose_worktree("s1", &card, "here").await.unwrap();
+        assert_eq!(rig.store.chat_git("s1").unwrap().unwrap().choice.as_deref(), Some("here"));
+
+        // An answered one doesn't come back.
+        forget(&rig);
+        assert!(rig.manager.choose_worktree("s1", &card, "worktree").await.is_err());
+
+        // A new open one is closed by a message, with the note.
+        rig.ask("other").await;
+        forget(&rig);
+        rig.send_at(&repo, "auto", "never mind").await;
+        assert!(rig.told().iter().any(|t| t.contains("instead of answering the worktree question") && t.ends_with("never mind")));
     }
 
     #[tokio::test]
@@ -1943,27 +1996,46 @@ are there now, so use the new paths.)\n\ncarry on",
         let folder = std::env::temp_dir().join(format!("harness-plain-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&folder).unwrap();
         rig.send_at(&folder, "auto", "hi").await;
-        rig.agent_says(worktree_call("r1", "x"));
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(rig.told().contains(&"answer r1 deny".to_string()));
-        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::WorktreeAsk { .. })), 0);
+        assert!(rig.ask("x").await.contains("isn't in a git repo"));
+        assert_eq!(rig.asks(), 0);
         let _ = std::fs::remove_dir_all(folder);
     }
 
     #[tokio::test]
-    async fn stopping_while_asked_closes_the_question() {
+    async fn the_question_names_the_call_that_asked() {
         let rig = rig(LONG);
         let repo = scratch_repo();
         rig.send_at(&repo, "auto", "fix it").await;
-        rig.agent_says(worktree_call("r1", "x"));
-        rig.agent_says(AgentEvent::ApprovalCancelled { request_id: "r1".into() });
-        assert_eq!(
-            rig.saw(|e| matches!(e, AgentEvent::ApprovalCancelled { request_id } if request_id == "r1")),
-            1
-        );
-        // A later request asks again.
-        rig.agent_says(worktree_call("r2", "x"));
-        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::WorktreeAsk { .. })), 2);
+        let tool_id = |r: &Rig| {
+            r.seen.lock().unwrap().iter().rev().find_map(|e| match e {
+                AgentEvent::WorktreeAsk { tool_id, .. } => Some(tool_id.clone()),
+                _ => None,
+            })
+        };
+        // Claude Code: the call arrives whole.
+        rig.agent_says(AgentEvent::AssistantBlock {
+            message_id: "m1".into(),
+            block: Block::ToolCall { tool_id: "t1".into(), name: worktrees::CALL_NAME.into(), input: serde_json::json!({}) },
+            parent_tool_id: None,
+        });
+        rig.ask("x").await;
+        assert_eq!(tool_id(&rig), Some(Some("t1".to_string())));
+        rig.manager.choose_worktree("s1", &rig.card(), "here").await.unwrap();
+
+        // Cursor: its name comes in a later update.
+        rig.agent_says(AgentEvent::ToolInput {
+            tool_id: "t2".into(),
+            name: worktrees::CALL_NAME.into(),
+            input: serde_json::json!({}),
+            parent_tool_id: None,
+        });
+        rig.ask("y").await;
+        assert_eq!(tool_id(&rig), Some(Some("t2".to_string())));
+        rig.manager.choose_worktree("s1", &rig.card(), "here").await.unwrap();
+
+        // Each call is used once.
+        rig.ask("z").await;
+        assert_eq!(tool_id(&rig), Some(None));
     }
 
     #[tokio::test]
@@ -1974,7 +2046,7 @@ are there now, so use the new paths.)\n\ncarry on",
 
         let told = rig.told();
         let at = |what: &str| told.iter().position(|t| t.starts_with(what)).unwrap_or_else(|| panic!("{what} in {told:?}"));
-        assert!(at("answer r1 deny") < at("stop") && at("stop") < at("kill") && at("kill") < at("say You now work"));
+        assert!(at("stop") < at("kill") && at("kill") < at("say You now work"));
         // Named after the agent's suggestion.
         assert!(wt.branch.starts_with("harness/fix-it-"), "{}", wt.branch);
         let note = &told[at("say You now work")];
@@ -1995,10 +2067,8 @@ are there now, so use the new paths.)\n\ncarry on",
         assert_eq!(row.project_path, repo.to_string_lossy());
 
         // Asking again inside the worktree is turned down without a question.
-        rig.agent_says(worktree_call("r9", "again"));
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(rig.told().contains(&"answer r9 deny".to_string()));
-        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::WorktreeAsk { .. })), 1);
+        assert!(rig.ask("again").await.contains("already works in its own git worktree"));
+        assert_eq!(rig.asks(), 1);
 
         // Its next start is in the worktree too.
         rig.manager.close("s1");

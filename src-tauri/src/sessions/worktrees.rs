@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde_json::{Value, json};
+
 use super::{Ask, SessionManager, blocking};
-use crate::agent::RunningAgent;
+use crate::agent::AppTools;
 use crate::events::{AgentEvent, Decision};
 use crate::store::{ChatGit, SessionRow, now_ms};
 use crate::worktree::{self, Merged, PrInfo, Worktree};
@@ -49,20 +51,74 @@ pub const SWEEP_EVERY: Duration = Duration::from_secs(3600);
 const PR_AFTER_TURN: Duration = Duration::from_secs(60);
 const PR_IN_SWEEP: Duration = Duration::from_secs(600);
 
-/// Claude Code's own worktree tool: how the agent asks for one.
-const WORKTREE_TOOL: &str = "EnterWorktree";
+/// The app's worktree tool group, offered to every main chat's agent,
+/// whatever the agent: how it asks for a worktree. Claude Code's own
+/// worktree tools are turned off (see the adapter), so this is the only way.
+pub const SERVER: &str = "harness_worktree";
+/// The tool's one name, and the name the window sees it by, for every agent
+/// (Cursor's MCP calls are named this way too, see `acp::name_and_input`).
+const TOOL: &str = "ask";
+pub const CALL_NAME: &str = "mcp__harness_worktree__ask";
 
-/// What the agent's request is told when the chat moves to a worktree.
-const MOVING: &str = "Harness is making this chat's worktree itself. Stop here; you will be told \
-where to continue.";
-/// When the user says no.
-const STAY_HERE: &str = "The user wants this work done here, in the current folder, not in a \
-worktree. Carry on with the task here.";
-/// When the user writes instead of answering. Nothing is chosen.
-const REPLIED: &str = "The user sent a message instead of answering. Read it and go by it. If the work \
-still needs file changes, call EnterWorktree again before making any.";
+/// When to ask, in the instructions. Worded firmly ("your first step... is
+/// to call"): a softer "ask for a worktree with the harness_worktree tool"
+/// made Haiku skip it for a new module with tests, twice in two runs (CLI
+/// 2.1.326); this asked both times, and still not for a one-line fix.
+const WHEN: &str = "This app keeps separate pieces of work in separate git worktrees, so chats \
+working in the same repo don't get in each other's way. In a git repo, your first step for real work \
+(a feature, new files or a module, a fix that touches more than a line or two, a refactor, anything \
+you'd put on its own branch) is to call the ask tool of the harness_worktree server with a short name \
+for the work, before you create or change any file, however you'd do it (edit tools or shell \
+commands). The user approves or declines. Skip it only for a tiny one-off change, for questions, \
+reviews or planning, or once this chat already works in a worktree.";
+
+/// The tool's own description, with the same rule: Cursor hears the
+/// instructions only when a conversation starts, so deep in a chat the
+/// description is what it still sees.
+const DESCRIPTION: &str = "Ask the user to do this work in a new git worktree. Call it before \
+creating or changing any file for real work in a git repo: a feature, new files or a module, a fix \
+touching more than a line or two, a refactor. Skip it for a tiny one-off change, for questions, \
+reviews or planning, or once this chat already works in a worktree. The user approves or declines.";
+
+/// What the call returns once the question is on screen. It returns at once:
+/// Cursor gives up on a tool call after 60 seconds (CLI 2026.11.13, no
+/// setting for it over ACP), so the answer comes as the next message.
+const WAITING: &str = "The user is being asked whether to do this work in a new worktree. End your \
+turn now and make no changes. Their answer comes as your next message.";
+/// Asked again while the question is open.
+const ASKED_ALREADY: &str = "The user is already being asked about a worktree. End your turn now and \
+make no changes. Their answer comes as your next message.";
+/// Sent when the user says no.
+const STAY_HERE: &str = "The user answered the worktree question: do this work here, in the current \
+folder, not in a worktree. Carry on with the task here.";
+/// Put before the user's message when they write instead of answering.
+/// Nothing is chosen.
+const REPLIED: &str = "The user sent the message below instead of answering the worktree question. \
+Go by it. If the work still needs file changes, ask for a worktree again before making any.";
 /// What the agent is told if making the worktree failed.
 const STAYING: &str = "The worktree couldn't be made. Carry on with the task in this folder.";
+
+/// The group's tool definition.
+fn tools() -> Value {
+    json!([{
+        "name": TOOL,
+        "description": DESCRIPTION,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "A short name for the work, like \"bump dependencies\". Used for the branch.",
+                },
+            },
+            "required": ["name"],
+        },
+        // Claude Code otherwise defers MCP tools behind its tool search,
+        // and Haiku skipped asking when the tool wasn't on its list (CLI
+        // 2.1.326). Other agents ignore this.
+        "_meta": { "anthropic/alwaysLoad": true },
+    }])
+}
 
 fn days_ms(days: u64) -> i64 {
     (days * 24 * 3600 * 1000) as i64
@@ -160,115 +216,135 @@ impl SessionManager {
         }
     }
 
-    /// Catches the agent's request for a worktree (Claude Code's own worktree
-    /// tool, which always asks; see the adapter). It becomes the question on
-    /// screen and waits in the agent, which has no timeout, until the answer.
-    /// A request that can't be met is turned down at once with the reason.
-    /// Returns the event to pass on.
-    pub(super) fn screen_worktree_call(&self, session_id: &str, event: AgentEvent) -> Option<AgentEvent> {
-        match &event {
-            AgentEvent::ApprovalRequest {
-                request_id,
-                tool_name,
-                input,
-                tool_id,
-                ..
-            } if tool_name == WORKTREE_TOOL => {
-                let has_worktree = self
-                    .0
-                    .store
-                    .chat_git(session_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|g| g.worktree.filter(|_| g.status.is_some()));
-                let mut sessions = self.0.sessions.lock().unwrap();
-                let session = sessions.get_mut(session_id)?;
-                // Asked twice at once: both wait on the same question.
-                if let Some(ask) = session.ask.as_mut() {
-                    ask.held.push((request_id.clone(), event));
-                    return None;
-                }
-                let refusal = match (&has_worktree, &session.repo_root) {
-                    (Some(wt), _) => Some(format!(
-                        "This chat already works in its own git worktree at {}. Carry on there.",
-                        wt.work_path().display()
-                    )),
-                    (None, None) => Some(
-                        "This folder isn't in a git repo, so there is no worktree to make. Carry on here."
-                            .to_string(),
-                    ),
-                    (None, Some(_)) => None,
-                };
-                if let Some(message) = refusal {
-                    drop(sessions);
-                    self.turn_down_later(session_id, request_id, message);
-                    return None;
-                }
-                let repo_root = session.repo_root.clone()?;
-                session.ask = Some(Ask {
-                    repo_root: repo_root.clone(),
-                    held: vec![(request_id.clone(), event.clone())],
-                    card: request_id.clone(),
-                    name: input["name"].as_str().map(str::to_owned),
-                });
-                Some(AgentEvent::WorktreeAsk {
-                    request_id: request_id.clone(),
-                    repo_root: repo_root.to_string_lossy().into_owned(),
-                    tool_id: tool_id.clone(),
-                    name: input["name"].as_str().map(str::to_owned),
+    /// The worktree tool group for one main chat.
+    pub(super) fn worktree_tools(&self, session_id: &str) -> AppTools {
+        let manager = self.clone();
+        let id = session_id.to_string();
+        AppTools {
+            server: SERVER,
+            instruction: WHEN.to_string(),
+            list: tools(),
+            call: Arc::new(move |tool, args| {
+                let manager = manager.clone();
+                let id = id.clone();
+                Box::pin(async move {
+                    if tool != TOOL {
+                        return Err(format!("Unknown tool: {tool}"));
+                    }
+                    let text = manager.ask_worktree(&id, &args);
+                    Ok(vec![json!({ "type": "text", "text": text })])
                 })
-            }
-            // The agent withdrew the request (the user pressed stop): the
-            // question closes once nothing is waiting on it.
-            AgentEvent::ApprovalCancelled { request_id } => {
-                let mut sessions = self.0.sessions.lock().unwrap();
-                let session = sessions.get_mut(session_id)?;
-                let Some(ask) = session.ask.as_mut() else {
-                    return Some(event);
-                };
-                let Some(at) = ask.held.iter().position(|(id, _)| id == request_id) else {
-                    return Some(event);
-                };
-                ask.held.remove(at);
-                if !ask.held.is_empty() {
-                    return None;
-                }
-                let card = ask.card.clone();
-                session.ask = None;
-                Some(AgentEvent::ApprovalCancelled { request_id: card })
-            }
-            _ => Some(event),
+            }),
         }
     }
 
-    /// Answers a request with a refusal, outside the event sink (answering
-    /// reports through the sink).
-    fn turn_down_later(&self, session_id: &str, request_id: &str, message: String) {
-        let manager = self.clone();
-        let (id, request) = (session_id.to_string(), request_id.to_string());
-        let answer = move || {
-            if let Ok(agent) = manager.agent(&id) {
-                let _ = agent.answer_approval(&request, Decision::Deny, Some(message), None, None);
+    /// The agent asks for a worktree. The question goes on screen and the
+    /// call returns at once, telling the agent to end its turn: the answer
+    /// comes as its next message (see `choose_worktree`). A request that
+    /// can't be met gets the reason instead, with no question.
+    fn ask_worktree(&self, session_id: &str, args: &Value) -> String {
+        self.load_open_ask(session_id);
+        let name = args["name"]
+            .as_str()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned);
+        let has_worktree = self
+            .0
+            .store
+            .chat_git(session_id)
+            .ok()
+            .flatten()
+            .and_then(|g| g.worktree.filter(|_| g.status.is_some()));
+        let (card, repo_root, tool_id) = {
+            let mut sessions = self.0.sessions.lock().unwrap();
+            let Some(session) = sessions.get_mut(session_id) else {
+                return "This chat isn't running.".to_string();
+            };
+            if session.ask.is_some() {
+                return ASKED_ALREADY.to_string();
             }
+            if let Some(wt) = &has_worktree {
+                return format!(
+                    "This chat already works in its own git worktree at {}. Carry on there.",
+                    wt.work_path().display()
+                );
+            }
+            let Some(repo_root) = session.repo_root.clone() else {
+                return "This folder isn't in a git repo, so there is no worktree to make. Carry on here."
+                    .to_string();
+            };
+            let card = uuid::Uuid::new_v4().to_string();
+            session.ask = Some(Ask {
+                repo_root: repo_root.clone(),
+                card: card.clone(),
+                name: name.clone(),
+            });
+            (card, repo_root, session.worktree_tool_id.take())
         };
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::spawn(async move { answer() });
-        } else {
-            answer();
+        self.record(
+            session_id,
+            AgentEvent::WorktreeAsk {
+                request_id: card,
+                repo_root: repo_root.to_string_lossy().into_owned(),
+                tool_id,
+                name,
+            },
+        );
+        WAITING.to_string()
+    }
+
+    /// Brings back a worktree question left open when the app last quit: the
+    /// saved history has it, memory doesn't. Checked once per chat per run.
+    fn load_open_ask(&self, session_id: &str) {
+        {
+            let mut sessions = self.0.sessions.lock().unwrap();
+            let session = sessions.entry(session_id.to_string()).or_default();
+            if std::mem::replace(&mut session.ask_checked, true) || session.ask.is_some() {
+                return;
+            }
+        }
+        let Ok(events) = self.0.store.events(session_id) else {
+            return;
+        };
+        let mut open: Option<Ask> = None;
+        for event in events {
+            match event {
+                AgentEvent::WorktreeAsk {
+                    request_id,
+                    repo_root,
+                    name,
+                    ..
+                } => {
+                    open = Some(Ask {
+                        repo_root: PathBuf::from(repo_root),
+                        card: request_id,
+                        name,
+                    })
+                }
+                AgentEvent::WorktreeChosen { .. } => open = None,
+                AgentEvent::ApprovalAnswered { request_id, .. } | AgentEvent::ApprovalCancelled { request_id }
+                    if open.as_ref().is_some_and(|a| a.card == request_id) =>
+                {
+                    open = None
+                }
+                _ => {}
+            }
+        }
+        if let Some(session) = self.0.sessions.lock().unwrap().get_mut(session_id) {
+            if session.ask.is_none() {
+                session.ask = open;
+            }
         }
     }
 
     /// The user wrote instead of answering the worktree question. It closes
-    /// with nothing chosen, and Claude is told to read the message and ask
-    /// again if the work still needs a worktree.
-    pub(super) fn reply_closes_ask(&self, session_id: &str, agent: &dyn RunningAgent) {
-        let ask = self.0.sessions.lock().unwrap().get_mut(session_id).and_then(|s| s.ask.take());
-        let Some(ask) = ask else {
-            return;
-        };
-        for (id, _) in &ask.held {
-            let _ = agent.answer_approval(id, Decision::Deny, Some(REPLIED.to_string()), None, None);
-        }
+    /// with nothing chosen. Returns the note to put before their message,
+    /// telling the agent to go by it and ask again if it still needs a
+    /// worktree; None when no question was open.
+    pub(super) fn reply_closes_ask(&self, session_id: &str) -> Option<&'static str> {
+        self.load_open_ask(session_id);
+        let ask = self.0.sessions.lock().unwrap().get_mut(session_id).and_then(|s| s.ask.take())?;
         self.record(
             session_id,
             AgentEvent::ApprovalAnswered {
@@ -277,16 +353,36 @@ impl SessionManager {
                 answers: None,
             },
         );
+        Some(REPLIED)
     }
 
+    /// Sends the agent a note from the app that the chat doesn't show,
+    /// starting its process if it isn't running.
+    async fn send_note(&self, session_id: &str, note: &str) -> Result<(), String> {
+        let saved = self.0.store.session(session_id)?.ok_or("That chat no longer exists")?;
+        let message_id = uuid::Uuid::new_v4().to_string();
+        self.send_inner(
+            session_id,
+            &saved.agent,
+            PathBuf::from(&saved.project_path),
+            Some(saved.mode),
+            Some(saved.model),
+            None,
+            note,
+            &[],
+            &message_id,
+            false,
+            &[],
+        )
+        .await
+    }
     /// The user's answer to the agent's request for a worktree: "worktree" or "here".
     ///
-    /// "here": the request is turned down, and the agent told to carry on in
-    /// the folder it is in.
+    /// "here": the agent is sent a note to carry on in the folder it is in.
     ///
-    /// "worktree": the request is turned down (Harness makes its own worktree,
-    /// not Claude Code's), the process stopped, a worktree made, and the same
-    /// chat resumes inside it with a note telling the agent where it now is.
+    /// "worktree": the process is stopped (if it still runs), a worktree made,
+    /// and the same chat resumes inside it with a note telling the agent
+    /// where it now is.
     pub async fn choose_worktree(
         &self,
         session_id: &str,
@@ -296,6 +392,7 @@ impl SessionManager {
         if choice != "worktree" && choice != "here" {
             return Err(format!("Unknown choice: {choice}"));
         }
+        self.load_open_ask(session_id);
         let ask = {
             let mut sessions = self.0.sessions.lock().unwrap();
             let session = sessions
@@ -307,21 +404,17 @@ impl SessionManager {
         let store = &self.0.store;
         store.set_choice(session_id, Some(choice))?;
         self.record(session_id, AgentEvent::WorktreeChosen { choice: choice.into() });
-        let agent = self.agent(session_id)?;
 
         if choice == "here" {
-            for (id, _) in &ask.held {
-                agent.answer_approval(id, Decision::Deny, Some(STAY_HERE.to_string()), None, None)?;
-            }
-            return Ok(());
+            return self.send_note(session_id, STAY_HERE).await;
         }
 
-        for (id, _) in &ask.held {
-            let _ = agent.answer_approval(id, Decision::Deny, Some(MOVING.to_string()), None, None);
+        // The agent was told to end its turn; stop it in case it hasn't.
+        if let Ok(agent) = self.agent(session_id) {
+            let _ = agent.interrupt();
+            agent.stop();
+            self.wait_for_exit(session_id).await?;
         }
-        let _ = agent.interrupt();
-        agent.stop();
-        self.wait_for_exit(session_id).await?;
 
         let git = store.chat_git(session_id)?.ok_or("That chat no longer exists")?;
         let root = ask.repo_root.clone();
@@ -361,7 +454,7 @@ impl SessionManager {
                     "You now work in a separate git worktree at {} on branch {}, started from {from}. \
                      Files there may differ from what you read before, so read them again before \
                      editing. Carry on with the task there, using paths inside this folder, never \
-                     the old one. Don't call EnterWorktree again in this chat.",
+                     the old one. Don't ask for a worktree again in this chat.",
                     wt.work_path().display(),
                     wt.branch
                 )
@@ -377,22 +470,7 @@ impl SessionManager {
                 STAYING.to_string()
             }
         };
-        let saved = store.session(session_id)?.ok_or("That chat no longer exists")?;
-        let message_id = uuid::Uuid::new_v4().to_string();
-        self.send_inner(
-            session_id,
-            &saved.agent,
-            PathBuf::from(&saved.project_path),
-            Some(saved.mode),
-            Some(saved.model),
-            None,
-            &note,
-            &[],
-            &message_id,
-            false,
-            &[],
-        )
-        .await
+        self.send_note(session_id, &note).await
     }
 
     /// After a turn: the chat may have switched its folder to another
