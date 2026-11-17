@@ -155,3 +155,9 @@ export function renumbered(text: string, edit: Edit): Edit {
     selEnd: moved(edit.selEnd),
   };
 }
+
+/** Puts the cursor in a box, at the end of its text. */
+export function focusEnd(box: HTMLTextAreaElement): void {
+  box.focus();
+  box.setSelectionRange(box.value.length, box.value.length);
+}

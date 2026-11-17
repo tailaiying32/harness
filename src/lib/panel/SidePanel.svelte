@@ -19,7 +19,8 @@
   import InfoView from "./InfoView.svelte";
   import AgentView from "./AgentView.svelte";
   import Markdown from "../chat/Markdown.svelte";
-  import { onDestroy, untrack } from "svelte";
+  import { focusEnd } from "../chat/editing";
+  import { onDestroy, tick, untrack } from "svelte";
   import { NOTES_TAB, PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
   import { folderOf } from "../paths";
   import { applyPanelWidth, DEFAULT_PANEL_WIDTH, savePrefs } from "../themes";
@@ -193,6 +194,16 @@
     if (askBox) untrack(growAsk);
   });
   const side = $derived(chat.panelView === "side" ? chat.side : null);
+
+  // A queued question taken back to edit lands in this box (see Composer).
+  $effect(() => {
+    if (!side?.focusDraft) return;
+    void tick().then(() => {
+      if (!askBox) return;
+      growAsk();
+      focusEnd(askBox);
+    });
+  });
 
   function growAsk() {
     if (!askBox) return;
