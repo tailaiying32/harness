@@ -42,7 +42,13 @@ pub struct TerminalHooks {
     pub moved: Arc<dyn Fn(&str, &str) + Send + Sync>,
     /// An agent's `harness-tab`: a new tab of the project (main folder, as
     /// the window names it), in `worktree` if given, with the command typed in.
-    pub run: Arc<dyn Fn(&str, Option<String>, &str) -> Result<crate::terminal::TabInfo, String> + Send + Sync>,
+    /// The last argument puts the new tab on screen, before its shell starts.
+    #[allow(clippy::type_complexity)]
+    pub run: Arc<
+        dyn Fn(&str, Option<String>, &str, &dyn Fn(&crate::terminal::TabInfo)) -> Result<crate::terminal::TabInfo, String>
+            + Send
+            + Sync,
+    >,
 }
 
 /// Whether a project's folder is gone in the way a moved or renamed folder
@@ -968,13 +974,16 @@ impl SessionManager {
             let (run, out, chat, project, worktree) = (run.clone(), out.clone(), chat.clone(), project.clone(), worktree.clone());
             Box::pin(async move {
                 let line = command.trim().to_string();
-                let tab = tokio::task::spawn_blocking(move || run(&project, worktree, &line))
+                // Shown before its shell starts, so the panel can give it its size.
+                let show = move |tab: &crate::terminal::TabInfo| {
+                    out(Envelope {
+                        session_id: chat.clone(),
+                        event: AgentEvent::ShowPanel { path: None, view: Some("terminal".into()), tab: Some(tab.id.clone()) },
+                    })
+                };
+                let tab = tokio::task::spawn_blocking(move || run(&project, worktree, &line, &show))
                     .await
                     .map_err(|e| e.to_string())??;
-                out(Envelope {
-                    session_id: chat,
-                    event: AgentEvent::ShowPanel { path: None, view: Some("terminal".into()), tab: Some(tab.id.clone()) },
-                });
                 // By ID: the tab's name changes to what runs in it.
                 Ok(format!(
                     "Opened a terminal tab running: {}\nRead its output with the harness_terminal read tool, tab \"{}\".",
@@ -2232,7 +2241,7 @@ are there now, so use the new paths.)\n\ncarry on",
                 in_use: Arc::new(move |_: &Path| *shell_in.lock().unwrap()),
                 gone: Arc::new(move |root: &Path, why: &str| told.lock().unwrap().push((root.to_path_buf(), why.to_string()))),
                 moved: Arc::new(|_: &str, _: &str| {}),
-                run: Arc::new(|_: &str, _: Option<String>, _: &str| Err("no terminal".into())),
+                run: Arc::new(|_: &str, _: Option<String>, _: &str, _: &dyn Fn(&crate::terminal::TabInfo)| Err("no terminal".into())),
             });
         }
         rig.manager.close("s1");
