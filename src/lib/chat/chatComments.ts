@@ -15,7 +15,7 @@
 // are put back from the offsets.
 
 import type { Chat } from "../state/chat.svelte";
-import { action, commentBox, el, HoverIntent, mountLook, type CommentBox } from "./commentBox";
+import { action, commentBox, el, hangSide, HoverIntent, mountLook, type CommentBox } from "./commentBox";
 import type { ChatComment } from "./comments";
 
 /** Where marks and windows take their look from (mountLook). */
@@ -314,34 +314,39 @@ export class ChatComments {
   }
 
   /**
-   * Puts a window under the last screen line of its text, by the docs'
-   * rule (see `under` in commentMarks.ts): while narrower than the text on
-   * that line, its right edge at the text's end; wider, from where that
-   * line's text starts. Never narrower than the button, so the box opens
-   * where the button was. Kept within the text's column; hidden when its
-   * text is scrolled out of view.
+   * Puts a window under the last screen line of its text, or, with no room
+   * for it there, over the first (see `hangSide`), by the docs' rule (see
+   * `under` in commentMarks.ts): while narrower than the text on that line,
+   * its right edge at the text's end; wider, from where that line's text
+   * starts. Never narrower than the button, so the box opens where the
+   * button was. Kept within the text's column; hidden when its text is
+   * scrolled out of view.
    */
   private hang(dom: HTMLElement, range: Range | null): void {
     const rects = range ? [...range.getClientRects()].filter((r) => r.width > 0) : [];
     const view = this.scroller.getBoundingClientRect();
+    const first = rects[0];
     const last = rects[rects.length - 1];
-    if (!last || last.bottom < view.top || last.top > view.bottom) {
+    if (!last || last.bottom < view.top || first.top > view.bottom) {
       dom.style.visibility = "hidden";
       return;
     }
-    const line = rects.filter((r) => Math.abs(r.top - last.top) < 2);
+    const { above, top } = hangSide(dom, first.top, last.bottom, view);
+    const anchor = above ? first : last;
+    const line = rects.filter((r) => Math.abs(r.top - anchor.top) < 2);
     const start = Math.min(...line.map((r) => r.left));
+    const end = Math.max(...line.map((r) => r.right));
     const width = dom.offsetWidth;
     if (!this.buttonWidth && dom.classList.contains("cm-comment-plus")) this.buttonWidth = width;
     const column = (range!.commonAncestorContainer instanceof Element
       ? range!.commonAncestorContainer
       : range!.commonAncestorContainer.parentElement
     )?.closest(".md")?.getBoundingClientRect() ?? view;
-    let left = Math.max(start, last.right - Math.max(width, this.buttonWidth));
+    let left = Math.max(start, end - Math.max(width, this.buttonWidth));
     left = Math.max(column.left, Math.min(left, column.right - width));
     dom.style.visibility = "";
     dom.style.left = `${left}px`;
-    dom.style.top = `${last.bottom}px`;
+    dom.style.top = `${top}px`;
   }
 
   private frameFor(cls: string): HTMLElement {
