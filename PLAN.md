@@ -2438,9 +2438,12 @@ working. One for the whole app: sleep is machine-wide.
     user left; their display sleeps at 2 min), the next input ends it. Input
     before that, like the click that started it, doesn't.
   - **done**: no chat working for 1 min, once one has worked since it
-    started. Working = starting/working, or subagents running. Waiting for
-    approval doesn't count (staying awake can't move it), nor do background
-    commands (a dev server or leftover `caffeinate` would hold it forever).
+    started. Working = starting/working, or any background work running
+    (commands like a test run, and subagents). Waiting for approval doesn't
+    count (staying awake can't move it). A command that never ends (a dev
+    server) holds it until the limit: the limit is the safety net, and wins.
+    (Changed 2026-11-17: background commands used to be left out, so a chat
+    whose turn ended while its tests ran in the background let the Mac sleep.)
     Side chats don't count. With nothing ever working, only back or the limit
     end it ("start something, then leave").
   - **limit**: 2 h after starting; overnight: its clock time (Settings,
