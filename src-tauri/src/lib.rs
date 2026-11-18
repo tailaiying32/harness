@@ -1103,8 +1103,8 @@ pub fn run() {
                     },
                     run: {
                         let terminals = terminals.clone();
-                        Arc::new(move |project: &str, worktree: Option<String>, command: &str| {
-                            terminals.run_for_agent(project, worktree, command)
+                        Arc::new(move |project: &str, worktree: Option<String>, command: &str, show: &dyn Fn(&terminal::TabInfo)| {
+                            terminals.run_for_agent(project, worktree, command, show)
                         })
                     },
                 });
