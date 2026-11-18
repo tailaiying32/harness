@@ -9,6 +9,7 @@ import {
   keepAwakeState,
   listTrash,
   loadSession,
+  checkPrs,
   pickFolder,
   relocateProject,
   renameSession,
@@ -291,6 +292,8 @@ export class AppState {
   async open(sessionId: string): Promise<void> {
     if (sessionId === this.current.sessionId) return;
     this.problem = "";
+    // Its pull requests may have been merged or closed since it was last seen.
+    void checkPrs(sessionId).catch(() => {});
     let chat = this.chats.get(sessionId);
     if (!chat) {
       try {

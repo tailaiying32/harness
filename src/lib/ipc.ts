@@ -208,6 +208,9 @@ export const sidebar = () => invoke<ProjectRow[]>("sidebar");
 export const loadSession = (sessionId: string) =>
   invoke<{ session: SessionRow; events: AgentEvent[]; live: boolean; chat_folder?: string }>("load_session", { sessionId });
 
+/** Looks a chat's pull requests up again; a change comes back as a `prs_changed` event. */
+export const checkPrs = (sessionId: string) => invoke<void>("check_prs", { sessionId });
+
 export const renameSession = (sessionId: string, title: string) =>
   invoke<void>("rename_session", { sessionId, title });
 /** Asks for a short label for a batch of subagents; it comes back as a `batch_titled` event. */

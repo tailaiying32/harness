@@ -197,6 +197,14 @@ async fn choose_new_chats(
 }
 
 /// Gives a chat a new title.
+/// A chat was opened: its pull requests may have been merged or closed since
+/// it was last seen. Any change comes back as a `prs_changed` event.
+#[tauri::command]
+fn check_prs(state: State<'_, AppState>, session_id: String) {
+    let sessions = state.sessions.clone();
+    tauri::async_runtime::spawn(async move { sessions.check_prs(&session_id).await });
+}
+
 #[tauri::command]
 fn rename_session(state: State<'_, AppState>, session_id: String, title: String) -> Result<(), String> {
     state.sessions.rename(&session_id, &title)
@@ -1140,6 +1148,15 @@ pub fn run() {
             });
             Ok(())
         })
+        // Back in front: pull requests merged or closed meanwhile show at once.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(true) = event {
+                if let Some(state) = window.try_state::<AppState>() {
+                    let sessions = state.sessions.clone();
+                    tauri::async_runtime::spawn(async move { sessions.check_all_prs().await });
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             keep_awake_start,
             keep_awake_stop,
@@ -1160,6 +1177,7 @@ pub fn run() {
             choose_worktree,
             choose_new_chats,
             rename_session,
+            check_prs,
             title_batch,
             send_message,
             answer_approval,

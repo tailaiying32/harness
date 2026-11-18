@@ -37,6 +37,7 @@ impl Gh {
         PrLookup {
             by_branch: Arc::new(move |_: &Path, branch: &str| by_branch.answer(|pr| pr.branch == branch)),
             by_url: Arc::new(move |url: &str| by_url.answer(|pr| pr.url == url.trim())),
+            many: None,
         }
     }
 
