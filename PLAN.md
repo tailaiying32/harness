@@ -721,10 +721,17 @@ Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-roll
   branch and saved edits deleted. Trashed for 30 days → chat purged.
   `HARNESS_WORKTREE_IDLE_SECONDS` and `HARNESS_TRASH_SECONDS` override both
   for tests.
-- **Pull requests** via `gh pr list --head <branch> --state all --json
-  number,state,isDraft,url,headRefOid` (`github.rs`), after a turn (at most
-  once a minute per chat) and in the sweep (at most every 10 minutes). A repo
-  `gh` can't answer for isn't asked again until restart.
+- **Pull requests** via one `gh api graphql` query per host (`github.rs`,
+  `prs`): each chat's open and draft pull requests by number, and the newest
+  one for its worktree's branch (`pullRequests(headRefName:)`). Names and
+  branches go in as variables. A folder's repo comes from `gh repo view`,
+  asked once per folder. Looked up after every turn, when the window comes
+  to the front (every chat that may have one changing), when a chat is
+  opened (both at most every 10 s per chat, so flicking between windows
+  doesn't ask again and again), and in the sweep (at most every 10 minutes).
+  No timer: merges by others while Harness is in front are rare, and nothing
+  acts on a merge while the user is away (cleanup keeps its own clock). A
+  repo `gh` can't answer for isn't asked again until restart.
 - **Titles**: on a chat's first message, `claude -p --model haiku
   --no-session-persistence --tools "" --system-prompt <name the chat>` writes
   a title (about 1.5 s). Without its own system prompt Haiku answered "use

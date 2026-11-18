@@ -2307,6 +2307,59 @@ are there now, so use the new paths.)\n\ncarry on",
     }
 
     #[tokio::test]
+    async fn pull_requests_are_asked_after_every_turn_and_on_focus_with_a_gap() {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let found: Arc<Mutex<Option<PrInfo>>> = Arc::default();
+        let lookup = {
+            let (asked, found) = (asked.clone(), found.clone());
+            PrLookup {
+                by_branch: Arc::new(move |_: &Path, _: &str| {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    Ok(found.lock().unwrap().clone())
+                }),
+                ..PrLookup::none()
+            }
+        };
+        let rig = rig_with(LONG, LONG, LONG, lookup);
+        let repo = scratch_repo();
+        let wt = rig.into_worktree(&repo).await;
+        let pr = |state: &str| PrInfo {
+            number: 3,
+            state: state.into(),
+            url: "u".into(),
+            head: "h".into(),
+            branch: wt.branch.clone(),
+        };
+        *found.lock().unwrap() = Some(pr("open"));
+        let before = asked.load(Ordering::SeqCst);
+
+        // Every turn asks, however close together.
+        rig.turn_ends();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        rig.turn_ends();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(asked.load(Ordering::SeqCst), before + 2);
+        assert_eq!(rig.store.session("s1").unwrap().unwrap().prs[0].state, "open");
+
+        // Coming to the front, or opening the chat, just after: not asked again.
+        *found.lock().unwrap() = Some(pr("merged"));
+        rig.manager.check_all_prs().await;
+        rig.manager.check_prs("s1").await;
+        assert_eq!(asked.load(Ordering::SeqCst), before + 2);
+
+        // After the gap, coming to the front shows the merge.
+        rig.manager.0.pr_checked.lock().unwrap().clear();
+        rig.manager.check_all_prs().await;
+        assert_eq!(asked.load(Ordering::SeqCst), before + 3);
+        assert_eq!(rig.store.session("s1").unwrap().unwrap().prs[0].state, "merged");
+
+        // Opening the chat after the gap asks too.
+        rig.manager.0.pr_checked.lock().unwrap().clear();
+        rig.manager.check_prs("s1").await;
+        assert_eq!(asked.load(Ordering::SeqCst), before + 4);
+    }
+
+    #[tokio::test]
     async fn a_trashed_worktree_chat_is_restorable_then_purged_with_its_branch() {
         let rig = rig_with(LONG, LONG, Duration::ZERO, PrLookup::none());
         let repo = scratch_repo();

@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use super::{Ask, SessionManager, blocking};
 use crate::agent::AppTools;
 use crate::events::{AgentEvent, Decision};
+use crate::github::PrAsk;
 use crate::store::{ChatGit, SessionRow, now_ms};
 use crate::worktree::{self, Merged, PrInfo, Worktree};
 
@@ -21,6 +22,8 @@ pub struct PrLookup {
     pub by_branch: Arc<dyn Fn(&Path, &str) -> Result<Option<PrInfo>, String> + Send + Sync>,
     /// The pull request at a link.
     pub by_url: Arc<dyn Fn(&str) -> Result<Option<PrInfo>, String> + Send + Sync>,
+    /// Many at once, in one round trip. Without it, each is asked alone.
+    pub many: Option<Arc<dyn Fn(&[PrAsk]) -> Vec<Option<PrInfo>> + Send + Sync>>,
 }
 
 impl PrLookup {
@@ -28,7 +31,22 @@ impl PrLookup {
         Self {
             by_branch: Arc::new(crate::github::pr_for),
             by_url: Arc::new(crate::github::pr_at),
+            many: Some(Arc::new(crate::github::prs)),
         }
+    }
+
+    /// The answers to `asks`, in order; None where none was found.
+    fn ask_many(&self, asks: &[PrAsk]) -> Vec<Option<PrInfo>> {
+        if let Some(many) = &self.many {
+            return many(asks);
+        }
+        asks.iter()
+            .map(|ask| match ask {
+                PrAsk::Branch { repo_root, branch } => (self.by_branch)(repo_root, branch),
+                PrAsk::Url(url) => (self.by_url)(url),
+            })
+            .map(|answer| answer.ok().flatten())
+            .collect()
     }
 
     /// Finds nothing anywhere.
@@ -37,6 +55,7 @@ impl PrLookup {
         Self {
             by_branch: Arc::new(|_, _| Ok(None)),
             by_url: Arc::new(|_| Ok(None)),
+            many: None,
         }
     }
 }
@@ -47,8 +66,11 @@ const DEFAULT_IDLE_DAYS: u64 = 14;
 const DEFAULT_TRASH_DAYS: u64 = 30;
 /// How often the sweep runs while the app is open.
 pub const SWEEP_EVERY: Duration = Duration::from_secs(3600);
-/// Least time between pull request lookups for one chat: after a turn, and in a sweep.
-const PR_AFTER_TURN: Duration = Duration::from_secs(60);
+/// Least time between pull request lookups for one chat when the window comes
+/// to the front or the chat is opened, so flicking between windows doesn't
+/// ask again and again. After a turn it is always asked.
+const PR_GAP: Duration = Duration::from_secs(10);
+/// The same, in a sweep.
 const PR_IN_SWEEP: Duration = Duration::from_secs(600);
 
 /// The app's worktree tool group, offered to every main chat's agent,
@@ -483,10 +505,31 @@ impl SessionManager {
         let id = session_id.to_string();
         tokio::spawn(async move {
             manager.follow_branch(&id).await;
-            if manager.pr_due(&id, PR_AFTER_TURN) {
-                manager.refresh_prs(&id).await;
-            }
+            manager.pr_due(&id, Duration::ZERO); // Marks it looked up.
+            manager.refresh_prs(&id).await;
         });
+    }
+
+    /// The window came to the front: the pull requests of every chat that may
+    /// have one changing are looked up, all in one go, so one merged or
+    /// closed meanwhile shows at once.
+    pub async fn check_all_prs(&self) {
+        let Ok(rows) = self.0.store.sweep_list() else {
+            return;
+        };
+        let ids: Vec<String> = rows
+            .into_iter()
+            .filter(|row| row.trashed_at.is_none() && self.pr_due(&row.id, PR_GAP))
+            .map(|row| row.id)
+            .collect();
+        self.refresh_prs_of(&ids).await;
+    }
+
+    /// A chat was opened: its pull requests are looked up.
+    pub async fn check_prs(&self, session_id: &str) {
+        if self.pr_due(session_id, PR_GAP) {
+            self.refresh_prs(session_id).await;
+        }
     }
 
     /// Whether a chat's pull requests are due a lookup; marks them looked up if so.
@@ -557,33 +600,46 @@ impl SessionManager {
         });
     }
 
-    /// Looks the chat's pull requests up again: the one for its worktree's
-    /// branch (it may have been opened outside the chat), and every listed
-    /// one still open or a draft. Merged and closed ones aren't asked about
-    /// again. Each answer updates only its own entry, so one added meanwhile
-    /// is kept. Returns the list afterwards.
+    /// Looks the chat's pull requests up again (see `refresh_prs_of`).
+    /// Returns the list afterwards.
     async fn refresh_prs(&self, session_id: &str) -> Vec<PrInfo> {
-        let Ok(Some(git)) = self.0.store.chat_git(session_id) else {
-            return Vec::new();
-        };
-        let mut asked = None;
-        if let Some(wt) = git.worktree.filter(|_| git.status.is_some()) {
-            let lookup = self.0.pr_lookup.by_branch.clone();
-            if let Ok(Some(pr)) = blocking(move || lookup(&wt.repo_root, &wt.branch)).await {
-                self.save_pr(session_id, &pr);
-                asked = Some(pr.url);
-            }
-        }
-        for pr in git.prs {
-            if !matches!(pr.state.as_str(), "open" | "draft") || asked.as_ref() == Some(&pr.url) {
-                continue;
-            }
-            let lookup = self.0.pr_lookup.by_url.clone();
-            if let Ok(Some(pr)) = blocking(move || lookup(&pr.url)).await {
-                self.save_pr(session_id, &pr);
-            }
-        }
+        self.refresh_prs_of(&[session_id.to_string()]).await;
         self.0.store.chat_git(session_id).ok().flatten().map(|g| g.prs).unwrap_or_default()
+    }
+
+    /// Looks these chats' pull requests up again, all in one lookup: for
+    /// each, the one for its worktree's branch (it may have been opened
+    /// outside the chat), and every listed one still open or a draft. Merged
+    /// and closed ones aren't asked about again. Each answer updates only its
+    /// own entry, so one added meanwhile is kept.
+    async fn refresh_prs_of(&self, ids: &[String]) {
+        let (mut asks, mut whose) = (Vec::new(), Vec::new());
+        for id in ids {
+            let Ok(Some(git)) = self.0.store.chat_git(id) else {
+                continue;
+            };
+            if let Some(wt) = git.worktree.filter(|_| git.status.is_some()) {
+                asks.push(PrAsk::Branch {
+                    repo_root: wt.repo_root,
+                    branch: wt.branch,
+                });
+                whose.push(id.clone());
+            }
+            for pr in git.prs.into_iter().filter(|pr| matches!(pr.state.as_str(), "open" | "draft")) {
+                asks.push(PrAsk::Url(pr.url));
+                whose.push(id.clone());
+            }
+        }
+        if asks.is_empty() {
+            return;
+        }
+        let lookup = self.0.pr_lookup.clone();
+        let answers = blocking(move || lookup.ask_many(&asks)).await;
+        for (id, pr) in whose.iter().zip(answers) {
+            if let Some(pr) = pr {
+                self.save_pr(id, &pr);
+            }
+        }
     }
 
     /// Starts a sweep in the background, unless one is running.
