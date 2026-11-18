@@ -21,6 +21,7 @@ import {
   sideEnd,
   sideInterrupt,
   sideWithdrawMessage,
+  SIDE_GONE,
   sideSend,
   signIn,
   fileKind,
@@ -1707,6 +1708,10 @@ export class Chat {
       return messageId;
     } catch (e) {
       this.turnStartedAt = null;
+      if (this.owner && String(e) === SIDE_GONE) {
+        await this.owner.redoSide(this.sessionId, message);
+        return;
+      }
       // The switch didn't happen: its line goes.
       if (switched) this.items = this.items.filter((i) => i.id !== switched.id);
       this.push({ type: "error", text: String(e) });
@@ -1878,6 +1883,16 @@ export class Chat {
     } catch {
       // Nothing running to end.
     }
+  }
+
+  /**
+   * A side chat whose saved copy was deleted while it sat idle can't go on
+   * (the core has forgotten it): its tab closes and the question goes to a
+   * new side chat instead.
+   */
+  async redoSide(id: string, question: string): Promise<void> {
+    await this.endSide(id);
+    await this.newSide().send(question);
   }
 
   /** Ends every side chat, when this chat is dropped from the window. */

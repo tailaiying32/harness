@@ -636,6 +636,9 @@ const chatFolder = (project: string, chatId: string) => `${projectHome(project)}
 const projectOf = (chatId: string) =>
   [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === chatId)?.project_path ?? `${home}/code/harness`;
 
+/** Side chats that have answered once, so "@gone" can play a deleted copy (see side_send). */
+const sidesAnswered = new Set<string>();
+
 const notesByChat = new Map<string, string>([
   [
     "planning",
@@ -732,6 +735,9 @@ const commands: Record<string, (args: Args) => unknown> = {
   side_send: (args) => {
     const id = String(args.sideId);
     const text = String(args.text);
+    // "@gone" to a side chat that has answered: its saved copy was deleted while it sat idle.
+    if (text.includes("@gone") && sidesAnswered.has(id)) throw "side chat gone";
+    sidesAnswered.add(id);
     setTimeout(() => {
       emit(id, { kind: "title_changed", title: text.split(/\s+/).slice(0, 3).join(" ") });
       emit(id, {

@@ -981,7 +981,7 @@ pub fn run() {
                 eprintln!("harness: couldn't write harness-tab: {e}");
             }
             let tab_command = home.tab_command();
-            let side = SideChats::new(claude, store.clone(), out.clone(), home.clone(), dir.join("side_copies.json"));
+            let side = SideChats::new(claude, store.clone(), out.clone(), home.clone(), &dir);
             let browsers = Browsers::new(app.handle().clone(), out.clone());
             let terminals = Terminals::new(out.clone(), store.clone());
             let panel_out = out.clone();
