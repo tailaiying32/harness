@@ -11,6 +11,8 @@ import { defineLanguageFacet, forceParsing, Language, LanguageSupport, syntaxTre
 import { GFM, parser as markdownParser } from "@lezer/markdown";
 import { emphasis, indent, link, newLine, outdent, pasteLink, renumbered, todo, type Edit } from "./editing";
 import { renderMarkdown } from "../markdown";
+import { commentsExtension } from "./commentMarks";
+import type { DocComment } from "./comments";
 import { EditorState, MapMode, type Range, StateEffect, StateField } from "@codemirror/state";
 import {
   Decoration,
@@ -28,6 +30,9 @@ export type LiveOptions = {
   placeholder?: string;
   onchange: (text: string) => void;
   onblur?: () => void;
+  /** Comments on the text, for a doc or a waiting plan (see commentMarks.ts); none for the notes. */
+  comments?: DocComment[];
+  oncomments?: (list: DocComment[]) => void;
 };
 
 /** Markdown with GitHub's additions (tables, strikethrough, task lists). Made
@@ -575,6 +580,7 @@ export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): Edi
         pairTyping,
         pasteLinks,
         look,
+        options.comments ? commentsExtension(options.comments, options.oncomments) : [],
         EditorView.updateListener.of((u) => {
           if (u.docChanged) options.onchange(u.state.doc.toString());
           if (u.focusChanged && !u.view.hasFocus) options.onblur?.();

@@ -1750,6 +1750,128 @@ file, even when coding", and Harness said nothing about its own panel.
   to notes.md, "make it a Claude Doc" was turned down. Not tested live: the
   button in the real window, Cursor's tab from disk.
 
+### Comments on docs and plans (built 2026-11-17, branch `harness/comments-on-docs-that-agents-f-0774cd`)
+
+The user selects text in a doc tab or a waiting plan, leaves a comment, and
+sends all of a tab's comments together. The agent edits where a comment asks
+for a change, answers questions in the chat, and asks in the chat when a
+comment is unclear. Sent comments go away. Notes and chat messages don't take
+comments yet (notes would be easy, same editor; chat needs its own design).
+
+Mock-ups: "Comments on Docs" canvas in the Magic Patterns OS (see "Look"),
+option E "Floating, with a list" (chosen over inline, in-the-foot, and
+windows pinned to the edge, which covered the text in a narrow panel).
+
+- **Look.** Commented text gets an accent underline. Selecting text shows a
+  small "+ comment" button under its last line. The button, the new
+  comment's input and a written comment's window follow one rule (`under`),
+  so the input opens exactly where the button was and the comment later
+  shows where it was typed: under the text's last screen line; while
+  narrower than the text on that line, its right edge sits at the text's
+  end; wider, it starts where that line's text starts (past a list marker
+  on a wrapped line) and grows right. So a box grows left, then right, as
+  it is typed in. A window narrower than the button is placed as if it had
+  the button's width, so the box's left edge opens exactly on the button's.
+  The button has a popup's colours (panel, hairline border, accent words)
+  and the padding of the app's strong buttons (Approve plan, Allow): none
+  above or below, 1ch at the sides. Tried and dropped: the box's own
+  padding (too wide), the filled accent button itself, and a pixel less
+  padding above than below in the windows (the text looked too high). The
+  windows (and the list) look like the app's other
+  popups (model menu, / and @): panel colour, hairline border, 2ch side
+  padding, no shadow, no marker (an accent rule down the left, then an
+  accent `>`, were tried and dropped). A comment's
+  window is as wide as its text needs, up to 40ch. The cursor in a mark (a click, or arrows) opens its window; not
+  hover, since the docs are edited too. The written comment is itself the
+  box: click in and type to edit (no edit button), × removes it; the window
+  stays while its box has the cursor. Enter saves, Shift+Enter a new line,
+  Escape gives up; both close the window and put the cursor back at the
+  text, and no window opens there until the cursor moves (it used to reopen
+  at once, a flash). Clicking away keeps what was typed; emptied, a comment
+  is removed.
+- **The list of all comments** is docked at the top of the tab's foot,
+  above the plan's "what should change?" and the buttons: one line with the
+  count (`2 comments ▸`) that unfolds every comment under it (its quote,
+  then its text with × on that line; either jumps to its mark). It is part
+  of the panel, not a popup: the doc gets shorter and nothing is covered
+  (30vh at most, then it scrolls). It is set apart from the note and the
+  buttons under it by space (1.5 gaps), not a second rule. The line is there
+  only while the tab has comments. Folded or open, it stays that way across tabs, chats and
+  restarts (prefs `commentListOpen`), folded to begin with. A doc's button
+  says "Send comments" (the line above has the count). Sketches: "Comment
+  List Placement" canvas in the Magic Patterns OS, option C. Tried and
+  dropped: a popup floating over the doc's end (covered text once the list
+  stayed open), opened from a count in the plan's foot, then from a comment
+  icon in the top bar; a popup dropping from that icon was sketched only.
+- **The comment box** is a `contenteditable="plaintext-only"` element, not
+  a textarea: it is as big as its text by itself. A textarea had to be
+  sized by measuring a hidden copy of the text, and wrapped the last letter
+  on some keys however it was padded. Shift+Enter is done by hand
+  (`insertLineBreak`); the placeholder is `:empty::before`. The window is
+  `width: max-content` (capped at 40ch): shrink-to-fit made it narrow
+  whenever it opened near the panel's right edge, which is the window's
+  edge; the editor moves it left to fit instead. After each change to the
+  text the windows are placed again (`repositionTooltips`). Text that wraps
+  leaves a box at its full width, with a ragged gap at the right that one
+  line never has, so a box of several lines is cut to its widest line
+  (`fit`: laid out at its natural width, then measured word by word, on
+  every change, so it can't flicker between two widths).
+- **Where they live** (`comments.ts`, `DocComment`): on the chat
+  (`Chat.comments`, by tab: a doc's path or the plan tab), never in the file,
+  in memory only (lost on quit, like the plan's "what should change?" text).
+  The editor (`commentMarks.ts`) holds each comment's place and maps it
+  through every change, the user's typing or the agent's write alike; text
+  typed just before or after a mark stays outside it. If the commented text
+  is deleted, the comment stays (list only, quote struck through) and is
+  sent with its old quote. The editor is rebuilt each time a tab shows, so
+  it reports every change to the list back (`oncomments`), and takes a list
+  from outside (`replaceComments`) only when it differs. A doc saved to the
+  project takes its comments along; a doc that is gone drops them; a new
+  plan starts with none.
+- **What the agent gets** is plain text, the same for every agent: "Comments
+  on <where>:" and a numbered list, each "Line N, on "<quote>": <comment>"
+  (quotes cut at 200 characters).
+  - **Doc:** "Send N comments" flushes unsaved typing, then sends that as a
+    message from the user, with the doc as a link (it shows in the chat).
+    The guidance line goes as an app note: change the text where a comment
+    asks for a change, answer questions in the chat, ask instead of
+    guessing. The marks turn faint, and go when the turn that took the
+    message ends (a queued message waits for its own turn). It waits its turn
+    like any message if the agent is busy.
+  - **Keep planning:** what was typed, then the list and the guidance line,
+    in the answer's message (`Chat.keepPlanningMessage`).
+  - **Approve** (and "always"): the plan goes as an edit with "## Comments
+    from the user", the list and "Take these into account while building. If
+    one is unclear, ask in the chat before acting on it." at its end
+    (`Chat.approvedPlan`). Claude Code builds from the `plan` in
+    `updatedInput`; Cursor gets its usual "approved after editing it" note
+    with that text. No Rust changes. The answered plan shows the section, a
+    record of what went with it.
+- **Windows** are CodeMirror tooltips, put in the page's body so the panel's
+  scrolling box doesn't cut them off; `getCoords` places them under the
+  mark. Side to side they are kept within the text's column
+  (`tooltipSpace`), so one near the right edge stops at the text's edge, as
+  one at the left does, not at the window's edge. The comment input takes the cursor a frame after it opens: the
+  editor places a new window after making it, which took the focus from the
+  box and closed it. A blur only finishes the input after a press elsewhere
+  or a move to another field; otherwise the box takes the cursor back.
+- **Self-test:** `@doccomment <quote>|<text>` comments on the first doc,
+  `@sendcomments` sends them, `@plancomment <quote>|<text>` comments on the
+  next plan before its auto answer (Approve, or Keep planning with
+  `@answer deny`), through the same code as the buttons.
+- **Tested**: in the preview (select, button, input, marks following typing
+  above them, the comment window, the list and jumping, Keep planning's and
+  Approve's text, a doc's send and its marks clearing at turn end). Live
+  with the self-test on Claude Code (Haiku) and Cursor (Composer 2.5): a
+  doc's "banana → mango" comment was made; a "??" comment got a question in
+  the chat, not a guess; an approved plan with "name the file greeting.txt
+  instead" built greeting.txt. The live runs were before the look was
+  reworked (the box, its placing, the docked list); what is sent didn't
+  change. The user tried the look in the preview by hand. Not tested: the
+  built window (real selection and typing there), Keep planning live, and,
+  in the preview, the last two changes (windows kept inside the text's
+  column, the space under the docked list): its page was hidden.
+
 ### The home folder (`home.rs`, built 2026-11-17)
 
 What chats write for the user to read is kept in one folder in the user's
