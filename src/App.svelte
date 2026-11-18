@@ -361,17 +361,27 @@
       //   @notes <text>  write the open chat's notes (the rest of the line, spaces and all)
       //   @docedit <text>  save <text> as the open chat's first document, as typing in its tab does
       //   @planedit <text>  add a line to the next plan before it is auto-approved
+      //   @plancomment <quote>|<text>  comment <text> on <quote> in the next plan, before
+      //                  it is auto-answered (Approve or Keep planning, per @answer)
+      //   @doccomment <quote>|<text>  comment <text> on <quote> in the open chat's first doc
+      //   @sendcomments  send the first doc's comments, as its Send button does
       //   @wait <ms>     do nothing for a while. With the window hidden or the screen
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
-        message.match(/^@(model|mode|answer|worktree|newchats|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|newside|image|file|browser|settings|termtab|termclose|docs|info|agent|agents)(?:\s+(\S+))?$/) ??
-        message.match(/^@(notes|docedit|planedit|terminal|termwait)\s+(.+)$/s) ??
+        message.match(/^@(model|mode|answer|worktree|newchats|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|newside|image|file|browser|settings|termtab|termclose|docs|info|agent|agents|sendcomments)(?:\s+(\S+))?$/) ??
+        message.match(/^@(notes|docedit|planedit|plancomment|doccomment|terminal|termwait)\s+(.+)$/s) ??
         [];
       const current = app.current;
       if (directive === "notes") await current.saveNotes(value);
       if (directive === "docedit" && current.docs[0]) await current.saveDoc(current.docs[0].path, value);
       if (directive === "planedit") current.autoPlanEdit = value;
+      if (directive === "plancomment" || directive === "doccomment") {
+        const [quote, text = ""] = value.split("|");
+        if (directive === "plancomment") current.autoPlanComment = { quote, text };
+        else if (current.docs[0]) current.addTestComment(current.docs[0].path, current.docs[0].text, quote, text);
+      }
+      if (directive === "sendcomments" && current.docs[0]) await current.sendComments(current.docs[0].path);
       if (directive === "model" && value.startsWith("cursor:")) {
         current.setAgent("cursor", loadPrefs().mode);
         await current.changeModel(value.slice("cursor:".length));

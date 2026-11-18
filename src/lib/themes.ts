@@ -280,6 +280,8 @@ type Prefs = {
   projectModels: Record<string, { agent: string; model: string }>;
   /** When overnight keep awake ends, "HH:MM". */
   overnightUntil: string;
+  /** The side panel's list of every comment is kept open (see SidePanel). */
+  commentListOpen: boolean;
 };
 export const DEFAULT_PANEL_WIDTH = 0.46;
 
@@ -332,9 +334,10 @@ export function loadPrefs(): Prefs {
         ),
       ),
       overnightUntil: overnightTimes.includes(saved.overnightUntil as string) ? saved.overnightUntil! : DEFAULT_OVERNIGHT,
+      commentListOpen: saved.commentListOpen === true,
     };
   } catch {
-    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", agent: "claude-code", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH, foldedProjects: [], sidebarHidden: false, projectOrder: [], projectModels: {}, overnightUntil: DEFAULT_OVERNIGHT };
+    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", agent: "claude-code", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH, foldedProjects: [], sidebarHidden: false, projectOrder: [], projectModels: {}, overnightUntil: DEFAULT_OVERNIGHT, commentListOpen: false };
   }
 }
 

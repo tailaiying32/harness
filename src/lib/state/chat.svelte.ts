@@ -1,5 +1,6 @@
 // One chat's state: what's on screen, and how agent events change it.
 
+import { BUILD_GUIDANCE, commentList, formatComments, GUIDANCE, type DocComment } from "../chat/comments";
 import {
   answerApproval,
   browserCloseTab,
@@ -792,6 +793,11 @@ export class Chat {
     from = this.currentPath(from);
     if (from === to) return;
     this.savedTo.set(from, to);
+    const comments = this.comments[from];
+    if (comments) {
+      delete this.comments[from];
+      this.comments[to] = comments;
+    }
     const doc = this.docs.find((d) => d.path === from);
     if (doc) {
       // A tab at the new path already (opened by a link) wins; the old one goes.
@@ -818,6 +824,107 @@ export class Chat {
   planDraft = $state<string | null>(null);
   /** What is typed under the plan ("what should change?"), not sent yet. Kept here so switching chats keeps it. */
   planNote = $state("");
+
+  /**
+   * Comments on side panel tabs, by tab (a doc's path, or the plan tab). Kept
+   * on the chat, not in the file, and only until sent (see comments.ts).
+   */
+  comments = $state<Record<string, DocComment[]>>({});
+
+  commentsFor(tab: string): DocComment[] {
+    if (this.owner) return this.owner.commentsFor(tab);
+    return this.comments[tab] ?? [];
+  }
+
+  /** The editor's comments for a tab, after an add, edit, removal or move. */
+  setComments(tab: string, list: DocComment[]): void {
+    if (this.owner) return this.owner.setComments(tab, list);
+    if (list.length) this.comments[tab] = list;
+    else delete this.comments[tab];
+  }
+
+  /** A tab's comments not sent yet. */
+  pendingComments(tab: string): DocComment[] {
+    return this.commentsFor(tab).filter((c) => !c.sentWith);
+  }
+
+  /** The waiting plan as it stands: the user's edit, or the agent's text. */
+  get planText(): string {
+    return this.plan ? (this.planDraft ?? planOf(this.plan.input).text) : "";
+  }
+
+  /** The user's edit to the waiting plan, if they changed anything. */
+  editedPlan(): string | undefined {
+    if (!this.plan || this.planDraft === null) return undefined;
+    return this.planDraft === planOf(this.plan.input).text ? undefined : this.planDraft;
+  }
+
+  /**
+   * The plan Approve sends: the user's edit, and any comments at its end, so
+   * the agent builds with them in mind. Unchanged and uncommented: nothing.
+   */
+  approvedPlan(): string | undefined {
+    const comments = this.pendingComments(PLAN_TAB);
+    if (!comments.length) return this.editedPlan();
+    const text = this.planText;
+    return `${text.trimEnd()}\n\n## Comments from the user\n\n${commentList(comments, text)}\n\n${BUILD_GUIDANCE}`;
+  }
+
+  /**
+   * What Keep planning says: an edited plan whole (so the agent sees exactly
+   * what changed), what the user typed under it, and the comments, each
+   * quoting its spot.
+   */
+  keepPlanningMessage(): string {
+    const edited = this.editedPlan();
+    const note = this.planNote.trim();
+    const comments = this.pendingComments(PLAN_TAB);
+    const parts: string[] = [];
+    if (edited) parts.push(`I edited the plan; here is my version:\n\n${edited}`);
+    if (note) parts.push(note);
+    if (comments.length) parts.push(formatComments(comments, this.planText, "the plan"), GUIDANCE);
+    if (!note && !comments.length) parts.push("Keep planning.");
+    return parts.join("\n\n");
+  }
+
+  /** Self-test only: puts a comment on the first match of `quote` in a tab's text. */
+  addTestComment(tab: string, text: string, quote: string, comment: string): void {
+    const from = text.indexOf(quote);
+    if (from < 0 || !quote) return;
+    this.setComments(tab, [
+      ...this.commentsFor(tab),
+      { id: crypto.randomUUID(), from, to: from + quote.length, quote, text: comment },
+    ]);
+  }
+
+  /**
+   * Sends a doc's comments as one message from the user, quoting each spot.
+   * The agent is also told to ask rather than guess. The comments show faint
+   * until the turn that takes the message ends.
+   */
+  async sendComments(path: string): Promise<void> {
+    if (this.owner) return this.owner.sendComments(path);
+    const pending = this.pendingComments(path);
+    if (!pending.length) return;
+    const text = this.docs.find((d) => d.path === path)?.text ?? "";
+    const name = path.split(/[\\/]/).pop() || path;
+    this.appNotes.push(GUIDANCE);
+    const messageId = await this.send(formatComments(pending, text, `[${name}](<${path}>)`), []);
+    if (!messageId) return;
+    const sent = new Set(pending.map((c) => c.id));
+    this.comments[path] = this.commentsFor(path).map((c) => (sent.has(c.id) ? { ...c, sentWith: messageId } : c));
+  }
+
+  /** Drops sent comments whose message has been taken up, once its turn is over. */
+  private dropSentComments(): void {
+    const taken = new Set(
+      this.items.filter((i): i is UserItem => i.type === "user" && !i.queued && !!i.messageId).map((i) => i.messageId!),
+    );
+    for (const [tab, list] of Object.entries(this.comments)) {
+      const left = list.filter((c) => !c.sentWith || !taken.has(c.sentWith));
+      if (left.length !== list.length) this.setComments(tab, left);
+    }
+  }
 
   /** Opens the panel on docs; on `tab` if given, bringing it back if it was closed. */
   openPanel(tab?: string): void {
@@ -959,6 +1066,7 @@ export class Chat {
       // A doc in the chat's folder that is gone was moved or deleted: its tab goes.
       if (this.isChatDoc(path) && String(e).includes("doesn't exist")) {
         this.docs = this.docs.filter((d) => d.path !== path);
+        delete this.comments[path];
       }
       return;
     }
@@ -988,6 +1096,8 @@ export class Chat {
   autoAnswer: Decision | null = null;
   /** Self-test only: a line added to the next plan before it is auto-approved. */
   autoPlanEdit: string | null = null;
+  /** Self-test only: a comment put on the next plan before it is auto-answered. */
+  autoPlanComment: { quote: string; text: string } | null = null;
   /** Answer the worktree question this way. Used by the self-test only. */
   autoWorktree: WorktreeChoice | null = null;
   /** Answer the new-chats question this way. Used by the self-test only. */
@@ -1162,6 +1272,7 @@ export class Chat {
           this.planClosed = false;
           this.planDraft = null;
           this.planNote = "";
+          delete this.comments[PLAN_TAB];
           // Claude Code drafts the plan in a file of its own; that file is this tab.
           this.planPath = planOf(event.input).path;
           this.docs = this.docs.filter((doc) => doc.path !== this.planPath);
@@ -1179,11 +1290,21 @@ export class Chat {
           // A question has no "always"; it is answered with its first options.
           const answers = event.approval === "question" ? firstOptions(event.input) : undefined;
           let plan: string | undefined;
+          let message: string | undefined;
           if (event.approval === "plan" && this.autoPlanEdit) {
             plan = `${planOf(event.input).text}\n\n${this.autoPlanEdit}`;
             this.autoPlanEdit = null;
           }
-          void this.answer(item, answers ? "allow" : this.autoAnswer, undefined, answers, plan);
+          // Answered as the buttons would: comments go with Approve's plan or Keep planning's words.
+          if (event.approval === "plan" && this.autoPlanComment) {
+            const { quote, text } = this.autoPlanComment;
+            this.autoPlanComment = null;
+            if (plan !== undefined) this.planDraft = plan;
+            this.addTestComment(PLAN_TAB, this.planText, quote, text);
+            if (this.autoAnswer === "deny") message = this.keepPlanningMessage();
+            else plan = this.approvedPlan();
+          }
+          void this.answer(item, answers ? "allow" : this.autoAnswer, message, answers, plan);
         }
         break;
       }
@@ -1320,6 +1441,7 @@ export class Chat {
         // shell command, Cursor's tools).
         void this.refreshNotes();
         for (const doc of this.docs) if (!doc.closed || this.isChatDoc(doc.path)) void this.refreshDoc(doc.path);
+        this.dropSentComments();
         this.onTurnEnd?.();
         break;
 
@@ -1451,7 +1573,8 @@ export class Chat {
 
   /** Sends a message, with the draft's images whose `[image n]` word is in it. */
   /** `from` is where the images come from: the draft's, or a sent message's when it is sent again. */
-  async send(text: string, from: ImageRef[] = this.draftImages): Promise<void> {
+  /** Returns the message's id once it is sent. */
+  async send(text: string, from: ImageRef[] = this.draftImages): Promise<string | undefined> {
     let message = text.trim();
     if (!message) return;
     // `/btw` goes to the side chat, never to Claude Code (which can't run it headless).
@@ -1506,6 +1629,7 @@ export class Chat {
         this.appNotes = [];
         this.onSent?.();
       }
+      return messageId;
     } catch (e) {
       this.turnStartedAt = null;
       // The switch didn't happen: its line goes.
@@ -1548,7 +1672,11 @@ export class Chat {
       if (plan !== undefined && item.input && typeof item.input === "object") {
         item.input = { ...(item.input as Record<string, unknown>), plan };
       }
-      if (item === this.plan) this.planDraft = null;
+      if (item === this.plan) {
+        this.planDraft = null;
+        // The comments went with the answer.
+        delete this.comments[PLAN_TAB];
+      }
       item.answered = decision;
       item.answers = answers;
       if (decision === "deny") this.markDeclined(item);

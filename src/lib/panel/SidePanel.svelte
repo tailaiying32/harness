@@ -23,8 +23,9 @@
   import { onDestroy, tick, untrack } from "svelte";
   import { NOTES_TAB, PLAN_TAB, planOutcome, type Chat } from "../state/chat.svelte";
   import { folderOf } from "../paths";
-  import { applyPanelWidth, DEFAULT_PANEL_WIDTH, savePrefs } from "../themes";
+  import { applyPanelWidth, DEFAULT_PANEL_WIDTH, loadPrefs, savePrefs } from "../themes";
   import { planOf } from "../tools";
+  import { inOrder, type DocComment } from "../chat/comments";
 
   // `covered`: something is drawn over the panel (settings, an image), so the
   // browser's page, which would sit on top of it, is put out of sight.
@@ -93,13 +94,43 @@
   }
 
   /** The waiting plan as it stands: the user's edit, or Claude's text. */
-  const planText = $derived(plan ? (chat.planDraft ?? planOf(plan.input).text) : "");
+  const planText = $derived(plan ? chat.planText : "");
 
-  /** The user's edit to send with Approve, if they changed anything. */
-  function editedPlan(): string | undefined {
-    if (!plan || chat.planDraft === null) return undefined;
-    return chat.planDraft === planOf(plan.input).text ? undefined : chat.planDraft;
+  // ---- Comments (see comments.ts): on a doc or a waiting plan, sent together ----
+
+  /** The editor on show, for jumping to a comment from the list. */
+  let editor = $state<LiveMarkdown>();
+  /** The list of every comment is unfolded under its line in the foot. Kept
+      open or folded across tabs, chats and restarts; folded to begin with. */
+  let listOpen = $state(loadPrefs().commentListOpen);
+
+  function toggleList() {
+    listOpen = !listOpen;
+    savePrefs({ commentListOpen: listOpen });
   }
+
+  /** The tab's comments not sent yet; the notes take none. */
+  const pending = $derived(active === NOTES_TAB ? [] : chat.pendingComments(active));
+  /** A doc (not the plan or the notes) with comments waiting to go. */
+  const docPending = $derived(active !== PLAN_TAB && pending.length > 0);
+
+  const commentCount = (n: number) => (n === 1 ? "1 comment" : `${n} comments`);
+
+  function jump(c: DocComment) {
+    editor?.focusComment(c.id);
+  }
+
+  function dropComment(c: DocComment) {
+    chat.setComments(active, chat.commentsFor(active).filter((x) => x.id !== c.id));
+  }
+
+  /** Typing is saved first, so the agent reads the doc the comments are on. */
+  async function sendComments() {
+    const tab = active;
+    await flush();
+    await chat.sendComments(tab);
+  }
+
   const text = $derived(
     active === PLAN_TAB
       ? plan
@@ -221,16 +252,37 @@
     queueMicrotask(growAsk);
   }
 
-  // An edited plan goes back with the answer: whole, so Claude sees exactly
-  // what the user changed.
+  // Keep planning says what the user typed, an edited plan and the comments
+  // (see Chat.keepPlanningMessage).
   function keepPlanning() {
     if (!plan) return;
-    const edited = editedPlan();
-    const note = chat.planNote.trim() || "Keep planning.";
-    void chat.answer(plan, "deny", edited ? `I edited the plan; here is my version:\n\n${edited}\n\n${note}` : note);
+    void chat.answer(plan, "deny", chat.keepPlanningMessage());
     chat.planNote = "";
   }
 </script>
+
+<!-- The tab's comments, at the top of its foot: a line with their count,
+     which unfolds the list. Either part of a comment jumps to its text. -->
+{#snippet commentDock()}
+  <div class="dock">
+    <button class="fold" onclick={toggleList}>
+      {commentCount(pending.length)} <span class="arrow">{listOpen ? "▾" : "▸"}</span>
+    </button>
+    {#if listOpen}
+      <div class="comment-list">
+        {#each inOrder(pending) as c (c.id)}
+          <div class="comment-row">
+            <button class="jump quote" disabled={c.from < 0} onclick={() => jump(c)}>“{c.quote.replace(/\s+/g, " ").trim()}”</button>
+            <div class="said-row">
+              <button class="jump said" disabled={c.from < 0} onclick={() => jump(c)}>{c.text}</button>
+              <button class="drop" title="Remove" onclick={() => dropComment(c)}>×</button>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
+  </div>
+{/snippet}
 
 <aside class="panel" bind:this={panel}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -288,18 +340,42 @@
         {/if}
       {:else if active === PLAN_TAB && plan && chat.planPending}
         <!-- A waiting plan can be edited; Approve sends the edit. -->
-        <LiveMarkdown text={planText} onchange={(t) => (chat.planDraft = t)} />
+        <LiveMarkdown
+          bind:this={editor}
+          text={planText}
+          onchange={(t) => (chat.planDraft = t)}
+          comments={chat.commentsFor(PLAN_TAB)}
+          oncomments={(list) => chat.setComments(PLAN_TAB, list)}
+        />
       {:else if active === PLAN_TAB}
         <Markdown {text} />
       {:else}
         <!-- A document: the file itself, saved as the user types. -->
         {@const tab = active}
-        <LiveMarkdown {text} onchange={(t) => typeIn(tab, t)} ondone={flush} />
+        <LiveMarkdown
+          bind:this={editor}
+          {text}
+          onchange={(t) => typeIn(tab, t)}
+          ondone={flush}
+          comments={chat.commentsFor(tab)}
+          oncomments={(list) => chat.setComments(tab, list)}
+        />
       {/if}
     </div>
   {/key}
 
-  {#if chat.isChatDoc(active) || (active === NOTES_TAB && chat.notes?.trim())}
+  {#if docPending}
+    <!-- Comments waiting to go: sending them is the doc's main action now. -->
+    <div class="foot">
+      {@render commentDock()}
+      <div class="actions">
+        <button class="primary" onclick={sendComments}>Send comments</button>
+        {#if chat.isChatDoc(active)}
+          <button disabled={chat.busy} onclick={saveToProject}>Save to project</button>
+        {/if}
+      </div>
+    </div>
+  {:else if chat.isChatDoc(active) || (active === NOTES_TAB && chat.notes?.trim())}
     <!-- A doc in the chat's folder, and the notes, go with the chat unless saved to the project. -->
     <div class="foot">
       <div class="actions">
@@ -310,6 +386,7 @@
   {#if active === PLAN_TAB && plan}
     <div class="foot">
       {#if chat.planPending}
+        {#if pending.length}{@render commentDock()}{/if}
         <div class="feedback">
           <span class="marker">&gt;</span>
           <textarea
@@ -321,9 +398,9 @@
           ></textarea>
         </div>
         <div class="actions">
-          <button class="primary" onclick={() => chat.answer(plan, "allow", undefined, undefined, editedPlan())}>Approve plan</button>
+          <button class="primary" onclick={() => chat.answer(plan, "allow", undefined, undefined, chat.approvedPlan())}>Approve plan</button>
           {#if plan.alwaysLabel}
-            <button onclick={() => chat.answer(plan, "always_allow", undefined, undefined, editedPlan())}>{plan.alwaysLabel}</button>
+            <button onclick={() => chat.answer(plan, "always_allow", undefined, undefined, chat.approvedPlan())}>{plan.alwaysLabel}</button>
           {/if}
           <button onclick={keepPlanning}>Keep planning</button>
         </div>
@@ -403,6 +480,69 @@
     margin: 0 var(--pad-x) var(--foot-y);
     padding-top: var(--gap);
     border-top: 1px solid var(--line);
+  }
+  /* Every comment in one floating window over the doc's foot, styled like
+     the editor's comment windows. */
+  /* The comments, docked at the top of the foot: one line ("2 comments")
+     until opened, then every comment under it. Part of the panel, not a
+     popup, so the doc gets shorter and nothing is covered. */
+  .dock {
+    /* Set apart from the note and the buttons under it by space, not a rule. */
+    margin-bottom: calc(var(--gap) * 1.5);
+  }
+  .fold {
+    color: var(--dim);
+  }
+  .fold:hover {
+    color: var(--fg);
+  }
+  .fold .arrow {
+    color: var(--faint);
+  }
+  .comment-list {
+    margin-top: var(--foot-gap);
+    max-height: 30vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--gap) * 0.6);
+  }
+  .comment-row {
+    display: flex;
+    flex-direction: column;
+  }
+  .jump {
+    min-width: 0;
+    text-align: left;
+  }
+  .quote {
+    color: var(--faint);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .quote:disabled {
+    text-decoration: line-through;
+  }
+  /* The comment, with its × on its first line. */
+  .said-row {
+    display: flex;
+    gap: 1ch;
+    align-items: flex-start;
+  }
+  .said {
+    flex: 1;
+    color: var(--fg);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .said:not(:disabled):hover,
+  .drop:hover {
+    color: var(--bright);
+  }
+  .drop {
+    flex-shrink: 0;
+    color: var(--faint);
   }
   .feedback {
     display: flex;
