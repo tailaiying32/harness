@@ -147,6 +147,53 @@ export function commentBox(
   };
 }
 
+/** The top and bottom of the screen a window can show in: its text's scrolling box, or the window. */
+export function roomFor(node: Element): { top: number; bottom: number } {
+  for (let n = node.parentElement; n; n = n.parentElement) {
+    const overflow = getComputedStyle(n).overflowY;
+    if ((overflow === "auto" || overflow === "scroll") && n.scrollHeight > n.clientHeight) {
+      const r = n.getBoundingClientRect();
+      return { top: Math.max(0, r.top), bottom: Math.min(window.innerHeight, r.bottom) };
+    }
+  }
+  return { top: 0, bottom: window.innerHeight };
+}
+
+/**
+ * For the "+ comment" button: the height of the one-line box it opens
+ * into, measured from a hidden copy beside it (0 for any other window).
+ */
+function boxHeight(dom: HTMLElement): number {
+  if (!dom.classList.contains("cm-comment-plus") || !dom.parentElement) return 0;
+  const probe = el("div", "cm-tooltip cm-comment-window cm-comment-input");
+  probe.style.cssText = "position: fixed; visibility: hidden; top: 0; left: 0";
+  probe.append(el("div", "cm-comment-box", "x"));
+  dom.parentElement.append(probe);
+  const height = probe.offsetHeight;
+  probe.remove();
+  return height;
+}
+
+/**
+ * Which side of its text a window hangs on: under the text's last line,
+ * unless it would run past the bottom of `room` and fits over the first
+ * line instead. The button decides by the box it opens into, so the two
+ * open on the same side. `top` is where to put the window's top edge (its CSS top
+ * margin still applies, so over the text it is taken back twice: once to
+ * undo it, once for the same gap above the line).
+ */
+export function hangSide(
+  dom: HTMLElement,
+  firstTop: number,
+  lastBottom: number,
+  room: { top: number; bottom: number },
+): { above: boolean; top: number } {
+  const margin = parseFloat(getComputedStyle(dom).marginTop) || 0;
+  const height = Math.max(dom.offsetHeight, boxHeight(dom)) + margin;
+  if (lastBottom + height <= room.bottom || firstTop - height < room.top) return { above: false, top: lastBottom };
+  return { above: true, top: firstTop - dom.offsetHeight - 2 * margin };
+}
+
 /** How long the pointer rests on a comment before it opens, and is away before it closes. */
 const HOVER_OPEN_MS = 150;
 const HOVER_CLOSE_MS = 250;
