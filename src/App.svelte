@@ -48,6 +48,7 @@
   import { AppState } from "./lib/state/app.svelte";
   import { terminals } from "./lib/state/terminals.svelte";
   import { tabKeyFrom } from "./lib/state/tabKeys";
+  import { openFind } from "./lib/find";
   import type { Chat } from "./lib/state/chat.svelte";
   import {
     applyFontSize,
@@ -135,7 +136,7 @@
   let showSettings = $state(false);
 
   // Cmd+, (Ctrl+, on Windows) opens settings, as in most apps; Escape closes
-  // them. Cmd+N starts a new chat. Cmd+S shows or hides the sidebar (Cmd+B
+  // them. Cmd+N starts a new chat. Cmd+F finds in the chat or a doc. Cmd+S shows or hides the sidebar (Cmd+B
   // is bold in the text boxes). Escape also ends a full screen panel, unless
   // it belongs to a box still being typed in (the docs editor lets go on
   // Escape, so one press ends both).
@@ -154,6 +155,9 @@
       e.preventDefault();
       showSettings = false;
       app.newChat();
+    } else if (e.key.toLowerCase() === "f" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+      // Find in the chat, side chat or doc last clicked or typed in (see find.ts).
+      if (!showSettings && !chat.viewing && openFind()) e.preventDefault();
     } else if (e.key.toLowerCase() === "s" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       toggleSidebar();

@@ -354,7 +354,7 @@ export class ChatComments {
     const parts = commentBox(
       dom,
       "",
-      (typed) => {
+      (typed, back) => {
         if (this.input?.n !== input.n) return;
         const text = typed?.trim() ?? "";
         if (text) this.chat.addChatComment({ itemId: input.itemId, from: input.from, to: input.to, quote: input.quote, text });
@@ -364,6 +364,9 @@ export class ChatComments {
         this.plus = null;
         this.mark();
         this.render();
+        // Saved with Enter: the cursor goes back to the message box, to type
+        // more or press Enter again to send.
+        if (text && back) this.chat.focusDraft++;
       },
       () => this.place(),
     );
@@ -403,6 +406,7 @@ export class ChatComments {
         if (c && typed === null) parts.set(c.text);
         if (back) this.hovered = null;
         this.update();
+        if (c && typed !== null && back) this.chat.focusDraft++;
       },
       () => this.place(),
     );

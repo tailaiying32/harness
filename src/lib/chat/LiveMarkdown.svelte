@@ -6,6 +6,7 @@
   import type { EditorView } from "@codemirror/view";
   import Markdown from "./Markdown.svelte";
   import { sameComments, type DocComment } from "./comments";
+  import type { Searcher } from "../find";
 
   let {
     text,
@@ -31,6 +32,7 @@
   } = $props();
 
   let marks: typeof import("./commentMarks") | undefined;
+  let finding: typeof import("./findMarks") | undefined;
 
   let host = $state<HTMLElement>();
   let view = $state<EditorView>();
@@ -39,9 +41,14 @@
   let taking = false;
 
   onMount(async () => {
-    const [{ createLiveMarkdown }, commentMarks] = await Promise.all([import("./liveMarkdown"), import("./commentMarks")]);
+    const [{ createLiveMarkdown }, commentMarks, findMarks] = await Promise.all([
+      import("./liveMarkdown"),
+      import("./commentMarks"),
+      import("./findMarks"),
+    ]);
     if (gone || !host) return;
     marks = commentMarks;
+    finding = findMarks;
     view = createLiveMarkdown(host, {
       text,
       placeholder,
@@ -86,6 +93,11 @@
   /** Shows a comment: the cursor goes into its text, scrolled into view. */
   export function focusComment(id: string): void {
     if (view && marks) marks.focusComment(view, id);
+  }
+
+  /** Find (Cmd+F) in the text; null until the editor has loaded. */
+  export function searcher(): Searcher | null {
+    return view && finding ? finding.editorSearcher(view) : null;
   }
 
   onDestroy(() => {

@@ -14,6 +14,7 @@ import { renderMarkdown } from "../markdown";
 import { commentsExtension } from "./commentMarks";
 import type { DocComment } from "./comments";
 import { EditorState, MapMode, type Range, StateEffect, StateField } from "@codemirror/state";
+import { findExtension } from "./findMarks";
 import {
   Decoration,
   type DecorationSet,
@@ -580,6 +581,7 @@ export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): Edi
         pairTyping,
         pasteLinks,
         look,
+        findExtension,
         options.comments ? commentsExtension(options.comments, options.oncomments) : [],
         EditorView.updateListener.of((u) => {
           if (u.docChanged) options.onchange(u.state.doc.toString());

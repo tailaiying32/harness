@@ -90,6 +90,18 @@ body {
   color: var(--bg);
 }
 
+/* Find in page (see find.ts): every match tinted, the one on show solid
+   like a selection. Docs mark theirs as .cm-find, the rest as highlights. */
+::highlight(find),
+.cm-find {
+  background: color-mix(in srgb, var(--yellow) 30%, transparent);
+}
+::highlight(find-current),
+.cm-find-current {
+  background: var(--yellow);
+  color: var(--bg);
+}
+
 /* Scroll bars in the theme's own colours: a thin square thumb, no track.
    The clear border keeps the thumb slim but the grab area wide. */
 ::-webkit-scrollbar {
