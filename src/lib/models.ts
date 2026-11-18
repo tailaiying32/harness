@@ -1,15 +1,20 @@
 // The model lists shown in the picker, one per agent. They come from the
 // agents themselves (see `list_models` in the core), so names and versions
 // are always current: only the newest of each family. Claude Code's list has
-// no "Default" and the recommended one first; Cursor's starts with Auto. The
+// no "Default" and the recommended one first; Cursor's starts with Auto;
+// Codex's starts with its default. The
 // last lists are kept so the picker is right from the first paint next time.
 
-import { CLAUDE, CURSOR, type AgentId, type ModelInfo } from "./ipc";
+import { CLAUDE, CODEX, CURSOR, type AgentId, type ModelInfo } from "./ipc";
 
 /** Each agent's models, in the order they are shown. */
 export type AgentModels = Record<AgentId, ModelInfo[]>;
 
-const KEYS: Record<AgentId, string> = { "claude-code": "harness.models", cursor: "harness.models.cursor" };
+const KEYS: Record<AgentId, string> = {
+  "claude-code": "harness.models",
+  cursor: "harness.models.cursor",
+  codex: "harness.models.codex",
+};
 
 /** Shown only until Claude Code has answered once on this machine. */
 export const fallbackModels: ModelInfo[] = [
@@ -23,7 +28,7 @@ function loadOne(agent: AgentId): ModelInfo[] {
   try {
     const saved = JSON.parse(localStorage.getItem(KEYS[agent]) ?? "[]") as ModelInfo[];
     if (Array.isArray(saved) && saved.every((m) => m && typeof m.value === "string")) {
-      if (agent === CURSOR) return saved;
+      if (agent !== CLAUDE) return saved;
       // A list saved before the picker was trimmed: the same trim (see
       // `parse_models` in the core).
       const kept = saved.filter((m) => m.value !== "default" && !m.value.includes("-"));
@@ -32,12 +37,12 @@ function loadOne(agent: AgentId): ModelInfo[] {
   } catch {
     // Fall through to the built-in list.
   }
-  // Cursor's list is only shown once Cursor has answered.
+  // Cursor's and Codex's lists are only shown once they have answered.
   return agent === CLAUDE ? fallbackModels : [];
 }
 
 export function loadCachedModels(): AgentModels {
-  return { "claude-code": loadOne(CLAUDE), cursor: loadOne(CURSOR) };
+  return { "claude-code": loadOne(CLAUDE), cursor: loadOne(CURSOR), codex: loadOne(CODEX) };
 }
 
 /**
@@ -47,6 +52,8 @@ export function loadCachedModels(): AgentModels {
  */
 export function startingModel(saved: string, agent: AgentId, models: AgentModels): string {
   if (agent === CURSOR) return saved || "default";
+  // Codex lists its default first.
+  if (agent === CODEX) return saved && saved !== "default" ? saved : (models[CODEX][0]?.value ?? "default");
   return !saved || saved === "default" ? (models[CLAUDE][0]?.value ?? "default") : saved;
 }
 
@@ -71,13 +78,22 @@ export const agentModes: Record<AgentId, { id: string; label: string }[]> = {
     { id: "plan", label: "plan" },
     { id: "ask", label: "ask only" },
   ],
+  // Codex's own: its default asks before leaving the project.
+  codex: [
+    { id: "default", label: "default" },
+    { id: "plan", label: "plan" },
+    { id: "read-only", label: "read only" },
+    { id: "full-access", label: "full access" },
+  ],
 };
 
 /** The mode a chat moving to `agent` (before its first message) takes: plan stays plan. */
 export function modeFor(agent: AgentId, mode: string, saved: string): string {
   if (agentModes[agent].some((m) => m.id === mode)) return mode;
   if (mode === "plan") return "plan";
-  return agent === CURSOR ? "agent" : saved;
+  if (agent === CURSOR) return "agent";
+  if (agent === CODEX) return "default";
+  return saved;
 }
 
 /**
@@ -87,6 +103,7 @@ export function modeFor(agent: AgentId, mode: string, saved: string): string {
  */
 export function defaultMode(agent: AgentId, saved: string): string {
   if (agent === CURSOR) return "agent";
+  if (agent === CODEX) return "default";
   return saved && saved !== "plan" && agentModes[CLAUDE].some((m) => m.id === saved) ? saved : "default";
 }
 

@@ -657,7 +657,7 @@ const commands: Record<string, (args: Args) => unknown> = {
       emit("unseen", ended);
     }, 50);
   },
-  check_setup: () => ({ binary: "claude", cursor: "agent", agents: ["claude-code", "cursor"], problem: null }),
+  check_setup: () => ({ binary: "claude", cursor: "agent", codex: "codex", agents: ["claude-code", "cursor", "codex"], problem: null }),
   keep_awake_state: () => keepAwake,
   keep_awake_start: (args) => {
     const ends_at = args.mode === "overnight" ? args.endsAt : Date.now() + 2 * 60 * 60 * 1000;
@@ -778,7 +778,9 @@ const commands: Record<string, (args: Args) => unknown> = {
   list_commands: async (args) => {
     // Late, as from a real agent process, so the menu is seen filling in.
     await new Promise((r) => setTimeout(r, 2500));
-    // As the core sends them (trimmed): Claude Code's, then Cursor's.
+    // As the core sends them (trimmed): Claude Code's, then Cursor's and Codex's.
+    if (args.agent === "codex")
+      return [{ name: "compact", description: "Summarize the conversation to free up context", hint: null, aliases: [] }];
     if (args.agent === "cursor")
       return [
         {"name": "autopilot", "description": "Keep a PR merge-ready by triaging comments, resolving clear conflicts, and fixing CI in a loop. (builtin skill)", "hint": null, "aliases": []},
@@ -818,6 +820,12 @@ const commands: Record<string, (args: Args) => unknown> = {
   },
   list_models: (args) => {
     const all = ["low", "medium", "high", "xhigh", "max"];
+    // Codex's, as the core sends them: its default first.
+    if (args.agent === "codex")
+      return [
+        { value: "gpt-6-luna", name: "GPT-6-Luna", detail: "Fast and affordable model for easier tasks.", efforts: all, default_effort: "medium" },
+        { value: "gpt-5.6-terra", name: "GPT-5.6-Terra", detail: "Legacy balanced model for agentic coding.", efforts: all, default_effort: "medium" },
+      ];
     // Cursor's, as the core sends them: Auto first, newest of each family.
     if (args.agent === "cursor")
       return [

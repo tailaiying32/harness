@@ -74,7 +74,7 @@ fn tools() -> Value {
             },
             "agent": {
                 "type": "string",
-                "enum": [agent::CLAUDE, agent::CURSOR],
+                "enum": [agent::CLAUDE, agent::CURSOR, agent::CODEX],
                 "description": "The agent for this part. Only if the user named one; else this chat's.",
             },
         },

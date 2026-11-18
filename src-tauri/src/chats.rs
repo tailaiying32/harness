@@ -246,6 +246,7 @@ fn agent_name(agent: &str) -> &str {
     match agent {
         "claude-code" => "Claude Code",
         "cursor" => "Cursor",
+        "codex" => "Codex",
         other => other,
     }
 }

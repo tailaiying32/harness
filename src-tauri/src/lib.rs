@@ -26,6 +26,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Manager, RunEvent, State};
 
 use agent::claude_code::ClaudeCodeAdapter;
+use agent::codex::CodexAdapter;
 use agent::cursor::CursorAdapter;
 use agent::{Agents, AppTools};
 use browser::Browsers;
@@ -236,6 +237,7 @@ async fn check_setup(state: State<'_, AppState>) -> Result<SetupInfo, String> {
         .map_err(|e| e.to_string())?;
     state.agents.set_binary(agent::CLAUDE, info.binary.as_ref().map(PathBuf::from));
     state.agents.set_binary(agent::CURSOR, info.cursor.as_ref().map(PathBuf::from));
+    state.agents.set_binary(agent::CODEX, info.codex.as_ref().map(PathBuf::from));
     Ok(info)
 }
 
@@ -983,6 +985,7 @@ pub fn run() {
             let agents = Agents::default();
             agents.add(agent::CLAUDE, claude.clone(), None);
             agents.add(agent::CURSOR, Arc::new(CursorAdapter), None);
+            agents.add(agent::CODEX, Arc::new(CodexAdapter), None);
             let home = Home::resolve(&dir);
             // The command agents run to open a terminal tab; rewritten if changed.
             if let Err(e) = home.write_tab_command() {

@@ -22,11 +22,13 @@ export type Decision = "allow" | "always_allow" | "deny";
  */
 export type Mode = string;
 
-/** The agents a chat can run on. Mirrors `agent::CLAUDE` and `agent::CURSOR`. */
-export type AgentId = "claude-code" | "cursor";
+/** The agents a chat can run on. Mirrors `agent::CLAUDE`, `agent::CURSOR` and `agent::CODEX`. */
+export type AgentId = "claude-code" | "cursor" | "codex";
 export const CLAUDE: AgentId = "claude-code";
 export const CURSOR: AgentId = "cursor";
-export const agentLabel = (agent: string) => (agent === CURSOR ? "Cursor" : "Claude Code");
+export const CODEX: AgentId = "codex";
+export const AGENTS: AgentId[] = [CLAUDE, CURSOR, CODEX];
+export const agentLabel = (agent: string) => (agent === CURSOR ? "Cursor" : agent === CODEX ? "Codex" : "Claude Code");
 
 /** A tab key from the Mac menu (or the keyboard elsewhere): Cmd+T, Cmd+W, Cmd+Shift+[ and ]. */
 export type TabAction = "new" | "close" | "prev" | "next";
@@ -144,6 +146,8 @@ export type SetupInfo = {
   binary: string | null;
   /** Cursor's agent program. */
   cursor: string | null;
+  /** Codex's program. */
+  codex: string | null;
   /** The agents found, Claude Code first. */
   agents: AgentId[];
   problem: string | null;

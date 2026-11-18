@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
+use super::rpc::{Out, Rpc, RpcError};
 use super::{AppTools, EventSink, ImagePayload, RunningAgent, SpawnOptions, mcp_http};
 use crate::events::{AgentEvent, ApprovalKind, Block, Decision, SessionState};
 
@@ -38,87 +39,6 @@ pub struct AcpConfig {
     pub args: Vec<String>,
     /// `clientCapabilities._meta`: the agent's own extension switches.
     pub client_meta: Value,
-}
-
-/// A failed call: JSON-RPC's code and message, or the process ending.
-#[derive(Debug, Clone)]
-struct RpcError {
-    code: i64,
-    message: String,
-}
-
-impl RpcError {
-    fn gone() -> Self {
-        Self {
-            code: 0,
-            message: "the agent is no longer running".into(),
-        }
-    }
-
-    fn from(value: &Value) -> Self {
-        let detail = value["data"]["message"].as_str().or(value["message"].as_str());
-        Self {
-            code: value["code"].as_i64().unwrap_or(0),
-            message: detail.unwrap_or("unknown error").to_string(),
-        }
-    }
-}
-
-enum Out {
-    Line(String),
-    Close,
-}
-
-/// The JSON-RPC side: send calls and wait for their replies.
-struct Rpc {
-    tx: mpsc::UnboundedSender<Out>,
-    next: AtomicU64,
-    waiting: Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>,
-}
-
-impl Rpc {
-    fn send(&self, value: Value) -> Result<(), RpcError> {
-        self.tx.send(Out::Line(value.to_string())).map_err(|_| RpcError::gone())
-    }
-
-    async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = oneshot::channel();
-        self.waiting.lock().unwrap().insert(id, tx);
-        self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
-        rx.await.unwrap_or_else(|_| Err(RpcError::gone()))
-    }
-
-    fn notify(&self, method: &str, params: Value) {
-        let _ = self.send(json!({ "jsonrpc": "2.0", "method": method, "params": params }));
-    }
-
-    fn respond(&self, id: &Value, result: Value) {
-        let _ = self.send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
-    }
-
-    fn respond_error(&self, id: &Value, code: i64, message: &str) {
-        let _ = self.send(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }));
-    }
-
-    /// A reply arrived: hand it to its caller.
-    fn settle(&self, v: &Value) {
-        let Some(id) = v["id"].as_u64() else { return };
-        if let Some(tx) = self.waiting.lock().unwrap().remove(&id) {
-            let result = match v.get("error") {
-                Some(error) => Err(RpcError::from(error)),
-                None => Ok(v["result"].clone()),
-            };
-            let _ = tx.send(result);
-        }
-    }
-
-    /// The process is gone: every waiting call fails.
-    fn fail_all(&self) {
-        for (_, tx) in self.waiting.lock().unwrap().drain() {
-            let _ = tx.send(Err(RpcError::gone()));
-        }
-    }
 }
 
 /// What the chat's driver sends next.
@@ -352,7 +272,7 @@ struct AcpProcess {
     shared: Arc<Shared>,
 }
 
-fn terminate(child: &mut tokio::process::Child) {
+pub(crate) fn terminate(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
         // SAFETY: plain signal send to our own child's pid.
@@ -408,11 +328,7 @@ pub fn spawn(binary: PathBuf, cfg: AcpConfig, opts: SpawnOptions, sink: EventSin
     let (items_tx, items_rx) = mpsc::unbounded_channel::<Item>();
     let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
     let shared = Arc::new(Shared {
-        rpc: Rpc {
-            tx,
-            next: AtomicU64::new(1),
-            waiting: Mutex::default(),
-        },
+        rpc: Rpc::new(tx, true),
         state: Mutex::new(State {
             effort: opts.effort.clone().filter(|e| e != "default"),
             served,
@@ -1652,11 +1568,7 @@ mod tests {
             Arc::new(move |e| seen.lock().unwrap().push(e))
         };
         let shared = Arc::new(Shared {
-            rpc: Rpc {
-                tx,
-                next: AtomicU64::new(1),
-                waiting: Mutex::default(),
-            },
+            rpc: Rpc::new(tx, true),
             state: Mutex::default(),
             sink,
             items,
