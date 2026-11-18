@@ -605,7 +605,8 @@
   }
 </script>
 
-<div class="composer" bind:this={frame}>
+<!-- data-doc-drop: a doc dragged from the docs menu lands here like a dropped file. -->
+<div class="composer" data-doc-drop bind:this={frame}>
   <div class="inner">
     <!-- Comments on the latest answer, waiting to go with the next message. -->
     {#if !chat.owner && chat.chatComments.length}

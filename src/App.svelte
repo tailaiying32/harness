@@ -88,7 +88,7 @@
     void chat.projectPath;
     untrack(() => app.followProject(chat));
   });
-  const panelOpen = $derived(chat.panelOpen && chat.panelHasContent);
+  const panelOpen = $derived(chat.panelOpen);
 
   // The project's other chats, newest first, for the message box's @ pick.
   const otherChats = $derived(

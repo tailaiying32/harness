@@ -19,7 +19,7 @@
   const title = $derived(
     app.projects.flatMap((p) => p.sessions).find((s) => s.id === chat.sessionId)?.title ?? "",
   );
-  const open = $derived(chat.panelOpen && chat.panelHasContent);
+  const open = $derived(chat.panelOpen);
 
   /** The chat whose name is being edited here; switching chats ends it. */
   let renaming = $state<string | null>(null);

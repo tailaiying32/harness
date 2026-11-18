@@ -609,6 +609,78 @@ async fn save_notes_to_project(state: State<'_, AppState>, chat_id: String, proj
     .map_err(|e| e.to_string())?
 }
 
+/// The chat's folder, its notes, and the project's docs folder: the places
+/// the docs menu shows. `project` is the project's main folder, as for
+/// `save_doc_to_project`, so a chat not sent yet still sees the project's docs.
+fn doc_places(sessions: &SessionManager, chat_id: &str, project: &str) -> Result<docs::Places, String> {
+    let notes = sessions.notes();
+    Ok(docs::Places { chat: notes.folder(chat_id)?, notes: notes.path(chat_id)?, project: sessions.home().project_docs(project) })
+}
+
+/// The docs menu's lists: the chat's docs and the project's, newest first.
+#[tauri::command]
+async fn list_docs(state: State<'_, AppState>, chat_id: String, project: String) -> Result<docs::DocLists, String> {
+    let sessions = state.sessions.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(docs::lists(&doc_places(&sessions, &chat_id, &project)?)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Renames a doc in the chat's folder or the project's docs folder. Noted in
+/// the chat's history as a move, like a save to the project, so its tab and
+/// old tool calls follow. Returns the new path (the same one if unchanged).
+#[tauri::command]
+async fn rename_doc(state: State<'_, AppState>, chat_id: String, project: String, path: String, name: String) -> Result<String, String> {
+    let sessions = state.sessions.clone();
+    let docs = state.docs.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let places = doc_places(&sessions, &chat_id, &project)?;
+        let Some(renamed) = docs::rename(Path::new(&path), &name, &places)? else {
+            return Ok(path);
+        };
+        let renamed = renamed.display().to_string();
+        sessions.doc_saved(&chat_id, &path, &renamed);
+        docs.forget(Path::new(&path));
+        docs.read(Path::new(&renamed))?;
+        Ok(renamed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Moves a project doc into the chat's folder: the way back from
+/// `save_doc_to_project`, noted in the chat's history the same way. Returns
+/// the new path.
+#[tauri::command]
+async fn move_doc_to_chat(state: State<'_, AppState>, chat_id: String, project: String, path: String) -> Result<String, String> {
+    let sessions = state.sessions.clone();
+    let docs = state.docs.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let moved = docs::move_to_chat(Path::new(&path), &doc_places(&sessions, &chat_id, &project)?)?;
+        let moved = moved.display().to_string();
+        sessions.doc_saved(&chat_id, &path, &moved);
+        docs.forget(Path::new(&path));
+        docs.read(Path::new(&moved))?;
+        Ok(moved)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Moves a doc in the chat's folder or the project's docs folder to the Trash.
+#[tauri::command]
+async fn delete_doc(state: State<'_, AppState>, chat_id: String, project: String, path: String) -> Result<(), String> {
+    let sessions = state.sessions.clone();
+    let docs = state.docs.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        docs::delete(Path::new(&path), &doc_places(&sessions, &chat_id, &project)?)?;
+        docs.forget(Path::new(&path));
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The user typed an address in a chat's browser: into `tab`, else the tab
 /// on show, else a new tab.
 #[tauri::command]
@@ -1203,6 +1275,10 @@ pub fn run() {
             read_preferences,
             write_preferences,
             save_doc_to_project,
+            list_docs,
+            rename_doc,
+            move_doc_to_chat,
+            delete_doc,
             save_notes_to_project,
             read_notes,
             write_notes,

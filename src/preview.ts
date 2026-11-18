@@ -936,7 +936,7 @@ const commands: Record<string, (args: Args) => unknown> = {
   },
   read_doc: (args: Args) => {
     const path = String(args.path);
-    if (path.endsWith("gone.md")) throw "That file doesn't exist.";
+    if (path.endsWith("gone.md") || goneDocs.has(path)) throw "That file doesn't exist.";
     return (
       docsByPath.get(path) ??
       `# ${path.split("/").pop()}\n\nRead from \`${path}\` on disk.\n\nA [link back](../PLAN.md) opens the plan file.`
@@ -974,7 +974,71 @@ const commands: Record<string, (args: Args) => unknown> = {
     emit(chatId, { kind: "doc_saved", from, to });
     return to;
   },
+  // The docs menu: docs in `docsByPath` under the chat's folder or the project's docs folder.
+  list_docs: (args: Args) => {
+    const project = String(args.project) || projectOf(String(args.chatId));
+    seedDocs(project, String(args.chatId));
+    const inside = (folder: string) =>
+      [...docsByPath.keys()]
+        .filter((path) => path.startsWith(`${folder}/`) && !path.slice(folder.length + 1).includes("/") && !path.endsWith("/notes.md"))
+        .map((path) => ({ path, name: path.split("/").pop()!, modified: docTimes.get(path) ?? 0 }))
+        .sort((a, b) => b.modified - a.modified);
+    return { chat: inside(chatFolder(project, String(args.chatId))), project: inside(`${projectHome(project)}/docs`) };
+  },
+  rename_doc: (args: Args) => {
+    const from = String(args.path);
+    let name = String(args.name).trim();
+    if (!name) throw "Give it a name.";
+    if (!/\.(md|markdown)$/i.test(name)) name += ".md";
+    const to = `${from.slice(0, from.lastIndexOf("/"))}/${name}`;
+    if (to === from) return from;
+    if ([...docsByPath.keys()].some((p) => p.toLowerCase() === to.toLowerCase() && p !== from)) throw `There's already a doc named ${name}.`;
+    moveDoc(from, to);
+    emit(String(args.chatId), { kind: "doc_saved", from, to });
+    return to;
+  },
+  move_doc_to_chat: (args: Args) => {
+    const from = String(args.path);
+    const to = `${chatFolder(String(args.project), String(args.chatId))}/${from.split("/").pop()}`;
+    moveDoc(from, to);
+    emit(String(args.chatId), { kind: "doc_saved", from, to });
+    return to;
+  },
+  delete_doc: (args: Args) => {
+    const path = String(args.path);
+    docsByPath.delete(path);
+    goneDocs.add(path);
+  },
 };
+
+/** When each doc last changed, for the docs menu's order. */
+const docTimes = new Map<string, number>();
+/** Docs deleted in the docs menu: reading one fails as it would on disk. */
+const goneDocs = new Set<string>();
+const seeded = new Set<string>();
+
+/** A few docs per chat and project, so the docs menu has something to show. */
+function seedDocs(project: string, chatId: string) {
+  if (seeded.has(chatId)) return;
+  seeded.add(chatId);
+  const put = (path: string, text: string, ago: number) => {
+    if (docsByPath.has(path) || goneDocs.has(path)) return;
+    docsByPath.set(path, text);
+    docTimes.set(path, Date.now() - ago * 60_000);
+  };
+  put(`${chatFolder(project, chatId)}/memory-notes.md`, "# Memory notes\n\nWhat each part holds.", 5);
+  put(`${chatFolder(project, chatId)}/pr-badge-timing.md`, "# PR badge timing\n\nWhen the badge checks.", 50);
+  put(`${projectHome(project)}/docs/TODO.md`, "# To-do\n\n- [ ] Docs menu", 20);
+  put(`${projectHome(project)}/docs/ADE chat search and memory.md`, "# ADE chat search and memory", 2000);
+}
+
+function moveDoc(from: string, to: string) {
+  docsByPath.set(to, docsByPath.get(from) ?? "");
+  docsByPath.delete(from);
+  goneDocs.add(from);
+  goneDocs.delete(to);
+  docTimes.set(to, docTimes.get(from) ?? Date.now());
+}
 
 // ---- The terminal: a pretend shell that echoes and answers a few commands ----
 

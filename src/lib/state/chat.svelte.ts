@@ -15,6 +15,11 @@ import {
   interrupt,
   readDoc,
   saveDocToProject,
+  listDocs,
+  renameDoc,
+  moveDocToChat,
+  deleteDoc,
+  type DocEntry,
   saveNotesToProject,
   readNotes,
   sendMessage,
@@ -419,11 +424,6 @@ export class Chat {
     return this.planTab || this.openDocs.length > 0 || this.side !== null || this.browserOn || this.terminalOn;
   }
 
-  /** The panel has something to show. */
-  get panelHasContent(): boolean {
-    return this.tabCount > 0 || this.side !== null || this.browserOn || this.terminalOn;
-  }
-
   // ---- Chat info: context, tasks, subagents, background work ----
   /** What the chat knows about itself; its subagents' steps live here, not in `items`. */
   readonly info = new ChatInfo();
@@ -627,20 +627,33 @@ export class Chat {
     this.docs = rest;
   }
 
-  /** The notes tab is always there, so docs is never empty. */
+  /**
+   * The notes tab was closed. The docs menu, or the agent writing the notes,
+   * brings it back.
+   */
+  notesClosed = $state(false);
+
+  get notesTab(): boolean {
+    return !this.notesClosed;
+  }
+
   get tabCount(): number {
-    return 1 + (this.planTab ? 1 : 0) + this.openDocs.length;
+    return (this.notesTab ? 1 : 0) + (this.planTab ? 1 : 0) + this.openDocs.length;
   }
 
   /**
    * The tab on show: the chosen one if it still exists, else the plan, else the
-   * notes. The notes tab sits first in the row, but a waiting plan comes first.
+   * notes, else the first doc. The notes tab sits first in the row, but a
+   * waiting plan comes first. With every tab closed, "": the docs view is
+   * empty but for its menu.
    */
   get activeTab(): string {
-    if (this.panelTab === NOTES_TAB) return NOTES_TAB;
+    if (this.panelTab === NOTES_TAB && this.notesTab) return NOTES_TAB;
     if (this.panelTab === PLAN_TAB && this.planTab) return PLAN_TAB;
     if (this.openDocs.some((doc) => doc.path === this.panelTab)) return this.panelTab;
-    return this.planTab ? PLAN_TAB : NOTES_TAB;
+    if (this.planTab) return PLAN_TAB;
+    if (this.notesTab) return NOTES_TAB;
+    return this.openDocs[0]?.path ?? "";
   }
 
   // ---- Notes ----
@@ -673,7 +686,11 @@ export class Chat {
     try {
       const text = await readNotes(this.sessionId);
       // Typed into while reading: the typing is newer than what was read.
-      if (this.notes === before && text !== before) this.notes = text;
+      if (this.notes === before && text !== before) {
+        this.notes = text;
+        // Written some other way (a shell command): a closed tab comes back too.
+        this.notesClosed = false;
+      }
     } catch {
       // Left as shown; the next write or turn end tries again.
     }
@@ -755,6 +772,72 @@ export class Chat {
     await this.openFile(saved);
   }
 
+  /** Saves the panel's unsaved typing; set by the side panel while it is shown. */
+  flushTyping: (() => Promise<void> | undefined) | null = null;
+
+  /** The docs menu's lists, read fresh: none if they can't be read. */
+  async listDocs(): Promise<{ chat: DocEntry[]; project: DocEntry[] }> {
+    if (this.owner) return this.owner.listDocs();
+    try {
+      return await listDocs(this.sessionId, this.projectPath.trim());
+    } catch (e) {
+      this.showError(`Couldn't list the docs: ${e}`);
+      return { chat: [], project: [] };
+    }
+  }
+
+  /** Renames a chat or project doc; its tab follows and the agent is told. Whether it worked. */
+  async renameDoc(path: string, name: string): Promise<boolean> {
+    if (this.owner) return this.owner.renameDoc(path, name);
+    await this.flushTyping?.();
+    let renamed: string;
+    try {
+      renamed = await renameDoc(this.sessionId, this.projectPath.trim(), path, name);
+    } catch (e) {
+      this.showError(`Couldn't rename it: ${e}`);
+      return false;
+    }
+    if (renamed === path) return true;
+    this.docSaved(path, renamed);
+    this.appNotes.push(`The user renamed the doc ${path}; it is now ${renamed}, so edit it there.`);
+    return true;
+  }
+
+  /** Moves a project doc into this chat's folder: the way back from saving it to the project. */
+  async moveToChat(path: string): Promise<void> {
+    if (this.owner) return this.owner.moveToChat(path);
+    await this.flushTyping?.();
+    let moved: string;
+    try {
+      moved = await moveDocToChat(this.sessionId, this.projectPath.trim(), path);
+    } catch (e) {
+      this.showError(`Couldn't move it into the chat: ${e}`);
+      return;
+    }
+    this.docSaved(path, moved);
+    this.appNotes.push(`The user moved the project doc ${path} into this chat's folder; it is now ${moved}, so edit it there.`);
+    void this.refreshDoc(moved);
+  }
+
+  /** Moves a chat or project doc to the Trash; its tab closes and the agent is told. */
+  async deleteDoc(path: string): Promise<void> {
+    if (this.owner) return this.owner.deleteDoc(path);
+    try {
+      await deleteDoc(this.sessionId, this.projectPath.trim(), path);
+    } catch (e) {
+      this.showError(`Couldn't delete it: ${e}`);
+      return;
+    }
+    this.dropDoc(path);
+    this.appNotes.push(`The user deleted the doc ${path} (moved to the Trash).`);
+  }
+
+  /** A doc that is gone: its tab and comments go. */
+  private dropDoc(path: string): void {
+    this.docs = this.docs.filter((d) => d.path !== path);
+    delete this.comments[path];
+  }
+
   /** Docs saved to the project: where each went, by its old path. Rebuilt on reopen from the history. */
   private savedTo = new Map<string, string>();
 
@@ -784,8 +867,8 @@ export class Chat {
   }
 
   /**
-   * A doc (or the notes) moved from the chat's folder to the project: its
-   * tab and links to it follow. Done when saving and again by the saved event (live, or
+   * A doc (or the notes) moved: saved to the project, moved back, or renamed.
+   * Its tab and links to it follow. Done when moving and again by the saved event (live, or
    * replayed on reopen); the second time changes nothing.
    */
   private docSaved(from: string, to: string): void {
@@ -793,6 +876,8 @@ export class Chat {
     from = this.currentPath(from);
     if (from === to) return;
     this.savedTo.set(from, to);
+    // A doc is at `to` now, so an older move away from there no longer applies.
+    this.savedTo.delete(to);
     const comments = this.comments[from];
     if (comments) {
       delete this.comments[from];
@@ -803,7 +888,7 @@ export class Chat {
       // A tab at the new path already (opened by a link) wins; the old one goes.
       if (this.docs.some((d) => d.path === to)) this.docs = this.docs.filter((d) => d !== doc);
       else doc.path = to;
-    } else if (!this.docs.some((d) => d.path === to)) {
+    } else if (this.isNotes(from) && !this.docs.some((d) => d.path === to)) {
       // Saved notes had no doc tab: they get one, read from disk.
       this.docs.push({ path: to, text: "" });
     }
@@ -1005,24 +1090,26 @@ export class Chat {
     // A link or "open plan" in a side chat opens it in the chat's own panel.
     if (this.owner) return this.owner.openPanel(tab);
     this.panelView = "docs";
+    if (tab === NOTES_TAB) this.notesClosed = false;
     if (tab === PLAN_TAB) this.planClosed = false;
     else if (tab) {
       const doc = this.docs.find((d) => d.path === tab);
       if (doc) doc.closed = false;
     }
     if (tab) this.panelTab = tab;
-    this.panelOpen = this.tabCount > 0;
+    // With every tab closed it opens empty, the docs menu still in reach.
+    this.panelOpen = true;
   }
 
-  /** Closes one tab. A plan still waiting for an answer can't be closed, nor can the notes. */
+  /** Closes one tab (a plan still waiting for an answer can't be). The last one leaves the docs view empty. */
   closeTab(tab: string): void {
-    if (tab === NOTES_TAB) return;
-    if (tab === PLAN_TAB) {
+    if (tab === NOTES_TAB) this.notesClosed = true;
+    else if (tab === PLAN_TAB) {
       if (!this.planPending) this.planClosed = true;
-      return;
+    } else {
+      const doc = this.docs.find((d) => d.path === tab);
+      if (doc) doc.closed = true;
     }
-    const doc = this.docs.find((d) => d.path === tab);
-    if (doc) doc.closed = true;
   }
 
   /** Shows a problem in the chat, e.g. an image that couldn't be attached. */
@@ -1097,8 +1184,9 @@ export class Chat {
     if (!written || written === this.planPath) return;
     // A doc written before the chat's folder moved has its tab at the new place.
     const path = this.isNotes(written) ? written : this.currentPath(written);
-    // The notes have their own tab, read back from disk.
+    // The notes have their own tab, read back from disk; a closed one comes back.
     if (this.isNotes(path)) {
+      if (!this.replaying) this.notesClosed = false;
       void this.refreshNotes();
       return;
     }
@@ -1137,11 +1225,8 @@ export class Chat {
     try {
       text = await readDoc(path);
     } catch (e) {
-      // A doc in the chat's folder that is gone was moved or deleted: its tab goes.
-      if (this.isChatDoc(path) && String(e).includes("doesn't exist")) {
-        this.docs = this.docs.filter((d) => d.path !== path);
-        delete this.comments[path];
-      }
+      // A doc that is gone was moved, renamed or deleted (maybe from another chat): its tab goes.
+      if (String(e).includes("doesn't exist")) this.dropDoc(path);
       return;
     }
     const doc = this.docs.find((d) => d.path === path);
