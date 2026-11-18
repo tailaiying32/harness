@@ -111,6 +111,12 @@ export class ChatComments {
   private marked = "";
   private buttonWidth = 0;
   private frame = 0;
+  /**
+   * A press in the chat is held: the button waits for its letting go. Shown
+   * mid-drag, it sat under the pointer; crossing it took the selection out of
+   * the text, which hid it, which put the selection back, and so on.
+   */
+  private pressing = false;
 
   constructor(
     private chat: Chat,
@@ -128,6 +134,9 @@ export class ChatComments {
     );
     document.addEventListener("selectionchange", this.onSelection);
     window.addEventListener("keydown", this.onKey, true);
+    scroller.addEventListener("pointerdown", this.onPress);
+    window.addEventListener("pointerup", this.onRelease, true);
+    window.addEventListener("pointercancel", this.onRelease, true);
     scroller.addEventListener("mouseover", this.onOver);
     scroller.addEventListener("mouseout", this.onOut);
     scroller.addEventListener("click", this.onClick);
@@ -138,6 +147,9 @@ export class ChatComments {
   destroy(): void {
     document.removeEventListener("selectionchange", this.onSelection);
     window.removeEventListener("keydown", this.onKey, true);
+    this.scroller.removeEventListener("pointerdown", this.onPress);
+    window.removeEventListener("pointerup", this.onRelease, true);
+    window.removeEventListener("pointercancel", this.onRelease, true);
     this.scroller.removeEventListener("mouseover", this.onOver);
     this.scroller.removeEventListener("mouseout", this.onOut);
     this.scroller.removeEventListener("click", this.onClick);
@@ -236,11 +248,23 @@ export class ChatComments {
 
   private onSelection = () => {
     if (this.input || this.held) return;
-    const spot = this.selected();
+    const spot = this.pressing ? null : this.selected();
     const same = spot && this.plus && spot.itemId === this.plus.itemId && spot.from === this.plus.from && spot.to === this.plus.to;
     if (same) return;
     this.plus = spot;
     this.render();
+  };
+
+  private onPress = (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    this.pressing = true;
+    this.onSelection();
+  };
+
+  private onRelease = () => {
+    if (!this.pressing) return;
+    this.pressing = false;
+    this.onSelection();
   };
 
   /** Cmd+Enter on selected text opens a comment, as the button does (the button can be hidden in Settings). */
