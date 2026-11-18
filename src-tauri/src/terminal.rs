@@ -53,6 +53,9 @@ tab for its output. You can't type into tabs the user opened.",
 /// How long an agent's tab waits for its shell's first output before the
 /// command is typed in anyway.
 const PROMPT_WAIT: Duration = Duration::from_secs(3);
+/// How long a tab the agent opens waits for the panel to give its size
+/// before its shell starts anyway (the panel may be hidden or covered).
+const SIZE_WAIT: Duration = Duration::from_secs(1);
 
 /// Raw output kept per tab, for the agent and for saving.
 const TAIL_MAX: usize = 512 * 1024;
@@ -127,6 +130,8 @@ struct Tab {
     /// The window's sink for its output.
     channel: Option<Channel<InvokeResponseBody>>,
     size: PtySize,
+    /// The window has given this tab its size.
+    sized: bool,
     /// Output came since the last save.
     dirty: bool,
     /// Counts tabs as they open, so two with one name keep their " 2" when
@@ -150,6 +155,7 @@ impl Tab {
             run: 0,
             channel: None,
             size: DEFAULT_SIZE,
+            sized: false,
             dirty: false,
             born: 0,
         }
@@ -292,6 +298,12 @@ impl Terminals {
         cols: u16,
         rows: u16,
     ) -> Result<TabInfo, String> {
+        let id = self.add_tab(project, worktree, label, size(cols, rows))?;
+        self.start_or_drop(project, &id)
+    }
+
+    /// A new tab with no shell yet. Returns its ID.
+    fn add_tab(&self, project: &str, worktree: Option<String>, label: Option<String>, size: PtySize) -> Result<String, String> {
         let worktree = worktree.map(PathBuf::from).filter(|w| w.is_dir());
         let folder = worktree.clone().unwrap_or_else(|| PathBuf::from(project));
         if !folder.is_dir() {
@@ -300,14 +312,19 @@ impl Terminals {
         let label = label.filter(|l| !l.trim().is_empty()).unwrap_or_else(|| folder_name(Path::new(project)));
         let id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let mut tab = Tab::new(project, folder, worktree, label);
-        tab.size = size(cols, rows);
-        {
-            lock(&self.0.state).add(id.clone(), tab);
-        }
-        if let Err(e) = self.start(&id) {
+        tab.size = size;
+        lock(&self.0.state).add(id.clone(), tab);
+        Ok(id)
+    }
+
+    /// Starts a new tab's shell; if it can't start, the tab goes.
+    fn start_or_drop(&self, project: &str, id: &str) -> Result<TabInfo, String> {
+        if let Err(e) = self.start(id) {
             let mut state = lock(&self.0.state);
-            state.tabs.remove(&id);
-            state.order.retain(|t| t != &id);
+            state.tabs.remove(id);
+            state.order.retain(|t| t != id);
+            drop(state);
+            self.emit(project);
             return Err(e);
         }
         self.emit(project);
@@ -323,7 +340,18 @@ impl Terminals {
     /// sooner, the line still runs but shows twice: echoed before the prompt,
     /// then again at it. One line only, so nothing rides along unseen after it.
     /// Blocks while it waits.
-    pub fn run_for_agent(&self, project: &str, worktree: Option<String>, command: &str) -> Result<TabInfo, String> {
+    ///
+    /// The tab is made first and handed to `show` (which puts it on screen),
+    /// and its shell starts once the panel has given the tab its size, up to
+    /// `SIZE_WAIT`. A shell started wider than the panel draws its prompt
+    /// wrong (zsh's "%" mark shows), and that can't be fixed after.
+    pub fn run_for_agent(
+        &self,
+        project: &str,
+        worktree: Option<String>,
+        command: &str,
+        show: &dyn Fn(&TabInfo),
+    ) -> Result<TabInfo, String> {
         let command = command.trim();
         if command.is_empty() {
             return Err("Give a command to run.".into());
@@ -331,8 +359,17 @@ impl Terminals {
         if command.contains(['\n', '\r']) {
             return Err("Give one command line; join steps with && or ;.".into());
         }
-        let size = lock(&self.0.state).panel_size.unwrap_or(DEFAULT_SIZE);
-        let tab = self.open(project, worktree, None, size.cols, size.rows)?;
+        let guess = lock(&self.0.state).panel_size.unwrap_or(DEFAULT_SIZE);
+        let id = self.add_tab(project, worktree, None, guess)?;
+        self.emit(project);
+        if let Some(info) = self.tabs(project).into_iter().find(|t| t.id == id) {
+            show(&info);
+        }
+        let deadline = Instant::now() + SIZE_WAIT;
+        while Instant::now() < deadline && lock(&self.0.state).tabs.get(&id).is_some_and(|t| !t.sized && t.live.is_none()) {
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        let tab = self.start_or_drop(project, &id)?;
         let deadline = Instant::now() + PROMPT_WAIT;
         while Instant::now() < deadline && lock(&self.0.state).tabs.get(&tab.id).is_some_and(|t| t.tail.is_empty()) {
             std::thread::sleep(Duration::from_millis(30));
@@ -415,6 +452,7 @@ impl Terminals {
         let mut state = lock(&self.0.state);
         let tab = state.tabs.get_mut(id).ok_or("That terminal tab is gone")?;
         tab.size = size(cols, rows);
+        tab.sized = true;
         let new = tab.size;
         if let Some(live) = &tab.live {
             live.master.resize(new).map_err(|e| e.to_string())?;
@@ -1242,17 +1280,28 @@ mod tests {
     fn an_agent_opens_a_tab_with_one_command_typed_in() {
         let (t, _) = rig(IDLE);
         // Typed before the shell's first prompt; the shell still runs it.
-        let tab = t.run_for_agent(&folder(), None, "echo from-the-ag''ent").unwrap();
+        let tab = t.run_for_agent(&folder(), None, "echo from-the-ag''ent", &|_| {}).unwrap();
         assert!(wait_for(&t, &tab.id, "from-the-agent"));
-        assert!(t.run_for_agent(&folder(), None, "echo a\nrm -rf x").is_err());
-        assert!(t.run_for_agent(&folder(), None, "  ").is_err());
+        assert!(t.run_for_agent(&folder(), None, "echo a\nrm -rf x", &|_| {}).is_err());
+        assert!(t.run_for_agent(&folder(), None, "  ", &|_| {}).is_err());
         assert_eq!(t.tabs(&folder()).len(), 1);
         // Once the window has given a size, the agent's next tab starts at it.
         t.resize(&tab.id, 52, 30).unwrap();
-        let next = t.run_for_agent(&folder(), None, "stty size").unwrap();
+        let next = t.run_for_agent(&folder(), None, "stty size", &|_| {}).unwrap();
         assert!(wait_for(&t, &next.id, "30 52"));
+        // Shown first, the tab's shell waits for the size the panel gives it.
+        let shown = |info: &TabInfo| {
+            let (t, id) = (t.clone(), info.id.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                t.resize(&id, 47, 19).unwrap();
+            });
+        };
+        let third = t.run_for_agent(&folder(), None, "stty size", &shown).unwrap();
+        assert!(wait_for(&t, &third.id, "19 47"));
         t.close(&tab.id);
         t.close(&next.id);
+        t.close(&third.id);
     }
 
     #[test]
@@ -1345,7 +1394,7 @@ mod tests {
         assert!(text.contains("kept"));
         assert!(text.contains("restored"));
         // The panel's size comes back too: the agent's first tab starts at it.
-        let tab = again.run_for_agent(&project, None, "stty size").unwrap();
+        let tab = again.run_for_agent(&project, None, "stty size", &|_| {}).unwrap();
         assert!(wait_for(&again, &tab.id, "30 52"));
         again.close(&tab.id);
     }
