@@ -1782,7 +1782,11 @@ windows pinned to the edge, which covered the text in a narrow panel).
   `width: max-content` (capped at 40ch): shrink-to-fit made it narrow
   whenever it opened near the panel's right edge, which is the window's
   edge; the editor moves it left to fit instead. After each change to the
-  text the windows are placed again (`repositionTooltips`).
+  text the windows are placed again (`repositionTooltips`). Text that wraps
+  leaves a box at its full width, with a ragged gap at the right that one
+  line never has, so a box of several lines is cut to its widest line
+  (`fit`: laid out at its natural width, then measured word by word, on
+  every change, so it can't flicker between two widths).
 - **Where they live** (`comments.ts`, `DocComment`): on the chat
   (`Chat.comments`, by tab: a doc's path or the plan tab), never in the file,
   in memory only (lost on quit, like the plan's "what should change?" text).

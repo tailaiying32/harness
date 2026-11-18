@@ -193,10 +193,40 @@ function commentBox(
   box.dataset.placeholder = "comment";
   box.textContent = text;
   const value = () => box.innerText.replace(/\n$/, "");
+  /**
+   * Text that wraps leaves its box at full width, with a ragged gap at the
+   * right that one line never has. So a box of several lines is cut to its
+   * widest line: laid out at its natural width first, then measured word by
+   * word (spaces at a line's end hang past it and don't count).
+   */
+  const fit = () => {
+    box.style.width = "";
+    const left = box.getBoundingClientRect().left;
+    const range = document.createRange();
+    const lines = new Set<number>();
+    let right = 0;
+    const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      for (const word of (node.textContent ?? "").matchAll(/\S+/g)) {
+        range.setStart(node, word.index);
+        range.setEnd(node, word.index + word[0].length);
+        for (const rect of range.getClientRects()) {
+          lines.add(Math.round(rect.top));
+          right = Math.max(right, rect.right);
+        }
+      }
+    }
+    // One line is as wide as its text already.
+    if (lines.size > 1) box.style.width = `${Math.ceil(right - left) + 1}px`;
+  };
+  const changed = () => {
+    fit();
+    resized();
+  };
   box.addEventListener("input", () => {
     // Emptied, a stray line break can stay behind and hide the placeholder.
     if (!box.textContent) box.replaceChildren();
-    resized();
+    changed();
   });
   box.addEventListener("keydown", (e) => {
     // The box's own keys: the editor's (and the app's) never see them.
@@ -244,11 +274,12 @@ function commentBox(
     box,
     set: (next) => {
       box.textContent = next;
-      resized();
+      changed();
     },
     focus,
     mount() {
       window.addEventListener("pointerdown", onPress, true);
+      changed();
     },
     destroy() {
       window.removeEventListener("pointerdown", onPress, true);
@@ -428,6 +459,11 @@ const look = EditorView.theme({
     overflowX: "hidden",
     overflowY: "auto",
     cursor: "text",
+    // Its width is its text's; a character of room past that, taken back by
+    // the margin, lets the cursor show after a space at a line's end.
+    boxSizing: "content-box",
+    paddingRight: "1ch",
+    marginRight: "-1ch",
   },
   ".cm-comment-box:empty::before": { content: "attr(data-placeholder)", color: "var(--faint)", pointerEvents: "none" },
   ".cm-comment-action": {
