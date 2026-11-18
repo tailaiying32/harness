@@ -3,7 +3,9 @@
   // needs no row of its own: docs' tabs, the side chat's name, the browser's
   // address, the terminal's tabs, or chat info's tabs. What it doesn't fill stays empty for
   // dragging the window.
+  import { tick } from "svelte";
   import BarIcon from "../BarIcon.svelte";
+  import DocsMenu from "./DocsMenu.svelte";
   import { MARKS } from "./agentMarks";
   import { batchLabel } from "../state/chatInfo.svelte";
   import { shortBranch } from "../paths";
@@ -125,6 +127,13 @@
 
   // ---- Docs ----
   const active = $derived(chat.activeTab);
+
+  // A tab opened or picked while the row overflows is scrolled into sight,
+  // in every view. "nearest" leaves a tab that is already in sight alone.
+  $effect(() => {
+    void [chat.panelView, chat.panelOpen, active, chat.side?.sessionId, page?.id, termShown?.id];
+    void tick().then(() => row?.querySelector(".tabs .tab.on")?.scrollIntoView({ block: "nearest", inline: "nearest" }));
+  });
 
   /** A file's name; with its folder when two tabs share a name. */
   function label(path: string): string {
@@ -313,12 +322,15 @@
     <span class="spacer" data-tauri-drag-region></span>
     {@render corner()}
   {:else}
-    <!-- Many tabs scroll sideways. -->
-    <div class="tabs">
-      <!-- The chat's notes: always there, always first, never closed. -->
-      <span class="tab" class:on={active === NOTES_TAB}>
-        <button onclick={() => chat.openPanel(NOTES_TAB)}>notes</button>
-      </span>
+    <!-- Many tabs scroll sideways. A doc dragged from the docs menu onto them opens. -->
+    <div class="tabs" data-doc-tabs>
+      <!-- The chat's notes: always first. Closed, the docs menu brings it back. -->
+      {#if chat.notesTab}
+        <span class="tab" class:on={active === NOTES_TAB}>
+          <button onclick={() => chat.openPanel(NOTES_TAB)}>notes</button>
+          <button class="shut" title="Close this tab" onclick={() => chat.closeTab(NOTES_TAB)}>×</button>
+        </span>
+      {/if}
       {#if chat.planTab}
         <span class="tab" class:on={active === PLAN_TAB}>
           <button onclick={() => chat.openPanel(PLAN_TAB)}>plan</button>
@@ -352,6 +364,7 @@
       {/each}
     </div>
     <span class="spacer" data-tauri-drag-region></span>
+    <DocsMenu {chat} />
     {@render corner()}
   {/if}
 </div>

@@ -37,7 +37,7 @@
   // A relative link in a document starts from that document's folder, as in
   // any markdown viewer; in the plan, from the folder Claude works in.
   const onClick = contentClick({
-    base: () => (chat.activeTab === PLAN_TAB || chat.activeTab === NOTES_TAB ? chat.root : folderOf(chat.activeTab)),
+    base: () => (!chat.activeTab || chat.activeTab === PLAN_TAB || chat.activeTab === NOTES_TAB ? chat.root : folderOf(chat.activeTab)),
     openDoc: (path) => void chat.openFile(path),
   });
 
@@ -55,7 +55,7 @@
     const tab = active;
     untrack(() => {
       if (tab === NOTES_TAB) void chat.loadNotes();
-      else if (tab !== PLAN_TAB) void chat.refreshDoc(tab);
+      else if (tab && tab !== PLAN_TAB) void chat.refreshDoc(tab);
     });
   });
 
@@ -87,6 +87,15 @@
   }
 
   onDestroy(() => void flush());
+
+  // The docs menu saves typing first, so a doc is renamed or moved as it stands.
+  $effect(() => {
+    const owner = chat;
+    owner.flushTyping = flush;
+    return () => {
+      if (owner.flushTyping === flush) owner.flushTyping = null;
+    };
+  });
 
   /** Typing is saved first, so the doc (or the notes) moves as it stands. */
   async function saveToProject() {
@@ -317,7 +326,9 @@
     <FindBar root={panel} searcher={() => (editor ? editor.searcher() : docBody ? domSearcher(docBody) : null)} />
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="body" bind:this={docBody} onclick={onClick}>
-      {#if active === NOTES_TAB}
+      {#if !active}
+        <!-- Every tab closed: nothing here; the docs menu opens one. -->
+      {:else if active === NOTES_TAB}
         {#if chat.notes !== null}
           <LiveMarkdown bind:this={editor} text={chat.notes} onchange={(t) => typeIn(NOTES_TAB, t)} ondone={flush} placeholder="notes" autofocus={chat.notes === ""} />
         {/if}

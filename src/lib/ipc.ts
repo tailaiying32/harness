@@ -444,6 +444,21 @@ export const saveDocToProject = (chatId: string, path: string, project: string) 
 export const saveNotesToProject = (chatId: string, project: string) =>
   invoke<string>("save_notes_to_project", { chatId, project });
 
+/** A doc in the docs menu; `modified` is milliseconds since 1970. */
+export type DocEntry = { path: string; name: string; modified: number };
+/** The docs menu's two groups: the chat's docs (not its notes) and the project's, newest first. */
+export const listDocs = (chatId: string, project: string) =>
+  invoke<{ chat: DocEntry[]; project: DocEntry[] }>("list_docs", { chatId, project });
+/** Renames a chat or project doc in its folder; the new path (the same if unchanged). */
+export const renameDoc = (chatId: string, project: string, path: string, name: string) =>
+  invoke<string>("rename_doc", { chatId, project, path, name });
+/** Moves a project doc into the chat's folder; the new path. */
+export const moveDocToChat = (chatId: string, project: string, path: string) =>
+  invoke<string>("move_doc_to_chat", { chatId, project, path });
+/** Moves a chat or project doc to the Trash. */
+export const deleteDoc = (chatId: string, project: string, path: string) =>
+  invoke<void>("delete_doc", { chatId, project, path });
+
 // ---- The side panel's browser (tabs per chat, localhost pages only) ----
 
 /** One tab of a chat's browser. `url` is "" for a new tab with no page yet. */
