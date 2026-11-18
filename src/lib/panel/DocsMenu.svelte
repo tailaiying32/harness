@@ -270,6 +270,9 @@
   .icon {
     display: flex;
   }
+  .icon:hover {
+    color: var(--fg);
+  }
   .icon.open {
     color: var(--bright);
   }
