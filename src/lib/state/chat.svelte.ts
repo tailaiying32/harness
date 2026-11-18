@@ -734,6 +734,22 @@ export class Chat {
   private appNotes: string[] = [];
 
   /**
+   * What the docs view is showing, said as the agent should hear it, or ""
+   * when the panel is closed or on something else. "Start on todo 2" then
+   * finds its doc without a search.
+   */
+  private get panelShows(): string {
+    if (!this.panelOpen || this.panelView !== "docs") return "";
+    const tab = this.activeTab;
+    if (tab === NOTES_TAB) return "the user's notes for this chat";
+    if (tab === PLAN_TAB) return this.planPath ? `the plan, ${this.planPath}` : "the plan";
+    return tab ? `the doc ${tab}` : "";
+  }
+
+  /** What the agent was last told the panel shows; told again only when it changes. */
+  private toldShown = "";
+
+  /**
    * Moves a doc from the chat's folder into the project's docs folder, which
    * is in the app's home folder, not the repo, and shared by every chat of
    * the project. Its tab follows it, and the agent is told with the next
@@ -1774,6 +1790,10 @@ export class Chat {
         // Pictures are for the main chat; a side chat gets the words only.
         await sideSend(this.sessionId, owner.projectPath.trim(), owner.modelChoice, owner.effortChoice, message, messageId);
       } else {
+        // A fact, not "the user means X": the agent judges whether it applies.
+        // Not with a `/command`: the note would sit in front of it.
+        const shown = message.trimStart().startsWith("/") ? "" : this.panelShows;
+        const notes = shown && shown !== this.toldShown ? [...this.appNotes, `The side panel is showing ${shown}.`] : this.appNotes;
         await sendMessage(
           this.sessionId,
           this.agent,
@@ -1784,9 +1804,10 @@ export class Chat {
           message,
           messageId,
           images.map((i) => i.n),
-          this.appNotes,
+          notes,
         );
         this.appNotes = [];
+        if (shown) this.toldShown = shown;
         this.onSent?.();
       }
       return messageId;
