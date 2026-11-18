@@ -1,6 +1,8 @@
-// Document-style editing for the message box: Tab indents, Shift+Tab pulls
-// back, and a new line inside a list starts the next item. Each function
-// works on plain text and a selection, and returns one replacement to make.
+// Document-style editing for the message box and the docs editor: Tab
+// indents, Shift+Tab pulls back, a new line inside a list starts the next
+// item, Cmd+B, Cmd+I and Cmd+K format, and pasting an address over text
+// links it. Each function works on plain text and a selection, and returns
+// one replacement to make.
 
 /** Replace `text[from, to)` with `insert`, then select `[selStart, selEnd)`. */
 export type Edit = {
@@ -11,6 +13,8 @@ export type Edit = {
   selEnd: number;
   /** The replaced lines changed level, so one that now starts a numbered list counts from 1. */
   relevel?: boolean;
+  /** Closing marks the edit put in, by position after it: typing the same character there steps over it (docs editor). */
+  closers?: number[];
 };
 
 const INDENT = "  ";
@@ -204,6 +208,100 @@ export function renumbered(text: string, edit: Edit): Edit {
     selStart: moved(edit.selStart),
     selEnd: moved(edit.selEnd),
   };
+}
+
+/** A character of a word, for formatting the word at the cursor. */
+const WORD = /[\p{L}\p{N}_'’-]/u;
+
+/** What a format key acts on: the selection without spaces at its ends, or with none, the word at the cursor (empty between words). */
+function target(text: string, start: number, end: number): { from: number; to: number } {
+  if (start === end) {
+    while (start > 0 && WORD.test(text[start - 1])) start--;
+    while (end < text.length && WORD.test(text[end])) end++;
+  } else {
+    while (start < end && /\s/.test(text[start])) start++;
+    while (end > start && /\s/.test(text[end - 1])) end--;
+  }
+  return { from: start, to: end };
+}
+
+/**
+ * Cmd+B (`bit` 2, `**`) and Cmd+I (`bit` 1, `*`): turns bold or italic on or
+ * off for the selection, or the word at the cursor. Marks just outside it, or
+ * at the selection's own ends, count as on; `***` is both. With no word, an
+ * empty pair goes in with the cursor between.
+ */
+export function emphasis(text: string, start: number, end: number, bit: 1 | 2): Edit {
+  let { from, to } = target(text, start, end);
+  while (from < to && text[from] === "*") from++;
+  while (to > from && text[to - 1] === "*") to--;
+  let left = 0;
+  while (from - left > 0 && text[from - left - 1] === "*") left++;
+  let right = 0;
+  while (to + right < text.length && text[to + right] === "*") right++;
+  const have = Math.min(left, right, 3);
+  const want = have ^ bit;
+  const marks = "*".repeat(want);
+  const core = text.slice(from, to);
+  const at = from - have + want;
+  const keep = start === end;
+  const shut = at + core.length;
+  return {
+    closers: Array.from({ length: want }, (_, i) => shut + i),
+    from: from - have,
+    to: to + have,
+    insert: marks + core + marks,
+    selStart: keep ? Math.min(Math.max(start - have + want, at), at + core.length) : at,
+    selEnd: keep ? Math.min(Math.max(start - have + want, at), at + core.length) : at + core.length,
+  };
+}
+
+const LINK = /\[([^\]\n]*)\]\(([^)\n]*)\)/g;
+
+/**
+ * Cmd+K: makes the selection, or the word at the cursor, a link's text with
+ * the cursor where the address goes. A selected address goes in the address
+ * with the cursor in the text. Inside a link already, it goes back to plain text.
+ */
+export function link(text: string, start: number, end: number): Edit {
+  const ls = lineStart(text, start);
+  for (const m of text.slice(ls, lineEnd(text, end)).matchAll(LINK)) {
+    const a = ls + m.index;
+    const b = a + m[0].length;
+    if (start === end ? a < start && start < b : a <= start && end <= b) {
+      const words = m[1];
+      const pos = Math.min(Math.max(start - 1, a), a + words.length);
+      return { from: a, to: b, insert: words, selStart: start === end ? pos : a, selEnd: start === end ? pos : a + words.length };
+    }
+  }
+  let { from, to } = target(text, start, end);
+  if (start === end) {
+    // The cursor in an address takes all of it, not just the word.
+    let a = start;
+    let b = start;
+    while (a > 0 && /\S/.test(text[a - 1])) a--;
+    while (b < text.length && /\S/.test(text[b])) b++;
+    if (URL_TEXT.test(text.slice(a, b))) [from, to] = [a, b];
+  }
+  const core = text.slice(from, to);
+  if (URL_TEXT.test(core)) {
+    return { from, to, insert: `[](${core})`, selStart: from + 1, selEnd: from + 1, closers: [from + 1] };
+  }
+  const at = core ? from + core.length + 3 : from + 1;
+  const shut = from + core.length + 1;
+  return { from, to, insert: `[${core}]()`, selStart: at, selEnd: at, closers: [shut, shut + 1, shut + 2] };
+}
+
+const URL_TEXT = /^(https?:\/\/|www\.)\S+$/;
+
+/** Pasting a web address over selected text on one line makes that text a link to it; null for any other paste. */
+export function pasteLink(text: string, start: number, end: number, pasted: string): Edit | null {
+  const url = pasted.trim();
+  if (!URL_TEXT.test(url) || start === end || text.slice(start, end).includes("\n")) return null;
+  const { from, to } = target(text, start, end);
+  if (from === to) return null;
+  const insert = `[${text.slice(from, to)}](${url})`;
+  return { from, to, insert, selStart: from + insert.length, selEnd: from + insert.length };
 }
 
 /** Puts the cursor in a box, at the end of its text. */

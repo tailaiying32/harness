@@ -9,11 +9,11 @@
 import { defaultKeymap, history, historyKeymap, insertNewline } from "@codemirror/commands";
 import { defineLanguageFacet, forceParsing, Language, LanguageSupport, syntaxTree } from "@codemirror/language";
 import { GFM, parser as markdownParser } from "@lezer/markdown";
-import { indent, newLine, outdent, renumbered, todo, type Edit } from "./editing";
+import { emphasis, indent, link, newLine, outdent, pasteLink, renumbered, todo, type Edit } from "./editing";
 import { renderMarkdown } from "../markdown";
 import { commentsExtension } from "./commentMarks";
 import type { DocComment } from "./comments";
-import { EditorState, type Range, StateEffect, StateField } from "@codemirror/state";
+import { EditorState, MapMode, type Range, StateEffect, StateField } from "@codemirror/state";
 import {
   Decoration,
   type DecorationSet,
@@ -392,20 +392,144 @@ const look = EditorView.theme({
 });
 
 /**
+ * Closing marks the editor put in itself: the `)` after a typed `(`, the `**`
+ * after Cmd+B. Typing the same character just before one steps over it, and
+ * Backspace between it and its opening mark removes both. Only marks it put
+ * in, so a `*` the user typed is never skipped; forgotten once the cursor
+ * leaves their line.
+ */
+const addClosers = StateEffect.define<number[]>();
+const dropCloser = StateEffect.define<number>();
+const closers = StateField.define<number[]>({
+  create: () => [],
+  update(value, tr) {
+    let out = value;
+    if (tr.docChanged) {
+      out = out.map((p) => tr.changes.mapPos(p, 1, MapMode.TrackAfter)).filter((p): p is number => p !== null);
+    }
+    for (const e of tr.effects) {
+      if (e.is(addClosers)) out = [...out, ...e.value];
+      else if (e.is(dropCloser)) out = out.filter((p) => p !== e.value);
+    }
+    if (out.length && (tr.selection || tr.docChanged)) {
+      const line = tr.state.doc.lineAt(tr.state.selection.main.head);
+      out = out.filter((p) => p >= line.from && p < line.to);
+    }
+    return out;
+  },
+});
+
+/** What typing an opening mark adds after the cursor. Not quotes (apostrophes); `*` waits (`starAt`). */
+const PAIRS: Record<string, string> = { "(": ")", "[": "]", "{": "}", "`": "`" };
+
+/**
+ * Where the cursor stands just after a `*` the user typed, else -1. A `*` is
+ * a list item or bold/italic, so it isn't paired at once: the next key
+ * decides. A space leaves it alone; a word's first character after `*`,
+ * `**` or `***` puts the same stars in after that character. Any other
+ * change or cursor move forgets it.
+ */
+const typedStar = StateEffect.define<number>();
+const starAt = StateField.define<number>({
+  create: () => -1,
+  update(value, tr) {
+    for (const e of tr.effects) if (e.is(typedStar)) return e.value;
+    return tr.docChanged || tr.selection ? -1 : value;
+  },
+});
+
+/** Only before a space, the line's end or closing punctuation: before a word, the user is wrapping it by hand. */
+const OPEN_BEFORE = /[\s)\]}.,;:!?*_`]/;
+
+const pairTyping = EditorView.inputHandler.of((view, from, to, text) => {
+  const { state } = view;
+  const sel = state.selection.main;
+  if (text.length !== 1 || state.selection.ranges.length > 1 || !sel.empty || from !== sel.from || to !== sel.to) return false;
+  const next = state.doc.sliceString(from, from + 1);
+  if (next === text && state.field(closers).includes(from)) {
+    view.dispatch({ selection: { anchor: from + 1 }, effects: dropCloser.of(from), userEvent: "input.type" });
+    return true;
+  }
+  if (text === "*") {
+    view.dispatch({ changes: { from, insert: "*" }, selection: { anchor: from + 1 }, effects: typedStar.of(from + 1), userEvent: "input.type" });
+    return true;
+  }
+  if (state.field(starAt) === from && !/[\s*)\]}.,;:!?]/.test(text) && (!next || OPEN_BEFORE.test(next))) {
+    let run = 0;
+    while (run < 3 && from - run > 0 && state.doc.sliceString(from - run - 1, from - run) === "*") run++;
+    // Stars that open: at the line's start or after a space or opening
+    // punctuation (not `2*3`), and not in code.
+    const before = from - run > 0 ? state.doc.sliceString(from - run - 1, from - run) : "";
+    const code = /Code/.test(syntaxTree(state).resolveInner(from, -1).name);
+    if (run && (!before || /[\s([{"']/.test(before)) && !code) {
+      const end = from + 1;
+      view.dispatch({
+        changes: { from, insert: text + "*".repeat(run) },
+        selection: { anchor: end },
+        effects: addClosers.of(Array.from({ length: run }, (_, i) => end + i)),
+        userEvent: "input.type",
+      });
+      return true;
+    }
+  }
+  const close = PAIRS[text];
+  if (!close || (next && !OPEN_BEFORE.test(next))) return false;
+  // A backtick after a word or a backtick closes or extends a code mark: no pair.
+  if (text === "`" && /[\p{L}\p{N}_`]/u.test(state.doc.sliceString(from - 1, from))) return false;
+  view.dispatch({
+    changes: { from, insert: text + close },
+    selection: { anchor: from + 1 },
+    effects: addClosers.of([from + 1]),
+    userEvent: "input.type",
+  });
+  return true;
+});
+
+function deletePair(view: EditorView): boolean {
+  const { state } = view;
+  const sel = state.selection.main;
+  if (state.selection.ranges.length > 1 || !sel.empty || !state.field(closers).includes(sel.head)) return false;
+  const open = state.doc.sliceString(sel.head - 1, sel.head);
+  const shut = state.doc.sliceString(sel.head, sel.head + 1);
+  if (PAIRS[open] !== shut && !(open === "*" && shut === "*")) return false;
+  view.dispatch({ changes: { from: sel.head - 1, to: sel.head + 1 }, userEvent: "delete.backward", scrollIntoView: true });
+  return true;
+}
+
+/** Pasting a web address over selected text makes it a link (editing.ts). */
+const pasteLinks = EditorView.domEventHandlers({
+  paste(event, view) {
+    const pasted = event.clipboardData?.getData("text/plain");
+    const { from, to } = view.state.selection.main;
+    const edit = pasted ? pasteLink(view.state.doc.toString(), from, to, pasted) : null;
+    if (!edit) return false;
+    event.preventDefault();
+    view.dispatch({
+      changes: { from: edit.from, to: edit.to, insert: edit.insert },
+      selection: { anchor: edit.selStart },
+      scrollIntoView: true,
+      userEvent: "input.paste",
+    });
+    return true;
+  },
+});
+
+/**
  * The message box's list editing (editing.ts), so notes and plans behave the
  * same: Enter in a list starts the next item (an empty one steps back or ends
  * the list), Tab and Shift+Tab indent, and numbered lists stay in order.
  */
-function listCommand(make: (text: string, start: number, end: number) => Edit | null) {
+function listCommand(make: (text: string, start: number, end: number) => Edit | null, renumber = true) {
   return (view: EditorView): boolean => {
     const text = view.state.doc.toString();
     const { from, to } = view.state.selection.main;
     const edit = make(text, from, to);
     if (!edit) return false;
-    const done = renumbered(text, edit);
+    const done = renumber ? renumbered(text, edit) : edit;
     view.dispatch({
       changes: { from: done.from, to: done.to, insert: done.insert },
       selection: { anchor: done.selStart, head: done.selEnd },
+      effects: done.closers?.length ? addClosers.of(done.closers) : [],
       scrollIntoView: true,
       userEvent: "input",
     });
@@ -437,6 +561,12 @@ export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): Edi
           { key: "Shift-Tab", run: (view) => listCommand(outdent)(view) || true },
           // Cmd+L: to-do boxes on the lines touched, or off if they all have them.
           { key: "Mod-l", run: listCommand(todo), preventDefault: true },
+          // Bold, italic and link, on or off. Cmd+I replaces CodeMirror's
+          // rarely used select-parent.
+          { key: "Mod-b", run: listCommand((t, s, e) => emphasis(t, s, e, 2), false), preventDefault: true },
+          { key: "Mod-i", run: listCommand((t, s, e) => emphasis(t, s, e, 1), false), preventDefault: true },
+          { key: "Mod-k", run: listCommand(link, false), preventDefault: true },
+          { key: "Backspace", run: deletePair },
           ...historyKeymap,
           ...defaultKeymap,
         ]),
@@ -445,6 +575,10 @@ export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): Edi
         placeholderText(options.placeholder ?? ""),
         livePreview,
         tablePreview,
+        closers,
+        starAt,
+        pairTyping,
+        pasteLinks,
         look,
         options.comments ? commentsExtension(options.comments, options.oncomments) : [],
         EditorView.updateListener.of((u) => {

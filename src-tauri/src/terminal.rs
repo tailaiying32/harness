@@ -77,6 +77,10 @@ const MAX_READ_LINES: usize = 2000;
 /// Size of a shell started before the window has measured its tab.
 const DEFAULT_SIZE: PtySize = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
 
+/// Setting that keeps the panel's last size ("cols x rows") across a quit, so
+/// a tab the agent opens before the panel is shown starts at the right width.
+const PANEL_SIZE_KEY: &str = "terminal_panel_size";
+
 /// A tab as the window shows it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TabInfo {
@@ -181,6 +185,9 @@ struct State {
     shown: Option<String>,
     /// The last `Tab::born` given.
     born: u64,
+    /// The size the window last gave a tab: the panel's, for tabs the agent
+    /// opens. A shell started wider than the panel draws its prompt wrong.
+    panel_size: Option<PtySize>,
 }
 
 impl State {
@@ -245,6 +252,10 @@ impl Terminals {
     fn restore(&self) {
         let saved = self.0.store.load_terminals().unwrap_or_default();
         let mut state = lock(&self.0.state);
+        state.panel_size = self.0.store.setting(PANEL_SIZE_KEY).and_then(|s| {
+            let (cols, rows) = s.split_once('x')?;
+            Some(size(cols.trim().parse().ok()?, rows.trim().parse().ok()?))
+        });
         for row in saved {
             let project = PathBuf::from(&row.project);
             let worktree = row.worktree.map(PathBuf::from).filter(|w| w.is_dir());
@@ -252,7 +263,7 @@ impl Terminals {
             let folder = if folder.is_dir() { folder } else { project };
             let mut tab = Tab::new(&row.project, folder, worktree, row.label);
             tab.tail = row.output;
-            tab.push(&line_bytes(&format!("restored {}", local_time(row.saved_at)), tab.size.cols));
+            tab.push(&line_bytes(&format!("restored {}", local_time(row.saved_at))));
             tab.dirty = false;
             state.add(row.id, tab);
         }
@@ -320,7 +331,8 @@ impl Terminals {
         if command.contains(['\n', '\r']) {
             return Err("Give one command line; join steps with && or ;.".into());
         }
-        let tab = self.open(project, worktree, None, DEFAULT_SIZE.cols, DEFAULT_SIZE.rows)?;
+        let size = lock(&self.0.state).panel_size.unwrap_or(DEFAULT_SIZE);
+        let tab = self.open(project, worktree, None, size.cols, size.rows)?;
         let deadline = Instant::now() + PROMPT_WAIT;
         while Instant::now() < deadline && lock(&self.0.state).tabs.get(&tab.id).is_some_and(|t| t.tail.is_empty()) {
             std::thread::sleep(Duration::from_millis(30));
@@ -403,9 +415,11 @@ impl Terminals {
         let mut state = lock(&self.0.state);
         let tab = state.tabs.get_mut(id).ok_or("That terminal tab is gone")?;
         tab.size = size(cols, rows);
+        let new = tab.size;
         if let Some(live) = &tab.live {
-            live.master.resize(tab.size).map_err(|e| e.to_string())?;
+            live.master.resize(new).map_err(|e| e.to_string())?;
         }
+        state.panel_size = Some(new);
         Ok(())
     }
 
@@ -480,7 +494,7 @@ impl Terminals {
             tab.run += 1;
             let fg = tab.fg.take();
             tab.running = None;
-            tab.push(&line_bytes(&text, tab.size.cols));
+            tab.push(&line_bytes(&text));
             (tab.project.clone(), live, fg)
         };
         if let Some(live) = live {
@@ -638,8 +652,9 @@ impl Terminals {
 
     /// Saves every tab's output, for the next start.
     pub fn save(&self) {
-        let rows: Vec<SavedTerminal> = {
+        let (rows, panel) = {
             let mut state = lock(&self.0.state);
+            let panel = state.panel_size;
             let order = state.order.clone();
             let mut positions: HashMap<String, i64> = HashMap::new();
             let now = now_ms();
@@ -661,9 +676,12 @@ impl Terminals {
                 });
                 *position += 1;
             }
-            rows
+            (rows, panel)
         };
         let _ = self.0.store.save_terminals(&rows);
+        if let Some(p) = panel {
+            let _ = self.0.store.set_setting(PANEL_SIZE_KEY, &format!("{}x{}", p.cols, p.rows));
+        }
     }
 
     /// Quitting: saves, then ends every shell, waiting briefly.
@@ -837,19 +855,11 @@ fn idle_words(idle: Duration) -> String {
 }
 
 /// A line the app writes into a tab: leaves any full-screen program's screen,
-/// resets colours, and draws ── text ── across the tab, dimmed.
-fn line_bytes(text: &str, cols: u16) -> Vec<u8> {
-    let text = format!(" {text} ");
-    let width = cols as usize;
-    let len = text.chars().count();
-    let left = (width.saturating_sub(len) / 2).max(2);
-    let right = width.saturating_sub(len + left).max(2);
-    format!(
-        "\x1b[?1049l\x1b[0m\x1b[?25h\r\n\x1b[2m{}{text}{}\x1b[0m\r\n",
-        "─".repeat(left),
-        "─".repeat(right)
-    )
-    .into_bytes()
+/// resets colours, and draws a short ── text ──, dimmed. Short, not across the
+/// tab: kept output is shown again later at whatever width the panel has then,
+/// and a line wider than that wraps and spills onto what follows.
+fn line_bytes(text: &str) -> Vec<u8> {
+    format!("\x1b[?1049l\x1b[0m\x1b[?25h\r\n\x1b[2m── {text} ──\x1b[0m\r\n").into_bytes()
 }
 
 /// Where to cut kept output so at least `at` bytes go: just after the next
@@ -1194,7 +1204,7 @@ mod tests {
         assert_eq!(command_name("-zsh"), "zsh");
         assert_eq!(idle_words(Duration::from_secs(86_400)), "a day");
         assert_eq!(idle_words(Duration::from_secs(5)), "5 s");
-        let line = String::from_utf8(line_bytes("closed", 20)).unwrap();
+        let line = String::from_utf8(line_bytes("closed")).unwrap();
         assert!(line.contains("── closed ──"));
         assert!(alt_screen_after(false, b"x\x1b[?1049hvim"));
         assert!(!alt_screen_after(true, b"\x1b[?1049h..\x1b[?1049l"));
@@ -1237,7 +1247,12 @@ mod tests {
         assert!(t.run_for_agent(&folder(), None, "echo a\nrm -rf x").is_err());
         assert!(t.run_for_agent(&folder(), None, "  ").is_err());
         assert_eq!(t.tabs(&folder()).len(), 1);
+        // Once the window has given a size, the agent's next tab starts at it.
+        t.resize(&tab.id, 52, 30).unwrap();
+        let next = t.run_for_agent(&folder(), None, "stty size").unwrap();
+        assert!(wait_for(&t, &next.id, "30 52"));
         t.close(&tab.id);
+        t.close(&next.id);
     }
 
     #[test]
@@ -1315,6 +1330,7 @@ mod tests {
         let out: Out = Arc::new(|_| {});
         let t = Terminals::with(out.clone(), store.clone(), IDLE);
         let tab = t.open(&project, None, Some("scratch".into()), 80, 24).unwrap();
+        t.resize(&tab.id, 52, 30).unwrap();
         t.write(&tab.id, "echo kept\n").unwrap();
         assert!(wait_for(&t, &tab.id, "kept"));
         t.shutdown();
@@ -1328,6 +1344,10 @@ mod tests {
         let text = again.text(&tabs[0].id, 50).unwrap();
         assert!(text.contains("kept"));
         assert!(text.contains("restored"));
+        // The panel's size comes back too: the agent's first tab starts at it.
+        let tab = again.run_for_agent(&project, None, "stty size").unwrap();
+        assert!(wait_for(&again, &tab.id, "30 52"));
+        again.close(&tab.id);
     }
 
     #[test]

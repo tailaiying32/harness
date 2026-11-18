@@ -9,7 +9,8 @@
   import { prLabel, prShort, shortPath } from "../paths";
   import { IMAGE_WORD, webLinks, type Chat } from "../state/chat.svelte";
   import { loadPrefs, savePrefs } from "../themes";
-  import { focusEnd, indent, newLine, outdent, renumbered, type Edit } from "./editing";
+  import { emphasis, focusEnd, indent, link, newLine, outdent, pasteLink, renumbered, type Edit } from "./editing";
+  import { MAC } from "../state/tabKeys";
   import { imageType } from "./files";
   import { attach, imageFiles } from "./images";
   import SuggestMenu from "./SuggestMenu.svelte";
@@ -330,6 +331,13 @@
   function onPaste(e: ClipboardEvent) {
     const data = e.clipboardData;
     if (!data) return;
+    // A web address pasted over selected text makes it a link.
+    const asLink = pasteLink(chat.draft, box.selectionStart, box.selectionEnd, data.getData("text/plain"));
+    if (asLink) {
+      e.preventDefault();
+      void apply(asLink, false);
+      return;
+    }
     const items = [...data.items].filter((i) => i.kind === "file");
     if (!items.length && !data.types.includes("Files")) return;
     const text = data.getData("text/plain");
@@ -537,9 +545,9 @@
   }
 
   /** Makes one replacement in the box the way typing would, so undo still works. */
-  async function apply(asked: Edit) {
+  async function apply(asked: Edit, renumber = true) {
     // Numbered lists the edit disturbs are put back in order in the same step.
-    const edit = renumbered(chat.draft, asked);
+    const edit = renumber ? renumbered(chat.draft, asked) : asked;
     box.setSelectionRange(edit.from, edit.to);
     const typed = edit.insert
       ? document.execCommand("insertText", false, edit.insert)
@@ -567,6 +575,13 @@
         void apply({ from: word.at, to: word.at + word.text.length, insert: "", selStart: word.at, selEnd: word.at });
         return;
       }
+    }
+    // Cmd+B bold, Cmd+I italic, Cmd+K link, on or off, as in the docs editor.
+    const format = (MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase();
+    if (format === "b" || format === "i" || format === "k") {
+      e.preventDefault();
+      void apply(format === "k" ? link(chat.draft, start, end) : emphasis(chat.draft, start, end, format === "b" ? 2 : 1), false);
+      return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
