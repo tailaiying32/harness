@@ -76,6 +76,38 @@ const focused = StateField.define<boolean>({
   update: (value, tr) => tr.effects.reduce((v, e) => (e.is(setFocused) ? e.value : v), value),
 });
 
+/**
+ * A press in the doc is held: the "+ comment" button waits for its letting
+ * go. Shown mid-drag, it sat under the pointer; crossing it took the
+ * selection somewhere else, which moved or hid it, and the selection flashed.
+ */
+const setPressing = StateEffect.define<boolean>();
+const pressing = StateField.define<boolean>({
+  create: () => false,
+  update: (value, tr) => tr.effects.reduce((v, e) => (e.is(setPressing) ? e.value : v), value),
+});
+
+const press = ViewPlugin.fromClass(
+  class {
+    constructor(private view: EditorView) {
+      window.addEventListener("mouseup", this.release, true);
+    }
+    release = () => {
+      if (this.view.state.field(pressing)) this.view.dispatch({ effects: setPressing.of(false) });
+    };
+    destroy() {
+      window.removeEventListener("mouseup", this.release, true);
+    }
+  },
+  {
+    eventHandlers: {
+      mousedown(e, view) {
+        if (e.button === 0 && !view.state.field(pressing)) view.dispatch({ effects: setPressing.of(true) });
+      },
+    },
+  },
+);
+
 /** A written comment whose box has the cursor: its window stays while the doc is unfocused. */
 const holdComment = StateEffect.define<string | null>();
 const held = StateField.define<string | null>({
@@ -289,7 +321,7 @@ function commentWindow(id: string): (view: EditorView) => TooltipView {
   return create;
 }
 
-const window_ = showTooltip.compute(["selection", commentField, inputField, focused, held, quiet, hovered], (state): Tooltip | null => {
+const window_ = showTooltip.compute(["selection", commentField, inputField, focused, held, quiet, hovered, pressing], (state): Tooltip | null => {
   const input = state.field(inputField);
   if (input) return { pos: input.from, above: false, strictSide: true, create: input.create };
   const shownComment = (id: string | null) => (id ? state.field(commentField).find((c) => c.id === id && c.from >= 0) : undefined);
@@ -297,7 +329,9 @@ const window_ = showTooltip.compute(["selection", commentField, inputField, focu
   if (keptComment) return { pos: keptComment.from, above: false, strictSide: true, create: commentWindow(keptComment.id) };
   const sel = state.selection.main;
   // Text selected: the button wins over a comment the pointer rests on.
-  if (state.field(focused) && !sel.empty) return { pos: sel.from, above: false, strictSide: true, create: plusButton };
+  if (state.field(focused) && !sel.empty) {
+    return state.field(pressing) ? null : { pos: sel.from, above: false, strictSide: true, create: plusButton };
+  }
   const hoveredComment = shownComment(state.field(hovered));
   if (hoveredComment) return { pos: hoveredComment.from, above: false, strictSide: true, create: commentWindow(hoveredComment.id) };
   if (!state.field(focused)) return null;
@@ -329,6 +363,8 @@ export function commentsExtension(initial: DocComment[], onchange?: (list: DocCo
     quiet,
     hovered,
     hover,
+    pressing,
+    press,
     EditorView.focusChangeEffect.of((_state, on) => setFocused.of(on)),
     marks,
     window_,
