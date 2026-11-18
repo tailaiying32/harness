@@ -325,6 +325,14 @@ pub enum AgentEvent {
         from: String,
         to: String,
     },
+    /// The chat moved from one agent to another (agent IDs). `model` is the
+    /// model picked for the new one. The new agent starts fresh and rereads
+    /// the chat. Saved, so the chat keeps the line that marks it.
+    AgentSwitched {
+        from: String,
+        to: String,
+        model: Option<String>,
+    },
     /// The user edited a plan before approving it; the agent works from this
     /// text. Saved, so the plan shows as approved after a restart.
     PlanEdited {

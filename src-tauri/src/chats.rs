@@ -73,7 +73,7 @@ at a chat by time (\"my last chat\", \"the one from this morning\").",
         {
             "name": "read",
             "description": format!(
-                "Read an earlier chat of this project: what the user and the agent said, each tool call \
+                "Read a chat of this project (an earlier one, or this one when the app asks you to): what the user and the agent said, each tool call \
 as one line (marked FAILED when it failed), its plans, and the names of the docs it wrote. {WHEN} Later \
 turns override earlier ones, and a tool line is an attempt, not proof it worked or stayed. A long chat \
 comes in parts, newest first; give `upto_turn` for earlier turns. Give `doc` with a listed doc's name to \
@@ -407,6 +407,8 @@ fn cut_middle(text: &str, max: usize) -> Option<String> {
 /// One turn: what the user sent, then what the agent said and did.
 struct Turn {
     user: String,
+    /// The chat moved to another agent just before this turn: who from and to.
+    switched: Option<String>,
     /// The agent's text, and its tool calls with those in a row kept together.
     parts: Vec<String>,
     /// Whether the last part is a run of tool lines, so the next call joins it.
@@ -458,11 +460,18 @@ pub fn render(chat: &SessionRow, events: &[AgentEvent], upto_turn: Option<usize>
     }
 
     let mut turns: Vec<Turn> = Vec::new();
+    // A switch is saved just before the message that went to the new agent.
+    let mut switched = None;
     for event in events {
         if let AgentEvent::UserMessage { text, id, .. } = event {
             if !id.as_deref().is_some_and(|id| withdrawn.contains(id)) {
-                turns.push(Turn { user: text.clone(), parts: Vec::new(), in_tools: false });
+                turns.push(Turn { user: text.clone(), switched: switched.take(), parts: Vec::new(), in_tools: false });
             }
+            continue;
+        }
+        if let AgentEvent::AgentSwitched { from, to, model } = event {
+            let model = model.as_deref().map(|m| format!(" ({m})")).unwrap_or_default();
+            switched = Some(format!("(the chat moved from {} to {}{model} here)", agent_name(from), agent_name(to)));
             continue;
         }
         let Some(turn) = turns.last_mut() else { continue };
@@ -517,7 +526,8 @@ pub fn render(chat: &SessionRow, events: &[AgentEvent], upto_turn: Option<usize>
                 true => "(no reply)".to_string(),
                 false => turn.parts.join("\n\n"),
             };
-            format!("## Turn {} of {count}\n\n### User\n\n{}\n\n### Agent\n\n{agent}\n", i + 1, turn.user.trim())
+            let switched = turn.switched.as_deref().map(|s| format!("{s}\n\n")).unwrap_or_default();
+            format!("## Turn {} of {count}\n\n{switched}### User\n\n{}\n\n### Agent\n\n{agent}\n", i + 1, turn.user.trim())
         })
         .collect();
 
@@ -686,6 +696,7 @@ mod tests {
             AgentEvent::TurnEnded { ok: true, duration_ms: None },
             user("taken back", "u2"),
             AgentEvent::MessageWithdrawn { id: "u2".into(), ok: true },
+            AgentEvent::AgentSwitched { from: "claude-code".into(), to: "cursor".into(), model: Some("composer-2.5".into()) },
             user("now the terminal row", "u3"),
             AgentEvent::Interrupted,
         ];
@@ -694,7 +705,7 @@ mod tests {
         assert!(text.contains("## Turn 1 of 2\n\n### User\n\nmake tabs draggable\n\n### Agent\n\nLooking.\n\n  → Read: tabs.ts\n  → Bash: Run the tests [FAILED]\n\n"));
         assert!(text.contains("Asked the user: Which row?\nThe user answered: Within a row"));
         assert!(text.contains("Plan:\n\nedited plan\n\n(plan approved)\n\nDone.\n"));
-        assert!(text.contains("## Turn 2 of 2\n\n### User\n\nnow the terminal row\n\n### Agent\n\n(stopped by the user)\n"));
+        assert!(text.contains("## Turn 2 of 2\n\n(the chat moved from Claude Code to Cursor (composer-2.5) here)\n\n### User\n\nnow the terminal row\n\n### Agent\n\n(stopped by the user)\n"));
         assert!(!text.contains("subagent talk") && !text.contains("taken back") && !text.contains("first plan"));
         assert!(!text.contains("Showing turns"));
     }
@@ -857,7 +868,8 @@ mod tests {
         let read = text(call("read", json!({ "id": "aaaa1111" })).await.unwrap());
         assert!(read.contains("### User\n\nlet users drag tabs to reorder them"), "{read}");
         assert!(text(call("read", json!({ "id": "chat:aaaa1111-x" })).await.unwrap()).starts_with("# Reordering side panel tabs"));
-        assert_eq!(call("read", json!({ "id": "bbbb" })).await.unwrap_err(), "That is this chat.");
+        // This chat reads itself only when the app asks (an agent taking it over).
+        assert!(text(call("read", json!({ "id": "bbbb" })).await.unwrap()).starts_with("# "));
         assert_eq!(call("read", json!({ "id": "cccc" })).await.unwrap_err(), "No chat with that id in this project.");
         assert_eq!(call("nope", json!({})).await.unwrap_err(), "No such tool: nope");
 

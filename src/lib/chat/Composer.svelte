@@ -113,13 +113,15 @@
           ...ownModels,
         ],
   );
-  // Before the first message every installed agent's models are offered, under
-  // its name; picking one puts the chat on that agent. After, only its own.
+  // Every installed agent's models are offered, under its name; picking one
+  // puts the chat on that agent. In a chat that has started, the next message
+  // hands it over; while a turn runs, other agents wait (greyed out).
   const groups = $derived(
-    (chat.started ? [chat.agent] : agents.filter((a) => a === chat.agent || (models[a] ?? []).length > 0)).map(
-      (agent) => ({ agent, list: agent === chat.agent ? modelOptions : models[agent] }),
-    ),
+    agents
+      .filter((a) => a === chat.agent || (models[a] ?? []).length > 0)
+      .map((agent) => ({ agent, list: agent === chat.agent ? modelOptions : models[agent] })),
   );
+  const locked = (agent: AgentId) => chat.started && chat.busy && agent !== chat.agent;
 
   function pickModel(agent: AgentId, choice: string) {
     chat.setAgent(agent, loadPrefs().mode);
@@ -682,6 +684,7 @@
                   aria-checked={on}
                   class:on
                   title={m.detail ?? ""}
+                  disabled={locked(group.agent)}
                   onclick={() => pickModel(group.agent, m.value)}>{m.name}</button
                 >
               {/each}
@@ -858,6 +861,11 @@
   }
   .menu button.on {
     color: var(--accent);
+  }
+  /* Another agent's models while a turn runs: picked again once it ends. */
+  .menu button:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
   .menu.left {
     right: auto;

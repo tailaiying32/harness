@@ -100,6 +100,18 @@ pub fn configured_idle(store: &Store) -> Option<Duration> {
 
 /// The text the agent gets: the window's notes first, marked as the app's,
 /// then the user's message.
+/// What an agent that takes over a chat is told with its first message: it
+/// starts fresh, so it rereads the chat with the chat lookup tool first.
+fn handoff_note(chat_id: &str, from: &str) -> String {
+    format!(
+        "This chat was handed to you from {}; you are starting fresh. Before you reply, read this whole chat \
+with the {} read tool (id {chat_id}). If it comes in parts, read every part, using upto_turn for the earlier ones. \
+Then carry on from where it left off.",
+        crate::agent::label(from),
+        crate::chats::SERVER
+    )
+}
+
 fn with_app_notes(notes: &[String], text: &str) -> String {
     let notes: Vec<&str> = notes.iter().map(|n| n.trim()).filter(|n| !n.is_empty()).collect();
     if notes.is_empty() {
@@ -350,7 +362,7 @@ impl SessionManager {
     /// `mode`, `model` and `effort` are saved with the chat; they are passed to
     /// the agent only when a process has to be started (a running one is
     /// switched with `set_mode`, `set_model` and `set_effort`). `agent` is the
-    /// agent a new chat runs on; a saved chat keeps its own.
+    /// agent the chat runs on; a saved chat on another is handed over first.
     #[allow(clippy::too_many_arguments)]
     pub async fn send_message(
         &self,
@@ -392,13 +404,12 @@ impl SessionManager {
     ) -> Result<(), String> {
         let inner = &self.0;
 
-        // A saved chat stays on its agent. Its program must be there before
-        // anything is saved.
-        let agent_id = match inner.store.session(session_id)? {
-            Some(saved) => saved.agent,
-            None => agent.to_string(),
-        };
+        // The chat runs on the agent the window picked. A saved chat on
+        // another agent is handed over first (`switch_agent`). The program
+        // must be there before anything is saved or switched.
+        let agent_id = agent.to_string();
         let (adapter, binary) = inner.agents.get(&agent_id)?;
+        let switch_from = inner.store.session(session_id)?.map(|saved| saved.agent).filter(|saved| *saved != agent_id);
 
         // Read before anything is saved: a missing image fails the send.
         let mut refs = Vec::new();
@@ -442,6 +453,10 @@ impl SessionManager {
                     Err(e) => eprintln!("harness: couldn't bring {from} along to {project}: {e}"),
                 }
             }
+        }
+
+        if let Some(from) = &switch_from {
+            self.switch_agent(session_id, from, &agent_id, model.as_deref()).await?;
         }
 
         let _starting = inner.start_lock.lock().await;
@@ -728,6 +743,39 @@ impl SessionManager {
             }
         }
         note
+    }
+
+    /// Moves a saved chat to another agent, between turns. The old process
+    /// is stopped and its session left behind: the new agent starts fresh,
+    /// on its own defaults, and is told (with the next message) to reread
+    /// this chat. Nothing is carried over from the old agent.
+    async fn switch_agent(&self, session_id: &str, from: &str, to: &str, model: Option<&str>) -> Result<(), String> {
+        let inner = &self.0;
+        let live = {
+            let sessions = inner.sessions.lock().unwrap();
+            let session = sessions.get(session_id);
+            if session.is_some_and(|s| s.busy) {
+                return Err("Stop the turn before switching agents.".to_string());
+            }
+            session.and_then(|s| s.agent.clone())
+        };
+        if let Some(agent) = live {
+            agent.stop();
+            self.wait_for_exit(session_id).await?;
+        }
+        inner.store.set_agent(session_id, to)?;
+        inner.store.clear_agent_session_id(session_id)?;
+        inner.store.set_effort(session_id, "default")?;
+        inner.store.add_pending_note(session_id, &handoff_note(session_id, from))?;
+        self.record(
+            session_id,
+            AgentEvent::AgentSwitched {
+                from: from.to_string(),
+                to: to.to_string(),
+                model: model.filter(|m| !m.is_empty()).map(str::to_string),
+            },
+        );
+        Ok(())
     }
 
     /// Waits for the chat's process to be gone, after a stop.
@@ -2272,9 +2320,9 @@ are there now, so use the new paths.)\n\ncarry on",
     }
 
     #[tokio::test]
-    async fn a_chat_keeps_the_agent_it_started_on() {
+    async fn a_chat_switches_agent_between_turns_and_the_new_one_starts_fresh() {
         let rig = rig(LONG);
-        // Cursor isn't installed here: a new chat on it can't start, and nothing is saved.
+        // Cursor isn't installed yet: a chat can't start on it, and nothing is saved.
         let err = rig
             .manager
             .send_message("c1", crate::agent::CURSOR, "/work".into(), None, None, None, "hi", &[], "m0", &[])
@@ -2284,14 +2332,45 @@ are there now, so use the new paths.)\n\ncarry on",
         assert!(rig.store.session("c1").unwrap().is_none());
 
         rig.send("hi").await;
-        assert_eq!(rig.store.session("s1").unwrap().unwrap().agent, crate::agent::CLAUDE);
+        rig.agent_says(AgentEvent::SessionStarted { agent_session_id: "claude-1".into(), model: None, mode: None });
         rig.turn_ends();
-        // A later send naming another agent still goes to the chat's own.
+        assert_eq!(rig.store.session("s1").unwrap().unwrap().agent, crate::agent::CLAUDE);
+
+        let cursor = Arc::new(Fake::default());
+        rig.manager.0.agents.add(crate::agent::CURSOR, cursor.clone(), Some("cursor".into()));
         rig.manager
-            .send_message("s1", crate::agent::CURSOR, "/work".into(), None, None, None, "again", &[], "m2", &[])
+            .send_message("s1", crate::agent::CURSOR, "/work".into(), Some("agent".into()), Some("composer".into()), None, "again", &[], "m2", &[])
             .await
             .unwrap();
-        assert_eq!(rig.store.session("s1").unwrap().unwrap().agent, crate::agent::CLAUDE);
+
+        // The old process is ended, the chat is on Cursor, and Cursor starts fresh.
+        assert!(rig.fake.told.lock().unwrap().contains(&"kill".to_string()));
+        let saved = rig.store.session("s1").unwrap().unwrap();
+        assert_eq!(saved.agent, crate::agent::CURSOR);
+        assert_eq!(cursor.spawns.lock().unwrap()[0], (None, Some("agent".to_string())));
+        // It is told to reread the chat, before the user's words.
+        let told = cursor.told.lock().unwrap().last().unwrap().clone();
+        assert!(told.contains("handed to you from Claude Code"), "{told}");
+        assert!(told.contains("harness_chats read tool (id s1)"), "{told}");
+        assert!(told.find("handed to you").unwrap() < told.find("again").unwrap(), "{told}");
+        // The switch is a saved line in the chat, above the message.
+        let switched = AgentEvent::AgentSwitched {
+            from: crate::agent::CLAUDE.into(),
+            to: crate::agent::CURSOR.into(),
+            model: Some("composer".into()),
+        };
+        let events = rig.store.events("s1").unwrap();
+        let at = events.iter().position(|e| *e == switched).expect("switch saved");
+        assert!(matches!(&events[at + 1], AgentEvent::UserMessage { text, .. } if text == "again"), "{events:?}");
+
+        // Mid-turn, the chat can't change agent.
+        let err = rig
+            .manager
+            .send_message("s1", crate::agent::CLAUDE, "/work".into(), None, None, None, "back", &[], "m3", &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("Stop the turn"), "{err}");
+        assert_eq!(rig.store.session("s1").unwrap().unwrap().agent, crate::agent::CURSOR);
     }
 
     #[tokio::test]

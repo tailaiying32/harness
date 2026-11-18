@@ -39,6 +39,8 @@ export type AgentEvent =
   | { kind: "tool_result"; tool_id: string; content: unknown; is_error: boolean; parent_tool_id: string | null }
   /** This chat was started in a folder that is a project whose folder had moved from `from`. */
   | { kind: "project_moved"; from: string; to: string }
+  /** The chat moved to another agent (agent IDs); `model` is the one picked for it. */
+  | { kind: "agent_switched"; from: string; to: string; model: string | null }
   /** A tool call's name and input, when they came after it was first shown (Cursor). */
   | { kind: "tool_input"; tool_id: string; name: string; input: unknown; parent_tool_id: string | null }
   | {
