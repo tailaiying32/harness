@@ -47,9 +47,10 @@ import {
   withdrawMessage,
   CLAUDE,
   CURSOR,
+  agentLabel,
   type AgentId,
 } from "../ipc";
-import { modeFor } from "../models";
+import { defaultMode, modeFor, modelName } from "../models";
 import { FILE_LINK, fileWord, linkable, toLinks, type FileRef } from "../chat/files";
 import { chatsTool, docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
 import { ChatInfo } from "./chatInfo.svelte";
@@ -342,8 +343,15 @@ export class Chat {
   }
   items = $state<Item[]>([]);
   status = $state<SessionState | "none">("none");
-  /** The agent this chat runs on. Picked with the model before the first message, fixed after. */
+  /** The agent this chat runs on, picked with the model. After the first
+   *  message a pick of another agent's model waits for the next message,
+   *  which hands the chat over (see `switching`). */
   agent = $state<AgentId>(CLAUDE);
+  /** The agent the saved chat is on: differs from `agent` while a switch waits. */
+  ranOn = $state<AgentId>(CLAUDE);
+  /** The mode, model and effort the chat had on `ranOn`, so picking it back
+   *  before sending undoes the pick. */
+  private held: { mode: Mode; model: string; effort: string } | null = null;
   /** The model Claude Code reports it is using. Known after the first turn starts. */
   model = $state<string | null>(null);
   /** The model the user picked: an alias, a full name, or "default" for Claude Code's own default. */
@@ -371,7 +379,10 @@ export class Chat {
     // The project's folder may have been moved or renamed since.
     if (row.project_path) this.projectPath = row.project_path;
     this.formerPaths = row.former_paths ?? [];
-    this.agent = row.agent ?? CLAUDE;
+    // A switch waiting for the next message stays picked.
+    const waiting = this.switching;
+    this.ranOn = row.agent ?? CLAUDE;
+    if (!waiting) this.agent = this.ranOn;
     this.workPath = row.work_path;
     this.branch = row.branch;
     this.wtStatus = row.wt_status;
@@ -1015,6 +1026,11 @@ export class Chat {
     return this.items.length > 0;
   }
 
+  /** Another agent was picked for a chat that has started: the next message hands the chat over. */
+  get switching(): boolean {
+    return this.started && this.agent !== this.ranOn;
+  }
+
   /** Something is typed, pasted or dropped in the message box. */
   get hasDraft(): boolean {
     return this.draft.trim() !== "" || this.draftImages.length > 0 || this.draftFiles.length > 0;
@@ -1230,6 +1246,16 @@ export class Chat {
 
       case "worktree_changed":
         this.push({ type: "note", text: worktreeNote(event.status, event.branch) });
+        break;
+
+      // The chat moved to another agent. The window shows the line as the
+      // message is sent (`send`), so only a replay adds it here.
+      case "agent_switched":
+        this.ranOn = event.to as AgentId;
+        this.held = null;
+        this.usage = null;
+        this.model = null;
+        if (this.replaying) this.push({ type: "note", text: switchNote(event.to as AgentId, event.model) });
         break;
 
       case "project_moved":
@@ -1452,6 +1478,10 @@ export class Chat {
       if (image && !images.includes(image)) images.push(image);
     }
     if (from === this.draftImages) this.draftImages = [];
+    // A chat's first message saves it on the agent picked.
+    if (!this.started) this.ranOn = this.agent;
+    // A switch goes through with this message: its line sits above it.
+    const switched = this.switching && !this.owner ? this.push<NoteItem>({ type: "note", text: switchNote(this.agent, this.modelChoice) }) : null;
     this.push({ type: "user", text: message, messageId, queued: this.busy, images: images.length ? images : undefined });
     this.stopping = false;
     if (this.turnStartedAt === null) this.turnStartedAt = Date.now();
@@ -1478,6 +1508,8 @@ export class Chat {
       }
     } catch (e) {
       this.turnStartedAt = null;
+      // The switch didn't happen: its line goes.
+      if (switched) this.items = this.items.filter((i) => i.id !== switched.id);
       this.push({ type: "error", text: String(e) });
     }
   }
@@ -1675,18 +1707,38 @@ export class Chat {
     }
   }
 
-  /** Moves a chat that hasn't started yet to another agent. Its mode follows (plan stays plan). */
+  /**
+   * Puts the chat on another agent. Before the first message its mode follows
+   * (plan stays plan). After, the new agent starts on its own defaults when
+   * the next message hands the chat over; picking the chat's own agent back
+   * before then undoes the pick.
+   */
   setAgent(agent: AgentId, savedMode: string): void {
-    if (this.started || agent === this.agent) return;
+    if (agent === this.agent) return;
+    if (!this.started) {
+      this.agent = agent;
+      this.mode = modeFor(agent, this.mode, savedMode);
+      this.effortChoice = "default";
+      return;
+    }
+    if (this.agent === this.ranOn) this.held = { mode: this.mode, model: this.modelChoice, effort: this.effortChoice };
     this.agent = agent;
-    this.mode = modeFor(agent, this.mode, savedMode);
+    if (agent === this.ranOn && this.held) {
+      this.mode = this.held.mode;
+      this.modelChoice = this.held.model;
+      this.effortChoice = this.held.effort;
+      this.held = null;
+      return;
+    }
+    this.mode = defaultMode(agent, savedMode) as Mode;
     this.effortChoice = "default";
   }
 
   /** Switch model. A running process is told now; otherwise it applies when one starts. */
   async changeModel(choice: string): Promise<void> {
     this.modelChoice = choice;
-    if (this.status === "none" || this.status === "exited") return;
+    // A pick for an agent the chat is moving to waits for the handover.
+    if (this.switching || this.status === "none" || this.status === "exited") return;
     try {
       await setModel(this.sessionId, choice);
     } catch {
@@ -1697,7 +1749,7 @@ export class Chat {
   /** Pick an effort level for this chat only. A running process is told now; otherwise it applies when one starts. */
   async changeEffort(effort: string): Promise<void> {
     this.effortChoice = effort;
-    if (this.status === "none") return;
+    if (this.switching || this.status === "none") return;
     try {
       // Saved even with no live process, so a resumed chat keeps it.
       await setEffort(this.sessionId, effort);
@@ -1709,7 +1761,7 @@ export class Chat {
   /** Switch mode. A running process is told now; otherwise it applies when one starts. */
   async changeMode(mode: Mode): Promise<void> {
     this.mode = mode;
-    if (this.status === "none" || this.status === "exited") return;
+    if (this.switching || this.status === "none" || this.status === "exited") return;
     try {
       await setMode(this.sessionId, mode);
     } catch {
@@ -1725,4 +1777,9 @@ function moved<T>(list: T[], is: (item: T) => boolean, to: number): T[] {
   const rest = list.filter((_, i) => i !== at);
   rest.splice(Math.min(to, rest.length), 0, list[at]);
   return rest;
+}
+
+/** The quiet line that marks where a chat moved to another agent. */
+function switchNote(agent: AgentId, model: string | null): string {
+  return model ? `→ ${agentLabel(agent)} · ${modelName(agent, model)}` : `→ ${agentLabel(agent)}`;
 }

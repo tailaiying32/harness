@@ -235,7 +235,8 @@ async fn check_setup(state: State<'_, AppState>) -> Result<SetupInfo, String> {
 async fn send_message(
     state: State<'_, AppState>,
     session_id: String,
-    // The agent a new chat runs on; a saved chat keeps its own.
+    // The agent the chat runs on; a saved chat on another agent is handed
+    // over to this one first (`switch_agent`).
     agent: Option<String>,
     project_path: String,
     mode: Option<String>,

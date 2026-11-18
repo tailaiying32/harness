@@ -914,6 +914,17 @@ impl Store {
         self.update("agent_session_id", session_id, agent_session_id)
     }
 
+    /// Forgets the agent's session, so the next start is a fresh one: the
+    /// chat moved to another agent.
+    pub fn clear_agent_session_id(&self, session_id: &str) -> Result<(), String> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE sessions SET agent_session_id = NULL WHERE id = ?1", [session_id])
+            .map(|_| ())
+            .map_err(err)
+    }
+
     pub fn set_mode(&self, session_id: &str, mode: &str) -> Result<(), String> {
         self.update("mode", session_id, mode)
     }
@@ -1003,8 +1014,14 @@ impl Store {
             .map_err(err)?
             .collect::<Result<_, _>>()
             .map_err(err)?;
+        // A whole ID names its chat, this one included.
+        if let Some(at) = found.iter().position(|s| s.id == id) {
+            return Ok(found.remove(at));
+        }
+        // This chat itself, when the start of its ID matches nothing else: an
+        // agent that took the chat over rereads it (see `handoff_note`).
         if found.len() == 1 && found[0].id == asking {
-            return Err("That is this chat.".into());
+            return Ok(found.remove(0));
         }
         found.retain(|s| s.id != asking);
         match found.len() {
@@ -1338,6 +1355,8 @@ mod tests {
             store.session("a").unwrap().unwrap().agent_session_id.as_deref(),
             Some("agent-1")
         );
+        store.clear_agent_session_id("a").unwrap();
+        assert_eq!(store.session("a").unwrap().unwrap().agent_session_id, None);
         assert_eq!(store.session("nope").unwrap(), None);
     }
 
@@ -1784,7 +1803,8 @@ mod tests {
         assert!(store.find_chat("/p", "abcd", "x").unwrap_err().contains("Give more of the id"));
         // With the asking chat set aside, the start names one chat.
         assert_eq!(store.find_chat("/p", "abcd", "abcd-1").unwrap().title, "Two");
-        assert_eq!(store.find_chat("/p", "ef01", "ef01-3").unwrap_err(), "That is this chat.");
+        assert_eq!(store.find_chat("/p", "ef01", "ef01-3").unwrap().title, "Three");
+        assert_eq!(store.find_chat("/p", "abcd-1", "abcd-1").unwrap().title, "One");
         for missing in ["9999", "7777", "zzzz", "%"] {
             assert_eq!(store.find_chat("/p", missing, "x").unwrap_err(), "No chat with that id in this project.");
         }
