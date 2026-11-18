@@ -80,6 +80,24 @@ export function modeFor(agent: AgentId, mode: string, saved: string): string {
   return agent === CURSOR ? "agent" : saved;
 }
 
+/**
+ * The mode a chat that has started takes when it moves to `agent`: that
+ * agent's own default, nothing carried over. For Claude Code that is the
+ * user's usual mode (`saved`), never plan.
+ */
+export function defaultMode(agent: AgentId, saved: string): string {
+  if (agent === CURSOR) return "agent";
+  return saved && saved !== "plan" && agentModes[CLAUDE].some((m) => m.id === saved) ? saved : "default";
+}
+
+/** A model's name as the agent lists it, for the line that marks a switch. */
+export function modelName(agent: AgentId, value: string): string {
+  const found = loadCachedModels()[agent]?.find((m) => m.value === value);
+  if (found) return found.name;
+  if (value === "default") return agent === CURSOR ? "Auto" : "default";
+  return value;
+}
+
 // Which of Cursor's models the menu shows: the user's pick, made in Settings.
 // Cursor offers dozens, and its names don't say which are current. The first
 // pick is Auto alone; a model Cursor adds later is shown as it appears.

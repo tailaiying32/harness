@@ -2508,6 +2508,49 @@ tab that the user can watch and type into (a dev server, a sign-in prompt,
   call opened nothing.
 - Not covered: typing into existing tabs; Windows untried.
 
+### Switching agents in one chat (built 2026-11-17)
+
+Any installed agent's model can be picked in the model picker at any point
+in a chat. The next message goes to that agent, which starts fresh and
+rereads the chat. Uses: plan with a big model and build with a small one,
+or carry on when one agent's usage runs out.
+
+- **One-way handoff.** Only the new agent's context matters. The old
+  agent's session is left behind, never synced or resumed; switching back is
+  a fresh handoff like any other.
+- **The handoff is a reread.** No note from the old agent, so it works when
+  that agent is out of usage. The new agent's first message carries a
+  pending note (`handoff_note` in `sessions.rs`) telling it to read this
+  whole chat with the `harness_chats` read tool by the chat's full ID, every
+  part. The cost of the reread is the user's to accept by switching.
+- **Between turns only.** While a turn runs, other agents' models are greyed
+  out (`locked` in `Composer.svelte`); `switch_agent` also refuses a busy
+  chat. Mid-turn switching may come later.
+- **The new agent's own defaults.** Mode is the agent's default
+  (`defaultMode` in `models.ts`: Cursor "agent", Claude Code the user's usual
+  mode, never plan); effort is "default". Nothing is carried over.
+- **The flow.** Picking another agent in a started chat only changes the
+  window's `chat.agent`; `chat.ranOn` keeps the saved agent, and
+  `chat.switching` is true while they differ. Mode, model and effort picks
+  then aren't sent to the old process. Picking the original agent back
+  restores what the chat had (`held`). On send, `send_inner` sees the saved
+  agent differ from the one sent and calls `switch_agent`: stop the old
+  process and wait for it, `set_agent`, `clear_agent_session_id` (so the new
+  one doesn't resume), effort to default, add the handoff note, record
+  `AgentSwitched { from, to, model }`. The send then starts the new agent as
+  usual.
+- **The line.** `AgentSwitched` is saved and shows as a quiet note,
+  "→ Cursor · Composer 2.5", above the message that went to the new agent.
+  The window draws it as it sends (and takes it back if the send fails); a
+  replay draws it from the event. The chat lookup read shows it as "(the
+  chat moved from X to Y here)" at the top of that turn.
+- **Reading this chat.** `find_chat` now returns the asking chat for its
+  whole ID, or for a prefix that matches nothing else; `search` and `recent`
+  still leave it out.
+- Not covered: switching mid-turn; side chats are unchanged; the old agent's
+  background commands end at the switch (as when a chat closes). Codex has
+  no adapter yet, so it joins once it has one.
+
 ### If the approval channel breaks
 
 `--permission-prompt-tool stdio` and the `control_request` /
