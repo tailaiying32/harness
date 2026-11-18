@@ -11,6 +11,8 @@
   import Markdown from "./Markdown.svelte";
   import { ChatComments } from "./chatComments";
   import WorkRun from "./WorkRun.svelte";
+  import FindBar from "../FindBar.svelte";
+  import { domSearcher } from "../find";
 
   let { chat, problem }: { chat: Chat; problem: string | null } = $props();
 
@@ -23,6 +25,7 @@
   const steer = (id: string, title: string) => void chat.send(`Use the chat “${title}” (id ${id}) instead.`, []);
 
   let scroller: HTMLElement;
+  let view = $state<HTMLElement>();
   let content: HTMLElement;
   let pinned = true;
 
@@ -77,7 +80,7 @@
 
   // While the user stays at the bottom of a growing chat, let the top go again.
   $effect(() => {
-    if (pinned && groups.length - hidden > PAGE * 2) hidden = groups.length - PAGE;
+    if (pinned && !finding && groups.length - hidden > PAGE * 2) hidden = groups.length - PAGE;
   });
 
   /** Draws one more page above, keeping what's on screen where it is. */
@@ -90,6 +93,16 @@
     await tick();
     scroller.scrollTop += scroller.scrollHeight - before;
     drawingEarlier = false;
+  }
+  /** Find (Cmd+F) looks through the whole chat, so all of it is drawn first. */
+  let finding = $state(false);
+  async function drawAll() {
+    finding = true;
+    if (hidden === 0) return;
+    const before = scroller.scrollHeight;
+    hidden = 0;
+    await tick();
+    scroller.scrollTop += scroller.scrollHeight - before;
   }
   const working = $derived(chat.busy && chat.status !== "waiting_approval");
   /** Show a line of its own when Claude is working but nothing on screen says so. */
@@ -183,6 +196,8 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+<div class="chat-view" bind:this={view}>
+<FindBar root={view} main={!chat.owner} searcher={() => domSearcher(scroller)} onopen={drawAll} onclose={() => (finding = false)} />
 <div class="scroll" bind:this={scroller} onscroll={onScroll} onclick={onClick}>
   <div class="content chat-comments" bind:this={content}>
     {#if problem}
@@ -305,8 +320,16 @@
     {/if}
   </div>
 </div>
+</div>
 
 <style>
+  .chat-view {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
   .scroll {
     flex: 1;
     min-height: 0;

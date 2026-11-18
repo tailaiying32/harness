@@ -27,6 +27,8 @@
   import { planOf } from "../tools";
   import { inOrder } from "../chat/comments";
   import CommentDock from "../chat/CommentDock.svelte";
+  import FindBar from "../FindBar.svelte";
+  import { domSearcher } from "../find";
 
   // `covered`: something is drawn over the panel (settings, an image), so the
   // browser's page, which would sit on top of it, is put out of sight.
@@ -101,6 +103,8 @@
 
   /** The editor on show, for jumping to a comment from the list. */
   let editor = $state<LiveMarkdown>();
+  /** The tab's text, for finding in a plan that is only shown. */
+  let docBody = $state<HTMLElement>();
   /** The tab's comments not sent yet; the notes take none. */
   const pending = $derived(active === NOTES_TAB ? [] : chat.pendingComments(active));
   /** A doc (not the plan or the notes) with comments waiting to go. */
@@ -140,7 +144,7 @@
   const MIN_CHAT = 360;
   const MIN_PANEL = 280;
   const SNAP = 48;
-  let panel: HTMLElement;
+  let panel = $state<HTMLElement>();
   let share = 0;
   let before = 0;
   /** The chat-and-panel area, kept for the whole drag: the panel itself goes
@@ -177,7 +181,7 @@
 
   function startDrag(e: PointerEvent) {
     e.preventDefault();
-    area = panel.parentElement;
+    area = panel?.parentElement ?? null;
     // The set width, not the measured one: a narrow window shows the panel
     // across the whole window whatever its setting.
     before = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--panel-w")) / 100 || DEFAULT_PANEL_WIDTH;
@@ -309,11 +313,13 @@
 
   <!-- Each tab starts at its top. -->
   {#key active}
+    <!-- Find (Cmd+F) in the tab; a new tab starts with it closed. -->
+    <FindBar root={panel} searcher={() => (editor ? editor.searcher() : docBody ? domSearcher(docBody) : null)} />
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="body" onclick={onClick}>
+    <div class="body" bind:this={docBody} onclick={onClick}>
       {#if active === NOTES_TAB}
         {#if chat.notes !== null}
-          <LiveMarkdown text={chat.notes} onchange={(t) => typeIn(NOTES_TAB, t)} ondone={flush} placeholder="notes" autofocus={chat.notes === ""} />
+          <LiveMarkdown bind:this={editor} text={chat.notes} onchange={(t) => typeIn(NOTES_TAB, t)} ondone={flush} placeholder="notes" autofocus={chat.notes === ""} />
         {/if}
       {:else if active === PLAN_TAB && plan && chat.planPending}
         <!-- A waiting plan can be edited; Approve sends the edit. -->
