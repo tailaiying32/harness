@@ -135,9 +135,10 @@
   let showSettings = $state(false);
 
   // Cmd+, (Ctrl+, on Windows) opens settings, as in most apps; Escape closes
-  // them. Cmd+N starts a new chat. Cmd+B shows or hides the sidebar. Escape
-  // also ends a full screen panel, unless it belongs to a box still being
-  // typed in (the docs editor lets go on Escape, so one press ends both).
+  // them. Cmd+N starts a new chat. Cmd+S shows or hides the sidebar (Cmd+B
+  // is bold in the text boxes). Escape also ends a full screen panel, unless
+  // it belongs to a box still being typed in (the docs editor lets go on
+  // Escape, so one press ends both).
   function onKey(e: KeyboardEvent) {
     // In a terminal, Ctrl keys belong to the shell (Ctrl+C, Ctrl+N, Ctrl+R...).
     if (terminals.focused() && e.ctrlKey && !e.metaKey) return;
@@ -153,7 +154,7 @@
       e.preventDefault();
       showSettings = false;
       app.newChat();
-    } else if (e.key.toLowerCase() === "b" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+    } else if (e.key.toLowerCase() === "s" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       toggleSidebar();
     } else if (e.key === "Escape" && showSettings) {
@@ -167,7 +168,7 @@
   terminals.keys = (e) =>
     e.metaKey &&
     !e.ctrlKey &&
-    (["t", "n", ",", "w"].includes(e.key.toLowerCase()) ||
+    (["t", "n", ",", "w", "s"].includes(e.key.toLowerCase()) ||
       (e.shiftKey && (e.code === "BracketLeft" || e.code === "BracketRight")));
   // Opening a chat, from the sidebar or the trash, puts settings away.
   let shownChat = app.current.sessionId;
@@ -595,7 +596,7 @@
   {/if}
   <div class="strip">
     <KeepAwake {app} short={sidebarHidden} />
-    <button class="side-toggle" title={sidebarHidden ? "Show the sidebar (⌘B)" : "Hide the sidebar (⌘B)"} onclick={toggleSidebar}>
+    <button class="side-toggle" title={sidebarHidden ? "Show the sidebar (⌘S)" : "Hide the sidebar (⌘S)"} onclick={toggleSidebar}>
       <BarIcon name="sidebar" />
     </button>
   </div>

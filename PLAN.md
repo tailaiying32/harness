@@ -1052,7 +1052,8 @@ https://www.magicpatterns.com/os/tWmrW2q43Q7sWofaHnFJVj?file=2oZgfpBgi1cedNPY3NJ
   The whole sidebar hides with the sidebar icon (in the top strip: at the
   sidebar's right edge while it shows; at the top bar's start once hidden,
   with a clear gap after a Mac's window buttons, since right beside them it
-  read as a fourth one, 2026-11-15) or Cmd+B / Ctrl+B; saved
+  read as a fourth one, 2026-11-15) or Cmd+S / Ctrl+S (was Cmd+B until
+  2026-11-17, which became bold in the text boxes); saved
   across quits (prefs `sidebarHidden`). Projects keep a fixed order, set by
   dragging a folder name (a 4px move starts the drag, so a click still
   folds); a new project goes on top; saved as prefs `projectOrder`, by path.
@@ -1598,8 +1599,36 @@ then). A shown link is followed on click, not edited. Escape leaves the
 editor. Empty notes get the cursor. Lists edit like the message box, through the same
 `editing.ts` functions: Enter in a list starts the next item (an empty item
 steps back a level or ends the list), Tab and Shift+Tab indent, and numbered
-lists stay in order. Tested with key presses in the editor. Saved 400 ms after typing stops and when editing
-ends (`write_notes`), read lazily the first time the tab shows (`read_notes`).
+lists stay in order. Tested with key presses in the editor. Format keys
+(2026-11-17, `emphasis` and `link` in `editing.ts`): Cmd+B bold (`**`), Cmd+I
+italic (`*`), Cmd+K link. They act on the selection (spaces at its ends left
+out) or the word at the cursor; with no word, an empty pair goes in with the
+cursor between. Pressed again they take the marks off; `***` counts as both.
+Cmd+K puts the cursor where the address goes, puts a selected address in the
+address instead (a cursor in an address takes all of it), and inside a link
+turns it back to its text. Pasting a web address over selected text on one
+line makes it a link to that address (`pasteLink`). The message box has the
+same three keys and the paste (Cmd only on a Mac, where Ctrl+B/K move the
+cursor). The sidebar key moved to Cmd+S to free Cmd+B. No underline
+(markdown has none; the user's choice), no strike or headings. Saved 400 ms
+after typing stops and when editing ends (`write_notes`), read lazily the
+first time the tab shows (`read_notes`).
+- **Pairs and stepping over** (editor only, `closers` in `liveMarkdown.ts`):
+  typing `(`, `[`, `{` or a backtick puts in the closing one, but only before
+  a space, the line's end or closing punctuation, and a backtick not after a
+  word or a backtick (so ``` still makes a fence). Not quotes (apostrophes).
+  A `*` waits for the next key, since it may be a list item (`starAt`): a
+  word's first character right after a typed `*`, `**` or `***` puts the
+  same stars in after it (`*h|*`); a space, a cursor move or any other edit
+  leaves the stars alone. Only for stars at the line's start or after a
+  space or opening punctuation (not `2*3`), and not in code (the user's
+  ask, 2026-11-17). Typing a closing mark the editor put in itself (from a
+  pair, or from Cmd+B/I/K: `**`, `](` and `)`) steps over it; Backspace
+  between such a mark and its opener removes both. Marks the user typed are
+  never stepped over; the editor forgets its marks once the cursor leaves
+  their line. Written by hand rather than with `@codemirror/autocomplete`'s
+  `closeBrackets`, which can't track the Cmd+B/I/K marks and adds a package.
+  Tested with key presses (typing through CodeMirror's input hook).
 - Stored in the chat's own folder in the home folder,
   `~/.harness/projects/<key>/chats/<chat id>/notes.md` (`notes.rs`; see "The
   home folder"), never in the repo; written to a side file then moved into
