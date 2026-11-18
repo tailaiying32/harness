@@ -13,6 +13,8 @@
   import { MAC } from "../state/tabKeys";
   import { imageType } from "./files";
   import { attach, imageFiles } from "./images";
+  import CommentDock from "./CommentDock.svelte";
+  import { chatInOrder } from "./comments";
   import SuggestMenu from "./SuggestMenu.svelte";
   import { commandsFor, fetchCommands, findCommand, matchCommands, type Command } from "../commands.svelte";
 
@@ -537,11 +539,15 @@
       open = "model";
       return;
     }
-    if (!text.trim() || !ready) return;
+    // Comments on the latest answer go with the message, or alone. A command
+    // goes as typed and leaves them waiting.
+    const command = text.trim().startsWith("/");
+    const comments = !command && chat.chatComments.length > 0;
+    if ((!text.trim() && !comments) || !ready) return;
     chat.draft = "";
     await tick();
     grow();
-    void chat.send(text);
+    void (command ? chat.send(text) : chat.sendWithComments(text));
   }
 
   /** Makes one replacement in the box the way typing would, so undo still works. */
@@ -601,6 +607,14 @@
 
 <div class="composer" bind:this={frame}>
   <div class="inner">
+    <!-- Comments on the latest answer, waiting to go with the next message. -->
+    {#if !chat.owner && chat.chatComments.length}
+      <CommentDock
+        items={chatInOrder(chat.chatComments)}
+        onjump={(id) => chat.jumpToChatComment?.(id)}
+        ondrop={(id) => chat.removeChatComment(id)}
+      />
+    {/if}
     <div class="prompt">
       <span class="marker">&gt;</span>
       <div class="field">

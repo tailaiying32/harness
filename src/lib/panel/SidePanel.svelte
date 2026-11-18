@@ -25,7 +25,8 @@
   import { folderOf } from "../paths";
   import { applyPanelWidth, DEFAULT_PANEL_WIDTH, loadPrefs, savePrefs } from "../themes";
   import { planOf } from "../tools";
-  import { inOrder, type DocComment } from "../chat/comments";
+  import { inOrder } from "../chat/comments";
+  import CommentDock from "../chat/CommentDock.svelte";
 
   // `covered`: something is drawn over the panel (settings, an image), so the
   // browser's page, which would sit on top of it, is put out of sight.
@@ -100,28 +101,17 @@
 
   /** The editor on show, for jumping to a comment from the list. */
   let editor = $state<LiveMarkdown>();
-  /** The list of every comment is unfolded under its line in the foot. Kept
-      open or folded across tabs, chats and restarts; folded to begin with. */
-  let listOpen = $state(loadPrefs().commentListOpen);
-
-  function toggleList() {
-    listOpen = !listOpen;
-    savePrefs({ commentListOpen: listOpen });
-  }
-
   /** The tab's comments not sent yet; the notes take none. */
   const pending = $derived(active === NOTES_TAB ? [] : chat.pendingComments(active));
   /** A doc (not the plan or the notes) with comments waiting to go. */
   const docPending = $derived(active !== PLAN_TAB && pending.length > 0);
 
-  const commentCount = (n: number) => (n === 1 ? "1 comment" : `${n} comments`);
-
-  function jump(c: DocComment) {
-    editor?.focusComment(c.id);
+  function jump(id: string) {
+    editor?.focusComment(id);
   }
 
-  function dropComment(c: DocComment) {
-    chat.setComments(active, chat.commentsFor(active).filter((x) => x.id !== c.id));
+  function dropComment(id: string) {
+    chat.setComments(active, chat.commentsFor(active).filter((x) => x.id !== id));
   }
 
   /** Typing is saved first, so the agent reads the doc the comments are on. */
@@ -264,24 +254,11 @@
 <!-- The tab's comments, at the top of its foot: a line with their count,
      which unfolds the list. Either part of a comment jumps to its text. -->
 {#snippet commentDock()}
-  <div class="dock">
-    <button class="fold" onclick={toggleList}>
-      {commentCount(pending.length)} <span class="arrow">{listOpen ? "▾" : "▸"}</span>
-    </button>
-    {#if listOpen}
-      <div class="comment-list">
-        {#each inOrder(pending) as c (c.id)}
-          <div class="comment-row">
-            <button class="jump quote" disabled={c.from < 0} onclick={() => jump(c)}>“{c.quote.replace(/\s+/g, " ").trim()}”</button>
-            <div class="said-row">
-              <button class="jump said" disabled={c.from < 0} onclick={() => jump(c)}>{c.text}</button>
-              <button class="drop" title="Remove" onclick={() => dropComment(c)}>×</button>
-            </div>
-          </div>
-        {/each}
-      </div>
-    {/if}
-  </div>
+  <CommentDock
+    items={inOrder(pending).map((c) => ({ id: c.id, quote: c.quote, text: c.text, gone: c.from < 0 }))}
+    onjump={jump}
+    ondrop={dropComment}
+  />
 {/snippet}
 
 <aside class="panel" bind:this={panel}>
@@ -480,69 +457,6 @@
     margin: 0 var(--pad-x) var(--foot-y);
     padding-top: var(--gap);
     border-top: 1px solid var(--line);
-  }
-  /* Every comment in one floating window over the doc's foot, styled like
-     the editor's comment windows. */
-  /* The comments, docked at the top of the foot: one line ("2 comments")
-     until opened, then every comment under it. Part of the panel, not a
-     popup, so the doc gets shorter and nothing is covered. */
-  .dock {
-    /* Set apart from the note and the buttons under it by space, not a rule. */
-    margin-bottom: calc(var(--gap) * 1.5);
-  }
-  .fold {
-    color: var(--dim);
-  }
-  .fold:hover {
-    color: var(--fg);
-  }
-  .fold .arrow {
-    color: var(--faint);
-  }
-  .comment-list {
-    margin-top: var(--foot-gap);
-    max-height: 30vh;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: calc(var(--gap) * 0.6);
-  }
-  .comment-row {
-    display: flex;
-    flex-direction: column;
-  }
-  .jump {
-    min-width: 0;
-    text-align: left;
-  }
-  .quote {
-    color: var(--faint);
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-  .quote:disabled {
-    text-decoration: line-through;
-  }
-  /* The comment, with its × on its first line. */
-  .said-row {
-    display: flex;
-    gap: 1ch;
-    align-items: flex-start;
-  }
-  .said {
-    flex: 1;
-    color: var(--fg);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-  .said:not(:disabled):hover,
-  .drop:hover {
-    color: var(--bright);
-  }
-  .drop {
-    flex-shrink: 0;
-    color: var(--faint);
   }
   .feedback {
     display: flex;

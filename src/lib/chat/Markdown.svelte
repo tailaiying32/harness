@@ -1,11 +1,13 @@
 <script lang="ts">
-  // Formatted text. Re-renders only when its own text changes, so finished
-  // blocks render once and only the block being streamed is redone.
-  import { renderMarkdown } from "../markdown";
+  // Formatted text, drawn block by block: while text streams in, only the
+  // last block changes, so the others are drawn once and left alone (comments
+  // on them stay put; see chatComments.ts). Each block is one element, a
+  // direct child of `.md`, as when the text was drawn whole.
+  import { renderBlocks } from "../markdown";
 
   let { text }: { text: string } = $props();
-  const html = $derived(renderMarkdown(text));
+  const blocks = $derived(renderBlocks(text));
 </script>
 
 <!-- Safe: see the note at the top of markdown.ts. -->
-<div class="md">{@html html}</div>
+<div class="md">{#each blocks as html, i (i)}{@html html}{/each}</div>

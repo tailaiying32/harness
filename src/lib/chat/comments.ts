@@ -68,3 +68,38 @@ export function sameComments(a: DocComment[], b: DocComment[]): boolean {
     return c.id === d.id && c.from === d.from && c.to === d.to && c.text === d.text && c.sentWith === d.sentWith;
   });
 }
+
+/**
+ * A comment on the agent's latest answer in the chat. Like a doc's, it lives
+ * only until sent, then goes; nothing keeps it. `from` and `to` are offsets
+ * in the answer piece's drawn text (its `.md` element's text), which never
+ * changes once that piece is finished, the only kind that takes comments.
+ */
+export type ChatComment = {
+  id: string;
+  /** The text item (one piece of the answer) it is on. */
+  itemId: number;
+  from: number;
+  to: number;
+  quote: string;
+  text: string;
+};
+
+/** Said with every message that carries chat comments. */
+export const CHAT_GUIDANCE =
+  "Each comment is about the quoted part of your last answer. Respond to each, acting on any that ask for a change; if one is unclear, ask instead of guessing.";
+
+/** Chat comments in the order they appear in the answer: by piece, then place. */
+export function chatInOrder(comments: ChatComment[]): ChatComment[] {
+  return [...comments].sort((a, b) => a.itemId - b.itemId || a.from - b.from);
+}
+
+/** The message that carries chat comments: what was typed, then each quote with its comment. */
+export function withChatComments(typed: string, comments: ChatComment[]): string {
+  if (!comments.length) return typed;
+  const list = chatInOrder(comments)
+    .map((c, i) => `${i + 1}. On "${quoted(c.quote)}": ${c.text.trim()}`)
+    .join("\n");
+  const block = `Comments on your last answer:\n\n${list}`;
+  return typed.trim() ? `${typed.trim()}\n\n${block}` : block;
+}
