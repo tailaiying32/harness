@@ -334,4 +334,10 @@ pub trait AgentAdapter: Send + Sync {
     /// Delete what the agent saved for a session, so it can't be resumed or
     /// listed. Used when a side chat ends. Failures are ignored.
     fn forget_session(&self, agent_session_id: &str);
+
+    /// Whether the agent still has a session saved, so it can be resumed.
+    /// Used before a side chat resumes its copy. Agents that can't tell say yes.
+    fn has_session(&self, _agent_session_id: &str) -> bool {
+        true
+    }
 }

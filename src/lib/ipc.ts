@@ -278,6 +278,8 @@ export const sideSend = (
   text: string,
   messageId: string,
 ) => invoke<void>("side_send", { sideId, projectPath, model, effort, text, messageId });
+/** `sideSend`'s error when the side chat's saved copy was deleted; the core has forgotten it (side_chat.rs GONE). */
+export const SIDE_GONE = "side chat gone";
 export const sideInterrupt = (sideId: string) => invoke<void>("side_interrupt", { sideId });
 export const sideWithdrawMessage = (sideId: string, messageId: string) =>
   invoke<void>("side_withdraw_message", { sideId, messageId });

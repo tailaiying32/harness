@@ -605,37 +605,42 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     fn forget_session(&self, agent_session_id: &str) {
-        forget_saved_session(agent_session_id);
+        for file in saved_session_files(agent_session_id) {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
+    fn has_session(&self, agent_session_id: &str) -> bool {
+        !saved_session_files(agent_session_id).is_empty()
     }
 }
 
 /// Claude Code keeps each session as `~/.claude/projects/<folder>/<id>.jsonl`
 /// (`CLAUDE_CONFIG_DIR` replaces `~/.claude`). The folder name is derived from
 /// the working folder; rather than copy that rule, every folder is searched
-/// for the exact file name.
-fn forget_saved_session(agent_session_id: &str) {
+/// for the exact file name. These are a session's files.
+fn saved_session_files(agent_session_id: &str) -> Vec<std::path::PathBuf> {
     // Only a plain ID; never anything that could reach outside the folder.
     if agent_session_id.is_empty()
         || !agent_session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
     {
-        return;
+        return Vec::new();
     }
     let base = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(std::path::PathBuf::from)
         .or_else(|| crate::home::user_home().map(|home| home.join(".claude")));
     let Some(projects) = base.map(|b| b.join("projects")) else {
-        return;
+        return Vec::new();
     };
     let Ok(folders) = std::fs::read_dir(projects) else {
-        return;
+        return Vec::new();
     };
     let name = format!("{agent_session_id}.jsonl");
-    for folder in folders.flatten() {
-        let file = folder.path().join(&name);
-        if file.is_file() {
-            let _ = std::fs::remove_file(file);
-        }
-    }
+    folders
+        .flatten()
+        .map(|folder| folder.path().join(&name))
+        .filter(|file| file.is_file())
+        .collect()
 }
 
 /// How long `claude auth login` may wait for the user to finish in the browser.
@@ -2609,9 +2614,14 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
         std::fs::write(folder.join("main-1.jsonl"), "x").unwrap();
         // SAFETY: tests touching CLAUDE_CONFIG_DIR are confined to this one.
         unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", &dir) };
-        forget_saved_session("../main-1");
-        forget_saved_session("side-1");
+        let claude = ClaudeCodeAdapter;
+        assert!(claude.has_session("side-1"));
+        assert!(!claude.has_session("../main-1"), "only a plain ID");
+        claude.forget_session("../main-1");
+        claude.forget_session("side-1");
+        let gone = !claude.has_session("side-1");
         unsafe { std::env::remove_var("CLAUDE_CONFIG_DIR") };
+        assert!(gone);
         assert!(!folder.join("side-1.jsonl").exists());
         assert!(folder.join("main-1.jsonl").exists());
         let _ = std::fs::remove_dir_all(dir);
