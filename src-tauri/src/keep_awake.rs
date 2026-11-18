@@ -7,8 +7,9 @@
 //!   input ends it. Input before that, like the click that started it, doesn't.
 //! - the work is done: no chat has worked for `QUIET`, once one has worked
 //!   since it started. A chat waiting for the user doesn't count as working
-//!   (staying awake can't move it on), nor do background commands (a dev
-//!   server or a leftover `caffeinate` would hold it forever); subagents do.
+//!   (staying awake can't move it on). Background work does: commands like a
+//!   test run, and subagents. A command that never ends (a dev server) holds
+//!   it until its end time, which is the safety net.
 //! - its end time: `LIMIT` after starting, or a clock time for overnight,
 //!   which also needs the charger and ends when it is unplugged.
 //!
@@ -138,7 +139,7 @@ fn decide(a: &mut Active, r: &Reading, cfg: &Config) -> bool {
     false
 }
 
-/// What each chat is doing: its state and how many subagents it runs.
+/// What each chat is doing: its state and how much background work it runs.
 #[derive(Default)]
 struct Chats(HashMap<String, (SessionState, u32)>);
 
@@ -156,8 +157,8 @@ impl Chats {
             AgentEvent::Status { state } => {
                 self.0.entry(id.clone()).or_insert((SessionState::Idle, 0)).0 = state.clone();
             }
-            AgentEvent::BackgroundWork { agents, .. } => {
-                self.0.entry(id.clone()).or_insert((SessionState::Idle, 0)).1 = *agents;
+            AgentEvent::BackgroundWork { running, .. } => {
+                self.0.entry(id.clone()).or_insert((SessionState::Idle, 0)).1 = *running;
             }
             _ => {}
         }
@@ -166,7 +167,7 @@ impl Chats {
     fn any_working(&self) -> bool {
         self.0
             .values()
-            .any(|(state, agents)| matches!(state, SessionState::Starting | SessionState::Working) || *agents > 0)
+            .any(|(state, running)| matches!(state, SessionState::Starting | SessionState::Working) || *running > 0)
     }
 }
 
@@ -663,13 +664,17 @@ mod tests {
         // Waiting for the user isn't working.
         chats.observe(&envelope("a", status(SessionState::WaitingApproval)));
         assert!(!chats.any_working());
-        // Background commands alone aren't either; subagents are.
+        // Background work is: commands and subagents alike.
         chats.observe(&envelope("a", status(SessionState::Idle)));
-        chats.observe(&envelope("a", background(2, 0)));
         assert!(!chats.any_working());
+        chats.observe(&envelope("a", background(2, 0)));
+        assert!(chats.any_working());
         chats.observe(&envelope("a", background(3, 1)));
         assert!(chats.any_working());
-        // A process that exits is done, subagents and all.
+        chats.observe(&envelope("a", background(0, 0)));
+        assert!(!chats.any_working());
+        // A process that exits is done, background work and all.
+        chats.observe(&envelope("a", background(1, 0)));
         chats.observe(&envelope("a", status(SessionState::Exited)));
         assert!(!chats.any_working());
         // Side chats don't count.
