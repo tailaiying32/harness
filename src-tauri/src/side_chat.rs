@@ -6,7 +6,10 @@
 //! closes after the same idle time as a chat's and resumes on the next
 //! question, so a forgotten side chat costs no memory. Ending it deletes the
 //! agent's saved copy too, and copies a crash left behind are deleted at the
-//! next start.
+//! next start. Each running Harness keeps its own list of copies, so a second
+//! one (a test build on the same data folder) never deletes the first's. If a
+//! side chat's copy is gone anyway, asking it again fails with [`GONE`] and
+//! the window moves the question to a new side chat.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -30,6 +33,12 @@ const TOOL_RESULT_MAX_CHARS: usize = 20_000;
 const FORGET_AFTER: Duration = Duration::from_secs(7);
 /// What separates a chat's id from its side chat's tab in a side chat's id.
 const MARK: &str = "#side-";
+/// The error when a side chat's saved copy was deleted while it sat idle; the
+/// side chat is forgotten. The window knows this text (chat.svelte.ts).
+pub const GONE: &str = "side chat gone";
+/// The start of each running Harness's list of copies: `side_copies-<pid>.json`.
+/// An older build kept one shared `side_copies.json`.
+const COPIES: &str = "side_copies";
 
 /// The chat a side chat belongs to, from the side chat's id.
 pub fn chat_of(side_id: &str) -> Result<&str, String> {
@@ -68,6 +77,7 @@ struct Inner {
     /// The agent's copies not yet deleted, kept on disk so a crash can't
     /// leave them behind for good.
     copies: Mutex<Vec<String>>,
+    /// This process's list (`side_copies-<pid>.json`).
     copies_file: PathBuf,
     /// Fixed idle time for tests. None = the chats' setting.
     idle: Option<Option<Duration>>,
@@ -78,9 +88,11 @@ struct Inner {
 pub struct SideChats(Arc<Inner>);
 
 impl SideChats {
-    /// `copies_file` lists the agent's copies still to delete; any listed
-    /// there from an earlier run are deleted now.
-    pub fn new(adapter: Arc<dyn AgentAdapter>, store: Arc<Store>, out: Out, home: Home, copies_file: PathBuf) -> Self {
+    /// `dir` holds each running Harness's list of the agent's copies still to
+    /// delete. Lists left by a Harness that is no longer running are deleted
+    /// now, with their copies; a running one's are left alone.
+    pub fn new(adapter: Arc<dyn AgentAdapter>, store: Arc<Store>, out: Out, home: Home, dir: &Path) -> Self {
+        let pid = std::process::id();
         let chats = Self(Arc::new(Inner {
             adapter,
             notes: Notes::for_store(home, store.clone()),
@@ -90,11 +102,11 @@ impl SideChats {
             ended: Mutex::default(),
             next_run: AtomicU64::new(1),
             copies: Mutex::default(),
-            copies_file,
+            copies_file: dir.join(format!("{COPIES}-{pid}.json")),
             idle: None,
             forget_after: FORGET_AFTER,
         }));
-        chats.sweep();
+        chats.sweep(dir, pid);
         chats
     }
 
@@ -141,6 +153,20 @@ impl SideChats {
                     .ok()
                     .flatten()
                     .and_then(|s| s.agent_session_id);
+                // Its copy was deleted while it sat idle (by hand, or by
+                // something outside Harness): it can't go on. Forgotten here;
+                // the window starts a new side chat with the question.
+                if let Some(own) = &own_id {
+                    if !self.0.adapter.has_session(own) {
+                        let mut sides = self.0.sides.lock().unwrap();
+                        if sides.get(side_id).is_some_and(|s| s.run == run) {
+                            sides.remove(side_id);
+                        }
+                        drop(sides);
+                        self.forget(own);
+                        return Err(GONE.to_string());
+                    }
+                }
                 let resume_id = own_id.or_else(|| fork_from.clone());
                 // Not under the lock: starting reports through the sink, which takes it.
                 let agent: Arc<dyn RunningAgent> = Arc::from(self.0.adapter.spawn(
@@ -289,16 +315,39 @@ impl SideChats {
         }
     }
 
-    /// Deletes the copies an earlier run left behind.
-    fn sweep(&self) {
-        let left: Vec<String> = std::fs::read_to_string(&self.0.copies_file)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-        for id in left {
-            self.0.adapter.forget_session(&id);
+    /// Deletes the copies listed by a Harness that is no longer running (a
+    /// list under this process's own id is an earlier one's, since this one
+    /// has listed nothing yet), and those lists. A running Harness's copies
+    /// may still be in use, so they stay.
+    fn sweep(&self, dir: &Path, pid: u32) {
+        let Ok(files) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for file in files.flatten() {
+            let name = file.file_name().to_string_lossy().into_owned();
+            let Some(rest) = name.strip_prefix(COPIES).and_then(|r| r.strip_suffix(".json")) else {
+                continue;
+            };
+            let owner = match rest {
+                // The older shared list.
+                "" => None,
+                _ => match rest.strip_prefix('-').and_then(|p| p.parse::<u32>().ok()) {
+                    Some(owner) => Some(owner),
+                    None => continue,
+                },
+            };
+            if owner.is_some_and(|owner| owner != pid && running(owner)) {
+                continue;
+            }
+            let left: Vec<String> = std::fs::read_to_string(file.path())
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default();
+            for id in left {
+                self.0.adapter.forget_session(&id);
+            }
+            let _ = std::fs::remove_file(file.path());
         }
-        self.save_copies(&[]);
     }
 
     fn remember_copy(&self, id: &str) {
@@ -405,6 +454,23 @@ impl SideChats {
     }
 }
 
+/// Whether a process with this id is running.
+#[cfg(unix)]
+fn running(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // Signal 0 sends nothing; it only checks. EPERM: running, but not ours.
+    let sent = unsafe { libc::kill(pid, 0) } == 0;
+    sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Not checked elsewhere: an earlier list is taken to be a dead one's.
+#[cfg(not(unix))]
+fn running(_: u32) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +484,8 @@ mod tests {
         sinks: Mutex<Vec<EventSink>>,
         told: Arc<Mutex<Vec<String>>>,
         forgotten: Mutex<Vec<String>>,
+        /// Sessions deleted behind Harness's back.
+        missing: Mutex<Vec<String>>,
     }
 
     struct FakeAgent {
@@ -492,6 +560,9 @@ mod tests {
         fn forget_session(&self, id: &str) {
             self.forgotten.lock().unwrap().push(id.to_string());
         }
+        fn has_session(&self, id: &str) -> bool {
+            !self.missing.lock().unwrap().iter().any(|m| m == id) && !self.forgotten.lock().unwrap().iter().any(|f| f == id)
+        }
     }
 
     struct Rig {
@@ -517,7 +588,7 @@ mod tests {
             store,
             out,
             Home::new(dir.join("home")),
-            dir.join("side_copies.json"),
+            &dir,
         );
         let inner = Arc::get_mut(&mut chats.0).unwrap();
         inner.idle = Some(idle);
@@ -744,17 +815,64 @@ mod tests {
         let rig = rig(None);
         rig.ask("why?");
         rig.answers("side-1");
-        let file = rig.dir.join("side_copies.json");
+        let file = rig.dir.join(format!("side_copies-{}.json", std::process::id()));
         let listed: Vec<String> = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(listed, vec!["side-1".to_string()]);
 
         // The app dies here; the next start reads the list.
         let fake = Arc::new(Fake::default());
         let store = Arc::new(Store::open(&rig.dir).unwrap());
-        let _again = SideChats::new(fake.clone(), store, Arc::new(|_| {}), Home::new(rig.dir.join("home")), file.clone());
+        let _again = SideChats::new(fake.clone(), store, Arc::new(|_| {}), Home::new(rig.dir.join("home")), &rig.dir);
         assert_eq!(*fake.forgotten.lock().unwrap(), vec!["side-1".to_string()]);
-        let listed: Vec<String> = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        assert!(listed.is_empty());
+        assert!(!file.exists());
+    }
+
+    #[tokio::test]
+    async fn a_start_leaves_a_running_harnesss_copies_alone() {
+        let rig = rig(None);
+        // A Harness that has quit (an older build's shared list, and one that
+        // ended), and one still running (pid 1 always is).
+        let ended = {
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            child.wait().unwrap();
+            child.id()
+        };
+        let list = |name: String, ids: &[&str]| {
+            let file = rig.dir.join(name);
+            std::fs::write(&file, serde_json::to_string(ids).unwrap()).unwrap();
+            file
+        };
+        let old = list("side_copies.json".into(), &["old-1"]);
+        let dead = list(format!("side_copies-{ended}.json"), &["dead-1"]);
+        let live = list("side_copies-1.json".into(), &["live-1"]);
+
+        let fake = Arc::new(Fake::default());
+        let store = Arc::new(Store::open(&rig.dir).unwrap());
+        let _again = SideChats::new(fake.clone(), store, Arc::new(|_| {}), Home::new(rig.dir.join("home")), &rig.dir);
+        let mut gone = fake.forgotten.lock().unwrap().clone();
+        gone.sort();
+        assert_eq!(gone, vec!["dead-1".to_string(), "old-1".to_string()]);
+        assert!(!old.exists() && !dead.exists());
+        assert!(live.exists());
+    }
+
+    #[tokio::test]
+    async fn a_side_chat_whose_copy_was_deleted_is_forgotten() {
+        let rig = rig(Some(Duration::from_millis(20)));
+        rig.ask("why?");
+        rig.answers("side-1");
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        // Deleted while it sat idle.
+        rig.fake.missing.lock().unwrap().push("side-1".into());
+        let asked = rig.chats.send("c1#side-a", "claude".into(), Path::new("/work"), None, None, "and then?", "m");
+        assert_eq!(asked, Err(GONE.to_string()));
+        // Nothing resumed; the side chat and its listing are gone.
+        assert_eq!(rig.fake.spawns.lock().unwrap().len(), 1);
+        assert!(rig.chats.0.sides.lock().unwrap().is_empty());
+        assert!(rig.chats.0.copies.lock().unwrap().is_empty());
+        // A new side chat with the same question copies the chat again.
+        rig.ask_in("c1#side-b", "and then?");
+        assert_eq!(rig.fake.spawns.lock().unwrap()[1], (Some("main-1".into()), Some("main-1".into())));
     }
 
     #[tokio::test]
@@ -765,7 +883,7 @@ mod tests {
         rig.chats.end("c1#side-a");
         tokio::time::sleep(Duration::from_millis(50)).await;
         let listed: Vec<String> =
-            serde_json::from_str(&std::fs::read_to_string(rig.dir.join("side_copies.json")).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(rig.chats.0.copies_file.clone()).unwrap()).unwrap();
         assert!(listed.is_empty());
     }
 }

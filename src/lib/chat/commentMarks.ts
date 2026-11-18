@@ -12,7 +12,7 @@
 
 import { EditorSelection, type EditorState, type Extension, Prec, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, EditorView, keymap, repositionTooltips, showTooltip, tooltips, ViewPlugin, type Tooltip, type TooltipView } from "@codemirror/view";
-import { action, commentBox, commentLook, el, HoverIntent, type CommentBox } from "./commentBox";
+import { action, commentBox, commentLook, el, hangSide, HoverIntent, roomFor, type CommentBox } from "./commentBox";
 import type { DocComment } from "./comments";
 
 /** Puts a list from outside in place of the editor's (cleared after a send, say). */
@@ -142,24 +142,32 @@ function commentAt(state: EditorState, at: number): DocComment | null {
 }
 
 /**
- * Where a window `width` wide hangs: under the last screen line of the text.
- * While it is narrower than the text on that line, its right edge sits at
- * the text's end; wider, it starts where the text starts (on a wrapped
- * line: where that line's text starts, past any list marker) and grows
- * right. So the button, the box it turns into and the finished comment all
- * sit in one place, and a box grows left, then right, as it is typed in.
- * A window narrower than the button is placed as if it were the button's
- * width, so the box opens with its left edge exactly where the button's was.
+ * Where window `dom` hangs: under the last screen line of the text, or,
+ * with no room for it there, over the first (see `hangSide`). While it is
+ * narrower than the text on that line, its right edge sits at the text's
+ * end; wider, it starts where the text starts (on a wrapped line: where
+ * that line's text starts, past any list marker) and grows right. So the
+ * button, the box it turns into and the finished comment all sit in one
+ * place, and a box grows left, then right, as it is typed in. A window
+ * narrower than the button is placed as if it were the button's width, so
+ * the box opens with its left edge exactly where the button's was.
+ * The tooltips are strict about their side (below), so the rect given is
+ * where the window goes: its top is the window's top.
  */
-function under(view: EditorView, from: number, to: number, width: number) {
-  const lineStart = view.moveToLineBoundary(EditorSelection.cursor(to, -1), false, true).head;
-  const start = view.coordsAtPos(Math.max(from, lineStart), 1);
-  const end = view.coordsAtPos(to, -1);
+function under(view: EditorView, from: number, to: number, dom: HTMLElement) {
+  const lastStart = view.moveToLineBoundary(EditorSelection.cursor(to, -1), false, true).head;
+  const firstEnd = view.moveToLineBoundary(EditorSelection.cursor(from, 1), true, true).head;
+  const first = view.coordsAtPos(from, 1);
+  const last = view.coordsAtPos(to, -1);
+  if (!first || !last) return { left: 0, right: 0, top: -1e5, bottom: -1e5 };
+  const { above, top } = hangSide(dom, first.top, last.bottom, roomFor(view.dom));
+  const start = above ? first : view.coordsAtPos(Math.max(from, lastStart), 1);
+  const end = above ? view.coordsAtPos(Math.min(to, firstEnd), -1) : last;
   if (!start || !end) return { left: 0, right: 0, top: -1e5, bottom: -1e5 };
   // The button: "+ comment", 1ch of padding each side, and its border.
   const button = view.defaultCharacterWidth * 11 + 2;
-  const left = Math.max(start.left, end.right - Math.max(width, button));
-  return { left, right: left, top: end.top, bottom: end.bottom };
+  const left = Math.max(start.left, end.right - Math.max(dom.offsetWidth, button));
+  return { left, right: left, top, bottom: top };
 }
 
 /** Opens a new comment on the selected text; false if none is selected. */
@@ -177,7 +185,7 @@ function plusButton(view: EditorView): TooltipView {
     dom,
     getCoords() {
       const { from, to } = view.state.selection.main;
-      return under(view, from, to, dom.offsetWidth);
+      return under(view, from, to, dom);
     },
   };
 }
@@ -218,7 +226,7 @@ function inputWindow(view: EditorView, session: Input["create"]): TooltipView {
     dom,
     getCoords() {
       const now = view.state.field(inputField, false);
-      return under(view, now?.from ?? input.from, now?.to ?? input.to, dom.offsetWidth);
+      return under(view, now?.from ?? input.from, now?.to ?? input.to, dom);
     },
     mount() {
       parts.mount();
@@ -269,7 +277,7 @@ function commentWindow(id: string): (view: EditorView) => TooltipView {
         dom,
         getCoords() {
           const c = find();
-          return under(view, c?.from ?? 0, c?.to ?? 0, dom.offsetWidth);
+          return under(view, c?.from ?? 0, c?.to ?? 0, dom);
         },
         mount: parts.mount,
         destroy: parts.destroy,
@@ -283,19 +291,19 @@ function commentWindow(id: string): (view: EditorView) => TooltipView {
 
 const window_ = showTooltip.compute(["selection", commentField, inputField, focused, held, quiet, hovered], (state): Tooltip | null => {
   const input = state.field(inputField);
-  if (input) return { pos: input.from, above: false, create: input.create };
+  if (input) return { pos: input.from, above: false, strictSide: true, create: input.create };
   const shownComment = (id: string | null) => (id ? state.field(commentField).find((c) => c.id === id && c.from >= 0) : undefined);
   const keptComment = shownComment(state.field(held));
-  if (keptComment) return { pos: keptComment.from, above: false, create: commentWindow(keptComment.id) };
+  if (keptComment) return { pos: keptComment.from, above: false, strictSide: true, create: commentWindow(keptComment.id) };
   const sel = state.selection.main;
   // Text selected: the button wins over a comment the pointer rests on.
-  if (state.field(focused) && !sel.empty) return { pos: sel.from, above: false, create: plusButton };
+  if (state.field(focused) && !sel.empty) return { pos: sel.from, above: false, strictSide: true, create: plusButton };
   const hoveredComment = shownComment(state.field(hovered));
-  if (hoveredComment) return { pos: hoveredComment.from, above: false, create: commentWindow(hoveredComment.id) };
+  if (hoveredComment) return { pos: hoveredComment.from, above: false, strictSide: true, create: commentWindow(hoveredComment.id) };
   if (!state.field(focused)) return null;
   if (state.field(quiet) === sel.head) return null;
   const comment = commentAt(state, sel.head);
-  return comment ? { pos: comment.from, above: false, create: commentWindow(comment.id) } : null;
+  return comment ? { pos: comment.from, above: false, strictSide: true, create: commentWindow(comment.id) } : null;
 });
 
 /** The underlines: accent for comments waiting to go, faint once sent; the text being commented on, lit. */

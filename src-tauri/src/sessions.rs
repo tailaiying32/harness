@@ -72,7 +72,9 @@ const DEFAULT_IDLE_SECONDS: u64 = 300;
 const TOOL_RESULT_MAX_CHARS: usize = 20_000;
 /// The command that opens a pull request. Only its output is read for links:
 /// other `gh pr` commands print links to pull requests the chat merely looked at.
-const PR_CREATE: &str = "gh pr create";
+/// Without "gh" in front, so gh run by its full path or a variable
+/// (`$GH pr create`) counts too.
+const PR_CREATE: &str = " pr create";
 /// How long a process asked to exit may take before it is stopped.
 const CLOSE_GRACE: Duration = Duration::from_secs(30);
 /// What a request is told when the user writes instead of answering it.

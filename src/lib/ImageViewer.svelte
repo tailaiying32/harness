@@ -1,6 +1,6 @@
 <script lang="ts">
-  // One of the chat's images, drawn over the chat and side panel the way
-  // settings are, sized to fit. Clicking the picture switches between that and
+  // One of the chat's images, drawn over the top bar, chat and side panel
+  // the way settings are, sized to fit. Clicking the picture switches between that and
   // its actual pixels (one image pixel per screen pixel), to make out detail.
   // ← and → step through the chat's images; Escape, close or a click beside the
   // picture closes it. The picture is read from the core only while shown.
@@ -112,7 +112,8 @@
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <div class="viewer" bind:this={root} tabindex="-1" role="dialog" aria-label="image {image.n}">
-  <div class="bar">
+  <!-- It covers the title bar's strip, so its empty space moves the window. -->
+  <div class="bar" data-tauri-drag-region>
     <span class="label">{label}</span>
     {#if list.length > 1}
       <span class="steps">
@@ -158,6 +159,10 @@
     padding: var(--pad-y) var(--pad-x) var(--gap);
     color: var(--dim);
     white-space: nowrap;
+  }
+  /* Clear of the sidebar toggle, which sits over the top-left corner. */
+  :global(.bare) .bar {
+    padding-left: calc(var(--toggle-x) + 2em + 2ch + var(--pad-x) * 0.8);
   }
   .label {
     min-width: 0;
