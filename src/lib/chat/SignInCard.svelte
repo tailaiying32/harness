@@ -1,11 +1,11 @@
 <script lang="ts">
   // The chat's agent said it isn't signed in. One button runs its own sign-in
   // in the browser, then the message that failed is sent again.
-  import { agentLabel, CURSOR } from "../ipc";
+  import { agentLabel, CODEX, CURSOR } from "../ipc";
   import type { Chat, SignInItem } from "../state/chat.svelte";
 
   let { item, chat }: { item: SignInItem; chat: Chat } = $props();
-  const command = $derived(chat.agent === CURSOR ? "agent login" : "claude auth login");
+  const command = $derived(chat.agent === CURSOR ? "agent login" : chat.agent === CODEX ? "codex login" : "claude auth login");
 </script>
 
 {#if item.state === "done"}

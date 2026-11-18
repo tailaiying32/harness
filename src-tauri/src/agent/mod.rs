@@ -1,11 +1,13 @@
 //! The boundary between the app and any coding agent. Each agent is one
-//! adapter here: `claude_code` (Claude Code's own channel) and `cursor`
-//! (Cursor's agent over ACP, see `acp`).
+//! adapter here: `claude_code` (Claude Code's own channel), `cursor`
+//! (Cursor's agent over ACP, see `acp`) and `codex` (Codex's app-server).
 
 pub mod acp;
 pub mod claude_code;
+pub mod codex;
 pub mod cursor;
 pub mod mcp_http;
+pub(crate) mod rpc;
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -22,11 +24,13 @@ use crate::events::{AgentEvent, CommandInfo, Decision, ModelInfo};
 /// Agent IDs, as saved with each chat.
 pub const CLAUDE: &str = "claude-code";
 pub const CURSOR: &str = "cursor";
+pub const CODEX: &str = "codex";
 
 /// What the user sees an agent called.
 pub fn label(agent: &str) -> &'static str {
     match agent {
         CURSOR => "Cursor",
+        CODEX => "Codex",
         _ => "Claude Code",
     }
 }

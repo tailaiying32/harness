@@ -1,4 +1,4 @@
-//! Find the agents' programs: Claude Code, and Cursor's agent. Sign-in isn't checked here: a chat finds out
+//! Find the agents' programs: Claude Code, Cursor's agent and Codex. Sign-in isn't checked here: a chat finds out
 //! from Claude Code itself (see `SignInNeeded`). Checking at startup with
 //! `claude auth status` reported a working login as signed out.
 
@@ -15,7 +15,9 @@ pub struct SetupInfo {
     pub binary: Option<String>,
     /// Cursor's agent program.
     pub cursor: Option<String>,
-    /// The agents found, Claude Code first ("claude-code", "cursor").
+    /// Codex's program.
+    pub codex: Option<String>,
+    /// The agents found, Claude Code first ("claude-code", "cursor", "codex").
     pub agents: Vec<String>,
     /// What to tell the user when no agent was found.
     pub problem: Option<String>,
@@ -87,6 +89,18 @@ pub fn find_cursor() -> Option<PathBuf> {
         .or_else(|| local("agent"))
 }
 
+/// Codex: Homebrew's spots first (its cask links there), then `~/.local/bin`
+/// and the login shell (npm's global folder is on its PATH).
+pub fn find_codex() -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "codex.exe" } else { "codex" };
+    std::env::var_os("HARNESS_CODEX_PATH")
+        .and_then(existing)
+        .or_else(|| existing("/opt/homebrew/bin/codex"))
+        .or_else(|| existing("/usr/local/bin/codex"))
+        .or_else(|| home().and_then(|h| existing(h.join(".local").join("bin").join(exe))))
+        .or_else(|| from_login_shell("codex"))
+}
+
 /// A helper program (git, gh): its usual install spots first, then the login
 /// shell. Looked up once per run.
 fn find_tool(name: &str, usual: &[&str]) -> Option<PathBuf> {
@@ -122,12 +136,16 @@ pub fn gh() -> Option<&'static Path> {
 pub fn check_setup() -> SetupInfo {
     let claude = find_claude();
     let cursor = find_cursor();
+    let codex = find_codex();
     let mut agents = Vec::new();
     if claude.is_some() {
         agents.push(crate::agent::CLAUDE.to_string());
     }
     if cursor.is_some() {
         agents.push(crate::agent::CURSOR.to_string());
+    }
+    if codex.is_some() {
+        agents.push(crate::agent::CODEX.to_string());
     }
     let shown = |p: Option<PathBuf>| p.map(|p| p.to_string_lossy().into_owned());
     SetupInfo {
@@ -136,6 +154,7 @@ pub fn check_setup() -> SetupInfo {
             .then(|| "Claude Code isn't installed, or couldn't be found.".into()),
         binary: shown(claude),
         cursor: shown(cursor),
+        codex: shown(codex),
         agents,
     }
 }

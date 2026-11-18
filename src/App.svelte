@@ -16,6 +16,9 @@
   import {
     type ModelInfo,
     type AgentId,
+    CLAUDE,
+    CODEX,
+    CURSOR,
     autotest,
     autotestReport,
     autotestWait,
@@ -192,6 +195,7 @@
   const menuModels = $derived<AgentModels>({
     "claude-code": models["claude-code"],
     cursor: models.cursor.filter((m) => cursorShown.includes(m.value)),
+    codex: models.codex,
   });
 
   onMount(async () => {
@@ -226,6 +230,14 @@
     } catch {
       // Keep the list we have; the picker still works with it.
     }
+  }
+
+  /** A self-test model name: "cursor:<model>", "codex:<model>", "claude:<model>" or a plain Claude one. */
+  function testModel(name: string): [AgentId, string] {
+    for (const agent of [CURSOR, CODEX] as AgentId[]) {
+      if (name.startsWith(`${agent}:`)) return [agent, name.slice(agent.length + 1)];
+    }
+    return [CLAUDE, name.replace(/^claude:/, "")];
   }
 
   /** Effort levels are read only for the models the menu shows, a second each. */
@@ -296,12 +308,13 @@
       size = test.size as Size;
       applySize(size);
     }
-    // "cursor:<model>" picks one of Cursor's models; any other name is Claude
-    // Code's. Marked as picked, so the project's last pick doesn't replace it.
+    // "cursor:<model>" picks one of Cursor's models, "codex:<model>" one of
+    // Codex's; any other name is Claude Code's. Marked as picked, so the
+    // project's last pick doesn't replace it.
     if (test.model) {
-      const cursor = test.model.startsWith("cursor:");
-      app.current.setAgent(cursor ? "cursor" : "claude-code", loadPrefs().mode);
-      app.current.modelChoice = cursor ? test.model.slice("cursor:".length) : test.model;
+      const [agent, model] = testModel(test.model);
+      app.current.setAgent(agent, loadPrefs().mode);
+      app.current.modelChoice = model;
       app.current.modelPicked = true;
     }
     const started = performance.now();
@@ -334,7 +347,7 @@
 
     for (const message of test.messages) {
       // Lines starting with `@` steer the test instead of being sent:
-      //   @model <name> (cursor:<name> for Cursor's, claude:<name> to switch back), @mode <mode>
+      //   @model <name> (cursor:<name> for Cursor's, codex:<name> for Codex's, claude:<name> to switch back), @mode <mode>
       //   @answer <allow|always_allow|deny|none>  how approvals are answered from here on
       //   @worktree <worktree|here|none>  how the worktree card is answered
       //   @newchats <start|no|none>  how the new-chats card is answered
@@ -396,12 +409,10 @@
         current.addTestChatComment(quote, text);
       }
       if (directive === "sendchat") await current.sendWithComments(value);
-      if (directive === "model" && value.startsWith("cursor:")) {
-        current.setAgent("cursor", loadPrefs().mode);
-        await current.changeModel(value.slice("cursor:".length));
-      } else if (directive === "model" && value.startsWith("claude:")) {
-        current.setAgent("claude-code", loadPrefs().mode);
-        await current.changeModel(value.slice("claude:".length));
+      if (directive === "model" && /^(cursor|codex|claude):/.test(value)) {
+        const [agent, model] = testModel(value);
+        current.setAgent(agent, loadPrefs().mode);
+        await current.changeModel(model);
       } else if (directive === "model") await current.changeModel(value);
       if (directive === "mode") await current.changeMode(value as Mode);
       if (directive === "answer") answer = value === "none" ? null : (value as Decision);

@@ -5,7 +5,7 @@
   import BarIcon from "./BarIcon.svelte";
   import Preferences from "./Preferences.svelte";
   import { refreshSkills } from "./commands.svelte";
-  import { CLAUDE, importSkill, listSkills, pickFile, pickFolder, removeSkill, type ModelInfo, type SkillInfo } from "./ipc";
+  import { CLAUDE, CODEX, importSkill, listSkills, pickFile, pickFolder, removeSkill, type ModelInfo, type SkillInfo } from "./ipc";
   import type { AppState, Limit } from "./state/app.svelte";
   import {
     appearances,
@@ -103,6 +103,12 @@
       { name: "all models", window: "seven_day" },
       { name: "fable", window: "seven_day_overage_included" },
     ].map(({ name, window }) => ({ name, text: limitText(app.limits[CLAUDE]?.[window]) })),
+  );
+
+  // Codex's limits, named for how long each window runs ("5h", "week"),
+  // as many as its plan has.
+  const codexLimits = $derived(
+    Object.entries(app.limits[CODEX] ?? {}).map(([name, limit]) => ({ name, text: limitText(limit) })),
   );
 
   /** "64% · resets Sun 4:59 PM"; unknown before any reading. Once the limit has
@@ -353,6 +359,17 @@
           <span class="left">{limit.text}</span>
         </div>
       {/each}
+      {#if app.agents.includes(CODEX)}
+        <div class="sub">Codex</div>
+        {#each codexLimits as limit (limit.name)}
+          <div class="row">
+            <span class="name">{limit.name}</span>
+            <span class="left">{limit.text}</span>
+          </div>
+        {:else}
+          <div class="row"><span class="name">all models</span><span class="left">unknown</span></div>
+        {/each}
+      {/if}
     </section>
 
     <section>

@@ -29,6 +29,7 @@ const HIDDEN: Record<AgentId, Set<string>> = {
     "copy-request-id", // copies to the clipboard of Cursor's own screen
     "statusline", // the status line of Cursor's own screen
   ]),
+  codex: new Set(),
 };
 
 const MODEL: Command = { name: "model", description: "Model and effort", hint: null, aliases: [], harness: "model" };

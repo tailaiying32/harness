@@ -48,7 +48,6 @@ import {
   writeNotes,
   withdrawMessage,
   CLAUDE,
-  CURSOR,
   agentLabel,
   type AgentId,
 } from "../ipc";
@@ -1655,7 +1654,7 @@ export class Chat {
     if (!message) return;
     // `/btw` goes to the side chat, never to Claude Code (which can't run it headless).
     const btw = this.owner ? null : message.match(/^\/btw(?:\s+([\s\S]*))?$/);
-    if (btw && this.agent === CURSOR) {
+    if (btw && this.agent !== CLAUDE) {
       this.push({ type: "error", text: "Side chats work in Claude Code chats only." });
       return;
     }

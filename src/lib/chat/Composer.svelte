@@ -4,7 +4,7 @@
   import { onMount, tick } from "svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import BranchMark from "../BranchMark.svelte";
-  import { agentLabel, clipboardFiles, CLAUDE, onFileDrop, pickFolder, readImageFile, type AgentId, type Mode, type ModelInfo } from "../ipc";
+  import { agentLabel, clipboardFiles, CLAUDE, CURSOR, onFileDrop, pickFolder, readImageFile, type AgentId, type Mode, type ModelInfo } from "../ipc";
   import { agentModes, type AgentModels } from "../models";
   import { prLabel, prShort, shortPath } from "../paths";
   import { IMAGE_WORD, webLinks, type Chat } from "../state/chat.svelte";
@@ -103,10 +103,10 @@
   // The lists come from the agents, so they show real names ("Opus 5.5"). A
   // saved choice that is no longer listed still gets an entry, so it shows.
   // An older chat on Claude Code's "default" shows as the model that stands
-  // for, which its list puts first. (Cursor's "default" is Auto, listed.)
+  // for, which its list puts first; Codex's the same. (Cursor's "default" is Auto, listed.)
   const ownModels = $derived(models[chat.agent] ?? []);
   const shownChoice = $derived(
-    chat.agent === CLAUDE && chat.modelChoice === "default" && ownModels.length ? ownModels[0].value : chat.modelChoice,
+    chat.agent !== CURSOR && chat.modelChoice === "default" && ownModels.length ? ownModels[0].value : chat.modelChoice,
   );
   const modelOptions = $derived<ModelInfo[]>(
     ownModels.some((m) => m.value === shownChoice)

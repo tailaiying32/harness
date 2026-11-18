@@ -257,8 +257,10 @@ the login itself.
 - Editing skills in the app, and a screen for managing app connections.
   Skills can be imported and removed (see "Skills"); instructions and
   connections you already have still work, with no UI for editing them.
-- Agents other than Claude Code and Cursor (Codex, Gemini). Most ACP agents
-  would reuse `agent/acp.rs`.
+- Agents other than Claude Code, Cursor and Codex (Gemini, Copilot,
+  OpenCode). Most ACP agents would reuse `agent/acp.rs`.
+- In Codex chats: side chat (Codex can fork a thread, so it's doable), and
+  chats made in Codex's own CLI or app.
 - In Cursor chats: side chat, worktrees (loading a session in another folder
   works, so the same move Claude chats make is possible), the usage meter,
   and moving a chat between agents.
@@ -2380,6 +2382,97 @@ conversation, and the model list loaded. Not tested live: the sign-in card
 - **Errors in a turn** show up as message text ("Error: RetriableError: …")
   with `stopReason: "end_turn"`.
 
+### Codex over app-server (built 2026-11-18, codex-cli 0.169.1)
+
+Codex is the third agent (`agent/codex.rs`, id `codex`). It runs `codex
+app-server`, the protocol OpenAI's own Codex apps use, rather than an ACP
+adapter (Zed's moved onto the app-server anyway). The JSON-RPC client is
+shared with ACP (`agent/rpc.rs`); Codex's messages leave out `"jsonrpc"` (it
+also accepts them with it). One app-server per chat, ~140 MB idle.
+
+**Probed live** (2026-11-18, scratch folder, `gpt-6-luna` and
+`gpt-5.6-terra` at low effort, on a free ChatGPT plan):
+- **Handshake**: `initialize` with `capabilities.experimentalApi: true` (plan
+  mode and questions need it), then the `initialized` notification.
+- **A turn**: `turn/start` returns at once; then `turn/started`,
+  `item/started` / deltas / `item/completed` per item, `turn/completed`
+  with `status` (`completed`, `interrupted`, `failed`). `agentMessage.phase`
+  is `commentary` (between steps) or `final_answer`. Reasoning summaries
+  were empty at low effort.
+- **Commands** come as `/bin/zsh -lc '<command>'`; `commandActions[].command`
+  is the plain one (a single `read` / `search` action has `path` / `query`).
+  `aggregatedOutput` is null for no output. `/tmp` is writable in
+  `workspace-write`.
+- **Approvals**: a command outside the project sends
+  `item/commandExecution/requestApproval` *before* its `item/started`, with
+  `availableDecisions` = `accept`, `{acceptWithExecpolicyAmendment}` (a rule
+  Codex keeps, like Cursor's allowlist), `cancel`; no `decline` or
+  `acceptForSession` there. Always = the amendment ("Always allow
+  `<command>`"); deny = `decline` if offered, else `cancel`, with the reason
+  sent as a note.
+- **MCP**: HTTP servers given per thread as config overrides
+  (`mcp_servers.<name>.url`) work with `mcp_http`. Without more, every call
+  asked first through `mcpServer/elicitation/request` (`_meta.codex_approval_kind:
+  "mcp_tool_call"`); `mcp_servers.<name>.default_tools_approval_mode =
+  "approve"` stops that. `mcpToolCall.result.content` carries the answer,
+  so no served log is needed (unlike Cursor). The user's own Codex servers
+  start too.
+- **Writable folders**: `sandbox_workspace_write.writable_roots` (config) and
+  `sandboxPolicy.writableRoots` (per turn) let the notes, docs and memory
+  folders be written with no request.
+- **Plan mode**: `turn/start.collaborationMode = {mode: "plan", settings:
+  {model, reasoning_effort, developer_instructions: null}}`. The turn ends
+  with a `plan` item (id `<turnId>-plan`) and no final message; there is no
+  approval request, so the app shows the plan card itself at `turn/completed`
+  and, on approve, starts a default-mode turn ("Build it now") that looks
+  like the same turn. Questions come as `item/tool/requestUserInput` and are
+  answered by question `id` (`gpt-6-luna` once sent a malformed question
+  call; `gpt-5.6-terra` asked properly).
+- **Mid-turn messages**: `turn/steer` takes them; the model read one sent
+  during a `sleep 8`. If steering fails the message waits for the next turn.
+- **Resume**: `thread/resume {threadId, cwd}` keeps history and works in
+  another folder (worktrees). The sandbox must be sent again: left out, it
+  came back read-only.
+- **Usage**: `account/rateLimits/read` / `…/updated` give `primary` and
+  `secondary` windows (`usedPercent`, `windowDurationMins`, `resetsAt`); the
+  free plan has one 30-day window. `thread/tokenUsage/updated.last.totalTokens`
+  over `modelContextWindow` is the context ring (Codex's base prompt alone is
+  ~16K tokens).
+
+**How it maps** (`codex.rs`):
+- Modes are Codex's own: `default` (on-request, workspace-write), `plan`,
+  `read-only`, `full-access` (never ask, no sandbox); sent with every
+  `turn/start` as `approvalPolicy`, `sandboxPolicy` and `collaborationMode`.
+- Instructions (tools, notes and docs, memory, preferences) go in
+  `developerInstructions` on every start and resume, like Claude's system
+  prompt; nothing is added to the first message.
+- Items become Claude-shaped tool calls: `Bash`, `Read`, `Grep`, `Write` /
+  `Edit` per changed file (`<itemId>#n` after the first), `WebSearch`,
+  `mcp__<server>__<tool>`, `Agent` for `spawnAgent`, `TodoWrite` for
+  `turn/plan/updated`.
+- Subagents: a `spawnAgent` call's `receiverThreadIds` become tasks; a child
+  thread's items carry the call as `parent_tool_id`; its `turn/completed` or
+  `agentsStates` end the task. Not seen live yet.
+- `/compact` alone runs `thread/compact/start`.
+- Titles and batch labels: a throwaway `ephemeral` thread on the first model
+  Codex calls fast or affordable, at its lowest effort, with the title
+  prompt as `baseInstructions` and the user's MCP servers off.
+- Sign-in: `account/read` with no account → `SignInNeeded`; the card runs
+  `codex login`. Settings → Usage lists Codex's windows by length.
+- Found at `HARNESS_CODEX_PATH`, Homebrew's `/opt/homebrew/bin` or
+  `/usr/local/bin`, `~/.local/bin`, then the login shell.
+
+**Tested live** in the app (self-test, `HARNESS_DATA_DIR` + `HARNESS_HOME`,
+`gpt-6-luna`): shell and file edits, an approval card for a write outside
+the project, the earlier-chats tool with no card, plan → approve → built in
+one turn (it then asked for a worktree, as told), close and resume with
+history, a Codex-written title, the context ring and usage reading. Then:
+stop mid-command, two queued messages answered together, a worktree chosen
+mid-turn (resumed in the worktree, file written there), a note written to
+the shared memory folder with no card, switching Codex → Haiku → Codex
+(each reread the chat), `/compact`, and the panel tool opening a doc.
+Unit tests in `codex.rs` cover the mappings above.
+
 ### Chat info view (built 2026-11-16, branch `harness/chat-info-view-83b2a2`)
 
 A fifth side panel view, for checking a long task is still going. The
@@ -2783,8 +2876,8 @@ or carry on when one agent's usage runs out.
   whole ID, or for a prefix that matches nothing else; `search` and `recent`
   still leave it out.
 - Not covered: switching mid-turn; side chats are unchanged; the old agent's
-  background commands end at the switch (as when a chat closes). Codex has
-  no adapter yet, so it joins once it has one.
+  background commands end at the switch (as when a chat closes). Codex
+  joined with its adapter (see "Codex over app-server").
 
 ### If the approval channel breaks
 
