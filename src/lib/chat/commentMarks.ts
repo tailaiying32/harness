@@ -10,8 +10,8 @@
 // - text selected: a small "+ comment" button under the selection
 // Windows are CodeMirror tooltips, so they follow the text as it scrolls.
 
-import { EditorSelection, type EditorState, type Extension, StateEffect, StateField } from "@codemirror/state";
-import { Decoration, EditorView, repositionTooltips, showTooltip, tooltips, ViewPlugin, type Tooltip, type TooltipView } from "@codemirror/view";
+import { EditorSelection, type EditorState, type Extension, Prec, StateEffect, StateField } from "@codemirror/state";
+import { Decoration, EditorView, keymap, repositionTooltips, showTooltip, tooltips, ViewPlugin, type Tooltip, type TooltipView } from "@codemirror/view";
 import { action, commentBox, commentLook, el, HoverIntent, type CommentBox } from "./commentBox";
 import type { DocComment } from "./comments";
 
@@ -162,14 +162,17 @@ function under(view: EditorView, from: number, to: number, width: number) {
   return { left, right: left, top: end.top, bottom: end.bottom };
 }
 
+/** Opens a new comment on the selected text; false if none is selected. */
+function startComment(view: EditorView): boolean {
+  const { from, to } = view.state.selection.main;
+  if (from === to) return false;
+  view.dispatch({ effects: startInput.of({ from, to, text: "" }) });
+  return true;
+}
+
 function plusButton(view: EditorView): TooltipView {
   const dom = el("div", "cm-comment-plus");
-  dom.append(
-    action("+ comment", () => {
-      const { from, to } = view.state.selection.main;
-      if (from !== to) view.dispatch({ effects: startInput.of({ from, to, text: "" }) });
-    }),
-  );
+  dom.append(action("+ comment", () => startComment(view)));
   return {
     dom,
     getCoords() {
@@ -321,6 +324,9 @@ export function commentsExtension(initial: DocComment[], onchange?: (list: DocCo
     EditorView.focusChangeEffect.of((_state, on) => setFocused.of(on)),
     marks,
     window_,
+    // Cmd+Enter on selected text opens a comment, as the button does (the
+    // button can be hidden in Settings). Ahead of the editor's own Cmd+Enter.
+    Prec.high(keymap.of([{ key: "Mod-Enter", run: startComment }])),
     // In the window's body, so the panel's scrolling box doesn't cut a window
     // off. Kept within the text's column side to side, so one near the right
     // edge stops at the text's edge as one at the left does, not the window's.

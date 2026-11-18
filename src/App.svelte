@@ -51,6 +51,7 @@
   import { openFind } from "./lib/find";
   import type { Chat } from "./lib/state/chat.svelte";
   import {
+    applyCommentButton,
     applyFontSize,
     applyPanelWidth,
     applySize,
@@ -72,6 +73,7 @@
   applySize(prefs.size);
   applyFontSize(prefs.fontSize);
   applyPanelWidth(prefs.panelWidth);
+  applyCommentButton(prefs.commentButton);
 
   const app = new AppState();
   app.defaultAgent = prefs.agent as AgentId;

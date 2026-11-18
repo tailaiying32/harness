@@ -282,12 +282,18 @@ type Prefs = {
   overnightUntil: string;
   /** The side panel's list of every comment is kept open (see SidePanel). */
   commentListOpen: boolean;
+  /** The "+ comment" button under selected text; Cmd+Enter works either way. */
+  commentButton: boolean;
 };
 export const DEFAULT_PANEL_WIDTH = 0.46;
 
 /** The side panel's width, as a share of the area beside the sidebar. Set by dragging its left edge. */
 export function applyPanelWidth(share: number): void {
   document.documentElement.style.setProperty("--panel-w", `${(share * 100).toFixed(2)}%`);
+}
+/** Shows or hides the "+ comment" button under selected text, in the chat and in docs. */
+export function applyCommentButton(on: boolean): void {
+  document.documentElement.classList.toggle("no-comment-button", !on);
 }
 export const DEFAULT_MODE = "auto";
 /** The times overnight keep awake can end at, picked in Settings. */
@@ -335,9 +341,10 @@ export function loadPrefs(): Prefs {
       ),
       overnightUntil: overnightTimes.includes(saved.overnightUntil as string) ? saved.overnightUntil! : DEFAULT_OVERNIGHT,
       commentListOpen: saved.commentListOpen === true,
+      commentButton: saved.commentButton !== false,
     };
   } catch {
-    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", agent: "claude-code", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH, foldedProjects: [], sidebarHidden: false, projectOrder: [], projectModels: {}, overnightUntil: DEFAULT_OVERNIGHT, commentListOpen: false };
+    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", agent: "claude-code", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH, foldedProjects: [], sidebarHidden: false, projectOrder: [], projectModels: {}, overnightUntil: DEFAULT_OVERNIGHT, commentListOpen: false, commentButton: true };
   }
 }
 

@@ -93,6 +93,8 @@ function wrap(md: HTMLElement, from: number, to: number, make: () => HTMLElement
   }
 }
 
+const MAC = /Mac/.test(navigator.userAgent);
+
 export class ChatComments {
   private layer: HTMLElement;
   private shown: Shown | null = null;
@@ -125,6 +127,7 @@ export class ChatComments {
       },
     );
     document.addEventListener("selectionchange", this.onSelection);
+    window.addEventListener("keydown", this.onKey, true);
     scroller.addEventListener("mouseover", this.onOver);
     scroller.addEventListener("mouseout", this.onOut);
     scroller.addEventListener("click", this.onClick);
@@ -134,6 +137,7 @@ export class ChatComments {
 
   destroy(): void {
     document.removeEventListener("selectionchange", this.onSelection);
+    window.removeEventListener("keydown", this.onKey, true);
     this.scroller.removeEventListener("mouseover", this.onOver);
     this.scroller.removeEventListener("mouseout", this.onOut);
     this.scroller.removeEventListener("click", this.onClick);
@@ -239,6 +243,24 @@ export class ChatComments {
     this.render();
   };
 
+  /** Cmd+Enter on selected text opens a comment, as the button does (the button can be hidden in Settings). */
+  private onKey = (e: KeyboardEvent) => {
+    const mod = MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+    if (e.key !== "Enter" || !mod || e.shiftKey || e.altKey || !this.plus) return;
+    e.preventDefault();
+    e.stopPropagation();
+    this.startInput();
+  };
+
+  private startInput(): void {
+    const spot = this.plus;
+    if (!spot) return;
+    this.input = { ...spot, n: ++this.inputs };
+    this.plus = null;
+    this.mark();
+    this.render();
+  }
+
   private markUnder(target: EventTarget | null): string | null {
     const span = target instanceof Element ? target.closest<HTMLElement>("span.cm-comment[data-comment]") : null;
     return span?.dataset.comment ?? null;
@@ -335,16 +357,7 @@ export class ChatComments {
   /** The button follows the selection as it grows: it reads the selection when used, not when made. */
   private plusWindow(): Shown {
     const dom = this.frameFor("cm-comment-plus");
-    dom.append(
-      action("+ comment", () => {
-        const spot = this.plus;
-        if (!spot) return;
-        this.input = { ...spot, n: ++this.inputs };
-        this.plus = null;
-        this.mark();
-        this.render();
-      }),
-    );
+    dom.append(action("+ comment", () => this.startInput()));
     return { key: "plus", dom, place: () => this.plus && this.hang(dom, this.rangeOf(this.plus)), destroy: () => dom.remove() };
   }
 
