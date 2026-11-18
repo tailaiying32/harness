@@ -9,6 +9,7 @@
   import ImageWord from "./ImageWord.svelte";
   import SignInCard from "./SignInCard.svelte";
   import Markdown from "./Markdown.svelte";
+  import { ChatComments } from "./chatComments";
   import WorkRun from "./WorkRun.svelte";
 
   let { chat, problem }: { chat: Chat; problem: string | null } = $props();
@@ -140,11 +141,38 @@
     observer.observe(content);
     // The message box growing a line makes the view shorter; stay at the end.
     observer.observe(scroller);
+    // Comments on the latest answer; side chats take none.
+    if (!chat.owner) {
+      comments = new ChatComments(chat, scroller);
+      chat.jumpToChatComment = (id) => comments?.jump(id);
+    }
     // A chat opens at its end.
     void tick().then(() => {
       if (pinned && scroller) scroller.scrollTop = scroller.scrollHeight;
     });
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      comments?.destroy();
+      comments = null;
+      chat.jumpToChatComment = null;
+    };
+  });
+
+  let comments: ChatComments | null = null;
+
+  // Marks back on the text and the window placed, after the comments or the
+  // latest answer change and are drawn.
+  $effect(() => {
+    for (const c of chat.chatComments) void [c.text, c.from, c.to];
+    const latest = chat.latestAnswerIds;
+    for (let i = chat.items.length - 1, left = latest.size; i >= 0 && left > 0; i--) {
+      const item = chat.items[i];
+      if (item.type === "text" && latest.has(item.id)) {
+        void [item.text, item.streaming];
+        left--;
+      }
+    }
+    void tick().then(() => comments?.update());
   });
 
   // Files with a tab in the side panel; their names in a folded run open it.
@@ -156,7 +184,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="scroll" bind:this={scroller} onscroll={onScroll} onclick={onClick}>
-  <div class="content" bind:this={content}>
+  <div class="content chat-comments" bind:this={content}>
     {#if problem}
       <div class="row"><span class="marker bad">!</span><div class="body bad">{problem}</div></div>
     {/if}
@@ -198,7 +226,7 @@
       {:else if group.item.type === "text"}
         <div class="row block">
           <span class="marker"></span>
-          <div class="body"><Markdown text={group.item.text} /></div>
+          <div class="body" data-item={group.item.id}><Markdown text={group.item.text} /></div>
         </div>
       {:else if group.item.type === "thinking"}
         <div class="row block">

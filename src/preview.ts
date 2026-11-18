@@ -584,12 +584,18 @@ async function play(id: string, messageId: string) {
   await wait(300);
   emit(id, { kind: "message_seen", id: messageId });
   await wait(600);
-  const words = "Here is a **sample answer**, streamed a few words at a time so the live text can be checked. ".split(" ");
+  // A few blocks, so comments on the finished ones can be tried while the rest streams in.
+  const answer =
+    "Here is a **sample answer**, streamed a few words at a time so the live text can be checked.\n\n" +
+    "It has a second paragraph, so the first one is finished while this one is still being written.\n\n" +
+    "- a list item with `some code` in it\n- another item that runs on a bit longer\n\n" +
+    "And a last paragraph to close it off.";
+  const words = answer.split(/(?<= )/);
   for (const word of words) {
-    emit(id, { kind: "text_delta", message_id: "live", block_index: 0, text: word + " " });
-    await wait(60);
+    emit(id, { kind: "text_delta", message_id: "live", block_index: 0, text: word });
+    await wait(90);
   }
-  emit(id, text("live", words.join(" ").trim()));
+  emit(id, text("live", answer));
   emit(id, tool("live-t", "Bash", { command: "npm test", description: "Run the tests" }));
   emit(id, {
     kind: "approval_request",

@@ -1755,8 +1755,9 @@ file, even when coding", and Harness said nothing about its own panel.
 The user selects text in a doc tab or a waiting plan, leaves a comment, and
 sends all of a tab's comments together. The agent edits where a comment asks
 for a change, answers questions in the chat, and asks in the chat when a
-comment is unclear. Sent comments go away. Notes and chat messages don't take
-comments yet (notes would be easy, same editor; chat needs its own design).
+comment is unclear. Sent comments go away. Notes don't take comments yet
+(easy: same editor). The chat's latest answer does: see "Comments on chat
+answers".
 
 Mock-ups: "Comments on Docs" canvas in the Magic Patterns OS (see "Look"),
 option E "Floating, with a list" (chosen over inline, in-the-foot, and
@@ -1778,11 +1779,20 @@ windows pinned to the edge, which covered the text in a narrow panel).
   padding (too wide), the filled accent button itself, and a pixel less
   padding above than below in the windows (the text looked too high). The
   windows (and the list) look like the app's other
-  popups (model menu, / and @): panel colour, hairline border, 2ch side
-  padding, no shadow, no marker (an accent rule down the left, then an
+  popups (model menu, / and @): panel colour, hairline border, no shadow,
+  but 1ch side padding (see the × below), no marker (an accent rule down the left, then an
   accent `>`, were tried and dropped). A comment's
-  window is as wide as its text needs, up to 40ch. The cursor in a mark (a click, or arrows) opens its window; not
-  hover, since the docs are edited too. The written comment is itself the
+  window is as wide as its text needs, up to 40ch. Resting the pointer on a
+  mark opens its window (after 150 ms; it closes 250 ms after the pointer
+  leaves both the mark and the window, so the pointer can cross to it),
+  focused or not, without moving the cursor. So does the cursor in a mark
+  (a click, or arrows). Hover was first left out because docs are edited
+  too; it went in (2026-11-18) since commented text is for the agent to
+  change, so a window over it rarely gets in the way. Text selected: the
+  button wins over hover. Spacing is 1ch all round: left padding, comment
+  to ×, × to the right edge (2026-11-18; before, 2ch padding with a 1ch
+  gap left the × closer to the text than to the edge; 2ch gaps were tried
+  too). The written comment is itself the
   box: click in and type to edit (no edit button), × removes it; the window
   stays while its box has the cursor. Enter saves, Shift+Enter a new line,
   Escape gives up; both close the window and put the cursor back at the
@@ -1871,6 +1881,70 @@ windows pinned to the edge, which covered the text in a narrow panel).
   built window (real selection and typing there), Keep planning live, and,
   in the preview, the last two changes (windows kept inside the text's
   column, the space under the docked list): its page was hidden.
+
+### Comments on chat answers (built 2026-11-18, branch `harness/comments-on-chat-answers-c6d80e`)
+
+The user selects text in the agent's latest answer, leaves a comment, and
+the comments go with the next message. For replying to a long answer with
+several points without losing one's place. Nobody stores them: sent, they
+go. Prior art: ChatGPT and claude.ai quote one selection into the next
+message; batching pinned comments is only in add-ons and side products.
+
+- **Decisions.** Latest answer only (what the agent wrote since the user's
+  last message, or, before it has written anything since, the answer that
+  message was about); older answers, thinking, tools and the user's own
+  messages take none. Comments and typed text go together on the normal
+  send (no button of their own); comments alone can be sent. A message
+  starting with `/` goes as typed and leaves them waiting. The sent message
+  shows the quote and comment pairs as text (no folding: collapsible things
+  in the chat felt odd). Waiting comments are listed above the message box.
+  Comments can be made while the answer streams in, on its finished parts.
+  Side chats take none.
+- **Look and keys:** the docs' (see above): the same button, box, windows,
+  hover and list (`CommentDock.svelte`, shared with the side panel, as is
+  the folded/open pref). The list sits in the message box's frame, under
+  its rule and above the `>` line.
+- **What the agent gets:** the typed text, then "Comments on your last
+  answer:" and a numbered list, `N. On "<quote>": <comment>` (quotes cut at
+  200 characters), in answer order (`withChatComments`). An app note goes
+  with it: each comment is about the quoted part of the last answer;
+  respond to each, act on any that ask for a change, ask if one is unclear.
+  It is a normal message: sent while the agent works, it waits its turn
+  like any other. The list clears once it is sent.
+- **Drawing answers by block** (`renderBlocks` in markdown.ts,
+  Markdown.svelte): the text is parsed once and each top-level block
+  rendered on its own, a direct child of `.md` as before (no look change).
+  While text streams in only the last block's string changes, so Svelte
+  redraws only it; the others are never touched again. That makes a
+  finished block's text stable, and also saves redrawing a whole long
+  answer on every word.
+- **Finished:** every block of a text item but the last while the item is
+  streaming. A selection touching the last one, or spanning two items,
+  gets no button.
+- **Where they live** (`ChatComment` in comments.ts, `Chat.chatComments`):
+  in memory, with the text item's id and offsets into its `.md` element's
+  text. Pushing a new text item drops comments not on the latest answer.
+- **Marks and windows** (`chatComments.ts`, `ChatComments`, made by
+  ChatView): the marks are `span.cm-comment` wrapped around the commented
+  text nodes (never the text between blocks, which belongs to Svelte's
+  drawing). After every change to the comments or the latest answer they
+  are checked and, if missing or stale, unwrapped and put back from the
+  offsets. Windows are plain elements with the docs' classes in a layer in
+  the body, styled by the same rules (`commentLook` in commentBox.ts, put on
+  the page by `mountLook` under the chat's scope), placed by the docs'
+  `under` rule from the text's screen rects, kept inside the answer's
+  column, hidden when scrolled out of view. One window at a time: the input,
+  then a comment being edited, then the button, then the hovered (or
+  clicked, or jumped-to) comment.
+- **Self-test:** `@chatcomment <quote>|<text>` comments on the first match
+  in the latest answer; `@sendchat <text>` sends with the comments, through
+  the same code as the message box.
+- **Tested** in the preview (its scripted answer now streams four blocks):
+  finished blocks take comments mid-stream and the streaming one doesn't;
+  button, box, marks, hover open/close, the list, jump, ×, send with text
+  and alone (the list and marks clear, the message reads as above). Docs
+  hover on a plan comment: opens, survives the move onto its window, closes.
+  Not tested: live on Claude Code or Cursor, and by hand in the built app.
 
 ### The home folder (`home.rs`, built 2026-11-17)
 

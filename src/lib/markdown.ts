@@ -60,3 +60,21 @@ md.renderer.rules.code_block = (tokens, idx) => codeBlock(tokens[idx].content, "
 export function renderMarkdown(text: string): string {
   return md.render(text);
 }
+
+/**
+ * The same HTML, one string per top-level block (a paragraph, a list, a code
+ * block...). Text streams in at the end, so every block but the last stays
+ * the same string while it does: drawn once, never redone. That keeps
+ * comments on finished blocks in place (see chatComments.ts). Parsed once
+ * for the whole text, so reference links still reach across blocks.
+ */
+export function renderBlocks(text: string): string[] {
+  const env = {};
+  const tokens = md.parse(text, env);
+  const starts: number[] = [];
+  tokens.forEach((t, i) => {
+    if (t.level === 0 && t.nesting !== -1) starts.push(i);
+  });
+  if (!starts.length) return [md.renderer.render(tokens, md.options, env)];
+  return starts.map((start, k) => md.renderer.render(tokens.slice(start, starts[k + 1]), md.options, env));
+}

@@ -366,12 +366,14 @@
       //                  it is auto-answered (Approve or Keep planning, per @answer)
       //   @doccomment <quote>|<text>  comment <text> on <quote> in the open chat's first doc
       //   @sendcomments  send the first doc's comments, as its Send button does
+      //   @chatcomment <quote>|<text>  comment <text> on <quote> in the latest answer
+      //   @sendchat <text>  send <text> with the chat comments, as the message box does
       //   @wait <ms>     do nothing for a while. With the window hidden or the screen
       //                  locked, the page is frozen while nothing happens and this never
       //                  ends; wait for an event (like @exited) instead.
       const [, directive, value = ""] =
         message.match(/^@(model|mode|answer|worktree|newchats|turn|moved|stop|background|new|open|delete|close|exited|wait|endside|newside|image|file|browser|settings|termtab|termclose|docs|info|agent|agents|sendcomments)(?:\s+(\S+))?$/) ??
-        message.match(/^@(notes|docedit|planedit|plancomment|doccomment|terminal|termwait)\s+(.+)$/s) ??
+        message.match(/^@(notes|docedit|planedit|plancomment|doccomment|chatcomment|sendchat|terminal|termwait)\s+(.+)$/s) ??
         [];
       const current = app.current;
       if (directive === "notes") await current.saveNotes(value);
@@ -383,6 +385,11 @@
         else if (current.docs[0]) current.addTestComment(current.docs[0].path, current.docs[0].text, quote, text);
       }
       if (directive === "sendcomments" && current.docs[0]) await current.sendComments(current.docs[0].path);
+      if (directive === "chatcomment") {
+        const [quote, text = ""] = value.split("|");
+        current.addTestChatComment(quote, text);
+      }
+      if (directive === "sendchat") await current.sendWithComments(value);
       if (directive === "model" && value.startsWith("cursor:")) {
         current.setAgent("cursor", loadPrefs().mode);
         await current.changeModel(value.slice("cursor:".length));

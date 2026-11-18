@@ -1,6 +1,6 @@
 // One chat's state: what's on screen, and how agent events change it.
 
-import { BUILD_GUIDANCE, commentList, formatComments, GUIDANCE, type DocComment } from "../chat/comments";
+import { BUILD_GUIDANCE, CHAT_GUIDANCE, commentList, formatComments, GUIDANCE, withChatComments, type ChatComment, type DocComment } from "../chat/comments";
 import {
   answerApproval,
   browserCloseTab,
@@ -848,6 +848,80 @@ export class Chat {
     return this.commentsFor(tab).filter((c) => !c.sentWith);
   }
 
+  /**
+   * Comments on the agent's latest answer, waiting to go with the next
+   * message (see comments.ts). Main chats only; in memory only.
+   */
+  chatComments = $state<ChatComment[]>([]);
+
+  /** Shows a chat comment from the list (set by the chat's view while it shows). */
+  jumpToChatComment: ((id: string) => void) | null = null;
+
+  /**
+   * The pieces of text in the agent's latest answer: what it wrote since the
+   * user's last message, or, before it has written anything since, the
+   * answer that message was about.
+   */
+  get latestAnswerIds(): Set<number> {
+    const ids = new Set<number>();
+    let users = 0;
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const item = this.items[i];
+      if (item.type === "user") {
+        if (ids.size || ++users > 1) break;
+      } else if (item.type === "text") ids.add(item.id);
+    }
+    return ids;
+  }
+
+  addChatComment(comment: Omit<ChatComment, "id">): void {
+    this.chatComments.push({ ...comment, id: crypto.randomUUID() });
+  }
+
+  editChatComment(id: string, text: string): void {
+    const c = this.chatComments.find((x) => x.id === id);
+    if (c) c.text = text;
+  }
+
+  removeChatComment(id: string): void {
+    this.chatComments = this.chatComments.filter((c) => c.id !== id);
+  }
+
+  /** A new answer has begun: comments on the one before it go. */
+  private pruneChatComments(): void {
+    if (!this.chatComments.length) return;
+    const live = this.latestAnswerIds;
+    const left = this.chatComments.filter((c) => live.has(c.itemId));
+    if (left.length !== this.chatComments.length) this.chatComments = left;
+  }
+
+  /**
+   * Sends what was typed with the comments on the latest answer, which then
+   * go. Without comments it is a plain send. The agent is also told to
+   * answer each and ask rather than guess (an app note, unseen).
+   */
+  async sendWithComments(typed: string): Promise<string | undefined> {
+    const comments = this.owner ? [] : this.chatComments;
+    if (!comments.length) return this.send(typed);
+    const sent = new Set(comments.map((c) => c.id));
+    this.appNotes.push(CHAT_GUIDANCE);
+    const messageId = await this.send(withChatComments(typed, comments));
+    if (messageId) this.chatComments = this.chatComments.filter((c) => !sent.has(c.id));
+    return messageId;
+  }
+
+  /** Self-test only: comments on the first match of `quote` in the latest answer. */
+  addTestChatComment(quote: string, text: string): void {
+    for (const item of this.items) {
+      if (item.type !== "text" || !this.latestAnswerIds.has(item.id)) continue;
+      const md = document.querySelector(`[data-item="${item.id}"] .md`);
+      const from = md?.textContent?.indexOf(quote) ?? -1;
+      if (from < 0) continue;
+      this.addChatComment({ itemId: item.id, from, to: from + quote.length, quote, text });
+      return;
+    }
+  }
+
   /** The waiting plan as it stands: the user's edit, or the agent's text. */
   get planText(): string {
     return this.plan ? (this.planDraft ?? planOf(this.plan.input).text) : "";
@@ -1148,6 +1222,7 @@ export class Chat {
 
   private push<T extends Item>(item: NewItem): T {
     this.items.push({ ...item, id: this.nextId++ } as Item);
+    if (item.type === "text") this.pruneChatComments();
     // Read it back so the caller holds the reactive version.
     return this.items[this.items.length - 1] as T;
   }
