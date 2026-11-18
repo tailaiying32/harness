@@ -639,14 +639,14 @@
       <SidePanel {chat} covered={showSettings || !!chat.viewing} />
     {/key}
   {/if}
-  <!-- Drawn over the chat and panel, which stay as they are underneath. -->
+  </div>
+  <!-- Over the top bar, chat and panel alike: everything but the sidebar.
+       What's underneath stays as it is. -->
   {#if chat.viewing}
     {#key chat.sessionId}
       <ImageViewer {chat} />
     {/key}
   {/if}
-  </div>
-  <!-- Over the top bar, chat and panel alike: everything but the sidebar. -->
   {#if showSettings}
     <Settings {app} cursorModels={models.cursor} {cursorShown} onCursorPick={pickCursorModel} bind:darkTheme bind:lightTheme bind:appearance bind:size bind:fontSize onclose={() => (showSettings = false)} />
   {/if}

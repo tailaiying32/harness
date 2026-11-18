@@ -464,6 +464,10 @@
     padding-top: var(--gap);
     border-top: 1px solid var(--line);
   }
+  /* The side chat's box lines up with its text column, as the main one does. */
+  .tabbed .foot {
+    margin: 0 max(var(--pad-x), calc((100% - var(--col)) / 2)) var(--foot-y);
+  }
   .feedback {
     display: flex;
   }
