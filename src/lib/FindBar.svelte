@@ -117,8 +117,10 @@
 <style>
   .find-bar {
     position: absolute;
-    top: 6px;
-    right: calc(var(--pad-x) + 6px);
+    /* At the top of the view, its right edge on the text's right edge (the
+       view says where that is), not out by the window's corner. */
+    top: calc(var(--pad-y) / 2);
+    right: var(--find-right, var(--pad-x));
     z-index: 5;
     display: flex;
     align-items: center;

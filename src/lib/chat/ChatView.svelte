@@ -329,6 +329,8 @@
     display: flex;
     flex-direction: column;
     position: relative;
+    /* The find box lines up with the text column. */
+    --find-right: max(var(--pad-x), calc((100% - var(--col)) / 2));
   }
   .scroll {
     flex: 1;
