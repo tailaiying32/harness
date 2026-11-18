@@ -9,6 +9,7 @@
   import type { AppState, Limit } from "./state/app.svelte";
   import {
     appearances,
+    applyCommentButton,
     applyFontSize,
     applySize,
     fontSizes,
@@ -131,6 +132,13 @@
   let emptying = $state(false);
 
   // When overnight keep awake ends.
+  let commentButton = $state(loadPrefs().commentButton);
+  function pickCommentButton(on: boolean) {
+    commentButton = on;
+    savePrefs({ commentButton: on });
+    applyCommentButton(on);
+  }
+
   let overnightUntil = $state(loadPrefs().overnightUntil);
   function pickOvernight(time: string) {
     overnightUntil = time;
@@ -270,6 +278,17 @@
           {/each}
         </div>
       {/each}
+    </section>
+
+    <section>
+      <div class="label">Comment button</div>
+      <div class="choices">
+        {#each [true, false] as on (on)}
+          <button class:on={on === commentButton} onclick={() => pickCommentButton(on)}>
+            <span class="mark">{on === commentButton ? "(•)" : "( )"}</span>{on ? "show" : "hide"}
+          </button>
+        {/each}
+      </div>
     </section>
 
     {#if cursorModels.length}
