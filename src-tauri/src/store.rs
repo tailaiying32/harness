@@ -1275,8 +1275,6 @@ impl Store {
             .flatten()
     }
 
-    /// For the settings page, which isn't built yet.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), String> {
         self.conn
             .lock()
