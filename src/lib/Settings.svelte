@@ -407,7 +407,8 @@
     /* Above the side panel's drag edge. */
     z-index: 2;
     background: var(--bg);
-    overflow-y: auto;
+    /* Always on so the column doesn't jump when content grows past the fold. */
+    overflow-y: scroll;
     padding: var(--pad-y) var(--pad-x);
   }
   .inner {
