@@ -874,7 +874,21 @@ fn parse_models(reply: &Value) -> Vec<ModelInfo> {
             if value == "default" || value.contains('-') {
                 return None;
             }
-            let name = m["displayName"].as_str().unwrap_or(&value).to_string();
+            let mut name = m["displayName"].as_str().unwrap_or(&value).to_string();
+            // Some Claude Code versions name the family only ("Opus") and put
+            // the version in the description; the picker should say which.
+            if !name.chars().any(|c| c.is_ascii_digit()) {
+                if let Some(versioned) = m["resolvedModel"].as_str().and_then(versioned_name) {
+                    name = versioned;
+                }
+            }
+            // The description then often repeats it: "Opus 5.5 · Best for ...".
+            let detail = m["description"].as_str().map(|d| {
+                d.strip_prefix(name.as_str())
+                    .and_then(|rest| rest.strip_prefix(" · "))
+                    .unwrap_or(d)
+                    .to_owned()
+            });
             let efforts = m["supportedEffortLevels"]
                 .as_array()
                 .into_iter()
@@ -887,7 +901,7 @@ fn parse_models(reply: &Value) -> Vec<ModelInfo> {
                 ModelInfo {
                     value,
                     name,
-                    detail: m["description"].as_str().map(str::to_owned),
+                    detail,
                     efforts,
                     default_effort: None,
                 },
@@ -897,6 +911,19 @@ fn parse_models(reply: &Value) -> Vec<ModelInfo> {
     // Stable: the rest keep Claude Code's order.
     models.sort_by_key(|(first, _)| !first);
     models.into_iter().map(|(_, m)| m).collect()
+}
+
+/// "claude-opus-5-5" → "Opus 5.5"; "claude-haiku-4-5-20251001" → "Haiku 4.5".
+/// None if the id doesn't have that shape.
+fn versioned_name(model: &str) -> Option<String> {
+    let mut parts = model.strip_prefix("claude-")?.split('-');
+    let family = parts.next().filter(|f| !f.is_empty() && f.chars().all(|c| c.is_ascii_alphabetic()))?;
+    let mut letters = family.chars();
+    let family: String = letters.next()?.to_uppercase().chain(letters).collect();
+    let version: Vec<&str> = parts
+        .take_while(|p| !p.is_empty() && p.len() < 8 && p.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    (!version.is_empty()).then(|| format!("{family} {}", version.join(".")))
 }
 
 impl ClaudeCodeProcess {
@@ -2297,6 +2324,25 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
             ]
         );
         assert!(parse_models(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn a_model_named_without_its_version_gets_it_from_the_model_id() {
+        let reply = json!({ "response": { "response": { "models": [
+            { "value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus", "description": "Opus 5.5 · Best for everyday, complex tasks" },
+            { "value": "haiku", "resolvedModel": "claude-haiku-4-5-20251001", "displayName": "Haiku", "description": "Fast" },
+            { "value": "odd", "resolvedModel": "something-else", "displayName": "Odd" },
+        ]}}});
+        let names: Vec<(String, Option<String>)> =
+            parse_models(&reply).into_iter().map(|m| (m.name, m.detail)).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("Opus 5.5".into(), Some("Best for everyday, complex tasks".into())),
+                ("Haiku 4.5".into(), Some("Fast".into())),
+                ("Odd".into(), None),
+            ]
+        );
     }
 
     #[test]
