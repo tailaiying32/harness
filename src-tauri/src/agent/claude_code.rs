@@ -31,6 +31,54 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 /// The request ID of the context-usage question asked after each turn.
 const CONTEXT_REQUEST: &str = "harness-context-usage";
 
+/// The request ID of the usage-limits question asked at start and after each turn.
+const USAGE_REQUEST: &str = "harness-usage";
+
+/// Asks for the plan's usage limits: every limit, spent or not, without a
+/// model call (about 0.3 s on CLI 2.1.326). `rate_limit_event` only brings
+/// the limits of the model that just answered.
+fn usage_request() -> String {
+    json!({
+        "type": "control_request",
+        "request_id": USAGE_REQUEST,
+        "request": { "subtype": "get_usage", "skip_behaviors": true },
+    })
+    .to_string()
+}
+
+/// The limits in a `get_usage` answer, under the names `rate_limit_event`
+/// gives them so each limit keeps one reading. `rate_limits` holds
+/// `five_hour`, `seven_day`, `seven_day_opus`, `seven_day_sonnet` (null when
+/// the plan has none) and `model_scoped`, the limits of one model ("Fable"),
+/// which `rate_limit_event` calls `seven_day_overage_included`. Here
+/// utilization is a percent and `resets_at` an ISO time.
+fn usage_events(reply: &Value) -> Vec<AgentEvent> {
+    let reading = |window: String, limit: &Value| {
+        let utilization = limit["utilization"].as_f64()? / 100.0;
+        let resets_at = limit["resets_at"]
+            .as_str()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .and_then(|t| u64::try_from(t.timestamp()).ok());
+        Some(AgentEvent::UsageUpdate { window: Some(window), utilization, resets_at })
+    };
+    if reply["rate_limits_available"] != true {
+        return Vec::new();
+    }
+    let mut events: Vec<AgentEvent> = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"]
+        .iter()
+        .filter_map(|key| reading(key.to_string(), &reply["rate_limits"][key]))
+        .collect();
+    let scoped = reply["rate_limits"]["model_scoped"].as_array().map(Vec::as_slice).unwrap_or_default();
+    for limit in scoped {
+        let window = match scoped.len() {
+            1 => "seven_day_overage_included".to_string(),
+            _ => limit["display_name"].as_str().unwrap_or("model").to_lowercase(),
+        };
+        events.extend(reading(window, limit));
+    }
+    events
+}
+
 /// The start of a take-back request's ID; the message's ID follows.
 const WITHDRAW_REQUEST: &str = "harness-withdraw:";
 
@@ -391,6 +439,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
             }
         });
 
+        // The plan's usage so far; it answers before any message is sent.
+        if opts.side.is_none() {
+            let _ = tx.send(Out::Line(usage_request()));
+        }
+
         // Stderr: keep the last few lines for error display.
         let stderr_tail: Arc<Mutex<VecDeque<String>>> = Arc::default();
         {
@@ -481,10 +534,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
                             let _ = tx.send(Out::Line(reply));
                         }
                     }
-                    // After each turn, ask how full the context is (main chats only).
+                    // After each turn, ask how full the context is and how much
+                    // of the plan is spent (main chats only).
                     if value["type"] == "result" && !is_side {
                         if let Some(tx) = weak_tx.upgrade() {
                             let _ = tx.send(Out::Line(context_request()));
+                            let _ = tx.send(Out::Line(usage_request()));
                         }
                     }
                     for event in acknowledge(translated.events, &sent) {
@@ -852,6 +907,7 @@ fn parse_commands(reply: &Value) -> Vec<CommandInfo> {
                     .flatten()
                     .filter_map(|a| a.as_str().map(str::to_owned))
                     .collect(),
+                skill: false,
             })
         })
         .collect()
@@ -1536,6 +1592,11 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
                     .to_string(),
                 );
             }
+        }
+
+        // The answer to the usage question. A refusal (an older CLI) is ignored.
+        "control_response" if v["response"]["request_id"] == USAGE_REQUEST => {
+            out.events.extend(usage_events(&v["response"]["response"]));
         }
 
         // Replies to requests this app sent (stop, mode, model). Only failures
@@ -2285,18 +2346,21 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
                     description: "Free up context by summarizing the conversation so far".into(),
                     hint: Some("<optional custom summarization instructions>".into()),
                     aliases: vec![],
+                    skill: false,
                 },
                 CommandInfo {
                     name: "usage".into(),
                     description: "Show session cost".into(),
                     hint: None,
                     aliases: vec!["cost".into(), "stats".into()],
+                    skill: false,
                 },
                 CommandInfo {
                     name: "design:ux-copy".into(),
                     description: "(design) Write or review UX copy".into(),
                     hint: None,
                     aliases: vec![],
+                    skill: false,
                 },
             ]
         );
@@ -2484,6 +2548,29 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
             &Pending::default(),
         );
         assert_eq!(got, vec![AgentEvent::UsageUpdate { window: Some("five_hour".into()), utilization: 0.1, resets_at: None }]);
+    }
+
+    #[test]
+    fn usage_question_reads_every_limit() {
+        // As answered by CLI 2.1.326 on a Max plan (trimmed).
+        let reply = r#"{"type":"control_response","response":{"subtype":"success","request_id":"harness-usage","response":{"subscription_type":"max","rate_limits_available":true,"rate_limits":{"five_hour":null,"seven_day":{"utilization":37,"resets_at":"2026-11-23T21:59:59.999324+00:00"},"seven_day_opus":null,"seven_day_sonnet":null,"model_scoped":[{"display_name":"Fable","utilization":30,"resets_at":"2026-11-23T21:59:59.999588+00:00"}]}}}}"#;
+        let got = events(reply, &Pending::default());
+        assert_eq!(
+            got,
+            vec![
+                AgentEvent::UsageUpdate { window: Some("seven_day".into()), utilization: 0.37, resets_at: Some(1795471199) },
+                AgentEvent::UsageUpdate {
+                    window: Some("seven_day_overage_included".into()),
+                    utilization: 0.3,
+                    resets_at: Some(1795471199),
+                },
+            ]
+        );
+        // No plan limits (an API key), or an older CLI's refusal: nothing, and no error.
+        let none = r#"{"type":"control_response","response":{"subtype":"success","request_id":"harness-usage","response":{"rate_limits_available":false}}}"#;
+        assert!(events(none, &Pending::default()).is_empty());
+        let refused = r#"{"type":"control_response","response":{"subtype":"error","request_id":"harness-usage","error":"Unsupported"}}"#;
+        assert!(events(refused, &Pending::default()).is_empty());
     }
 
     #[test]

@@ -28,6 +28,8 @@ pub static DIALECT: Dialect = Dialect {
     session_meta: |_| Value::Null,
     pick_default_model: true,
     forms: false,
+    print_commands: &[],
+    compacts: false,
 };
 
 /// Asks for plain model ids with names, and each model's effort levels as
@@ -303,12 +305,14 @@ mod tests {
                     description: "Keep a PR merge-ready. (builtin skill)".into(),
                     hint: None,
                     aliases: vec![],
+                    skill: false,
                 },
                 CommandInfo {
                     name: "shell".into(),
                     description: "Runs the rest as a shell command.".into(),
                     hint: Some("command".into()),
                     aliases: vec![],
+                    skill: false,
                 },
             ]
         );
