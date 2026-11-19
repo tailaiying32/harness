@@ -817,6 +817,16 @@ fn terminal_text(state: State<'_, AppState>, tab: String, lines: usize) -> Resul
     state.terminals.text(&tab, lines)
 }
 
+/// How long after launch background upkeep (worktree sweep, pull request
+/// checks) waits, so it doesn't compete with the window's first paint.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// When the app started.
+fn launched() -> std::time::Instant {
+    static AT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *AT.get_or_init(std::time::Instant::now)
+}
+
 /// Closes the window: Cmd+W outside a terminal, as the default menu did.
 #[tauri::command]
 fn close_window(window: tauri::Window) -> Result<(), String> {
@@ -1049,6 +1059,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            launched();
             let dir = match std::env::var_os("HARNESS_DATA_DIR") {
                 Some(dir) => PathBuf::from(dir),
                 None => app.path().app_data_dir()?,
@@ -1234,10 +1245,13 @@ pub fn run() {
                     sessions.sweep_chat_files();
                 });
             }
-            // The worktree cleanup pass: at start, then every hour.
+            // The worktree cleanup pass: soon after start, then every hour.
+            // Not at once: its git and gh calls would compete with the first
+            // paint, and on Windows each process start is slow.
             {
                 let sessions = sessions.clone();
                 tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(SETTLE).await;
                     loop {
                         sessions.sweep().await;
                         tokio::time::sleep(sessions::SWEEP_EVERY).await;
@@ -1258,11 +1272,16 @@ pub fn run() {
             Ok(())
         })
         // Back in front: pull requests merged or closed meanwhile show at once.
+        // The first focus, at launch, waits until startup has settled.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(true) = event {
                 if let Some(state) = window.try_state::<AppState>() {
                     let sessions = state.sessions.clone();
-                    tauri::async_runtime::spawn(async move { sessions.check_all_prs().await });
+                    let wait = SETTLE.saturating_sub(launched().elapsed());
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(wait).await;
+                        sessions.check_all_prs().await
+                    });
                 }
             }
         })

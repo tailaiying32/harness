@@ -215,7 +215,10 @@
       app.defaultModel = startingModel("", app.defaultAgent, models);
     }
     app.followProject(app.current);
-    for (const agent of setup.agents) void refreshModels(agent);
+    // Each list starts an agent process: after the first paint, not during
+    // it (process starts are slow on Windows). The last lists show meanwhile.
+    const agents = setup.agents;
+    setTimeout(() => agents.forEach((agent) => void refreshModels(agent)), 3000);
     void runSelfTest();
   });
 
