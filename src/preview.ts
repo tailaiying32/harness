@@ -1191,6 +1191,7 @@ Object.assign(commands, {
   },
   terminal_text: (args: Args) => termOutput.get(String(args.tab)) ?? "",
   close_window: () => {},
+  title_bar: () => {},
 });
 
 (window as any).__TAURI_INTERNALS__ = {

@@ -2,7 +2,10 @@
    (src/lib/themes.ts); sizes from the data-size attribute on the root. */
 
 :root {
-  --font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  /* ui-monospace and SF Mono are Mac-only; Windows 11 ships Cascadia Mono,
+     which is as tall as SF Mono (Consolas reads a size smaller). */
+  --font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, "Cascadia Mono", "Cascadia Code", Consolas,
+    "Liberation Mono", monospace;
 
   /* The text size is its own setting (see applyFontSize); the rest is regular
      spacing. Everything else is laid out in ch and em so it scales with these. */

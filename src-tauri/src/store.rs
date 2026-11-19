@@ -1450,7 +1450,7 @@ mod tests {
         store.set_choice("a", Some("worktree")).unwrap();
         store.set_worktree("a", &worktree(), "live").unwrap();
         let row = store.session("a").unwrap().unwrap();
-        assert_eq!(row.work_path.as_deref(), Some("/wts/one-abc/web"));
+        assert_eq!(row.work_path.as_deref().map(std::path::Path::new), Some(std::path::Path::new("/wts/one-abc/web")));
         assert_eq!(row.branch.as_deref(), Some("harness/x-abc"));
         assert_eq!(row.project_path, "/one/web");
 

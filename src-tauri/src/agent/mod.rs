@@ -68,6 +68,11 @@ impl Agents {
         found
     }
 
+    /// The agent, installed or not: enough to delete what it saved.
+    pub fn adapter(&self, id: &str) -> Option<Arc<dyn AgentAdapter>> {
+        self.0.lock().unwrap().get(id).map(|(adapter, _)| adapter.clone())
+    }
+
     /// The agent and its program, or why it can't be used.
     pub fn get(&self, id: &str) -> Result<(Arc<dyn AgentAdapter>, PathBuf), String> {
         let agents = self.0.lock().unwrap();
@@ -266,9 +271,63 @@ pub async fn answer_mcp(tools: &AppTools, message: &Value) -> Option<Value> {
 /// How a side chat starts.
 #[derive(Clone, Debug, Default)]
 pub struct SideOptions {
-    /// The main chat's agent session ID, copied on the side chat's first start.
-    /// None when the main chat hasn't started one yet.
+    /// The main chat's agent session ID, for an agent that copies it itself
+    /// (`SideCopy::Fork`) on the side chat's first start. None when the main
+    /// chat hasn't started one yet, or the app copied it already.
     pub fork_from: Option<String>,
+    /// The side chat's first start (not a resume after an idle close): an
+    /// agent that hears its instructions only with a new conversation's first
+    /// message (Cursor) is told them now, though it loads a copy.
+    pub first: bool,
+}
+
+/// How a side chat gets its copy of a chat's session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SideCopy {
+    /// The agent copies it when it starts (`SideOptions::fork_from`).
+    Fork,
+    /// The app copies the saved session first (`copy_session`), then the
+    /// side chat resumes the copy.
+    Files,
+    /// No copy: the side chat starts fresh and reads the chat with the app's
+    /// earlier-chats tool.
+    None,
+}
+
+/// Added to a side chat's instructions, for every agent.
+pub const SIDE_INSTRUCTION: &str = "This is a side conversation about the chat above. The user asks \
+quick questions here while the main chat carries on. You can read and search files but not change \
+anything or run commands. Answer briefly.";
+
+/// Whether an agent's session ID is plain enough to name a file by: letters,
+/// digits and dashes only, so it can never reach outside a folder.
+pub fn plain_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Copies a SQLite database whole, including what is still in its write-ahead
+/// log, even while its owner has it open. `to` must not exist yet.
+pub(crate) fn copy_database(from: &Path, to: &Path) -> Result<(), String> {
+    let db = rusqlite::Connection::open_with_flags(from, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("Couldn't open {}: {e}", from.display()))?;
+    db.execute("VACUUM INTO ?1", [to.to_string_lossy()])
+        .map_err(|e| format!("Couldn't copy {}: {e}", from.display()))?;
+    Ok(())
+}
+
+/// Copies a folder and everything in it. `to` must not exist yet.
+pub(crate) fn copy_folder(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_folder(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 
 /// An image to send with a message.
@@ -349,6 +408,17 @@ pub trait AgentAdapter: Send + Sync {
     /// Delete what the agent saved for a session, so it can't be resumed or
     /// listed. Used when a side chat ends. Failures are ignored.
     fn forget_session(&self, agent_session_id: &str);
+
+    /// How a side chat gets its copy of a chat (see `SideCopy`).
+    fn side_copy(&self) -> SideCopy {
+        SideCopy::None
+    }
+
+    /// For `SideCopy::Files`: copy the saved session `agent_session_id` under
+    /// a new ID, returned. Nothing is left behind when it fails.
+    fn copy_session(&self, _agent_session_id: &str) -> Result<String, String> {
+        Err("This agent's sessions can't be copied".to_string())
+    }
 
     /// Whether the agent still has a session saved, so it can be resumed.
     /// Used before a side chat resumes its copy. Agents that can't tell say yes.

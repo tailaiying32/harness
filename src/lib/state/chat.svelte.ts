@@ -1758,12 +1758,8 @@ export class Chat {
   async send(text: string, from: ImageRef[] = this.draftImages): Promise<string | undefined> {
     let message = text.trim();
     if (!message) return;
-    // `/btw` goes to the side chat, never to Claude Code (which can't run it headless).
+    // `/btw` goes to the side chat, never to the agent (Claude Code can't run it headless).
     const btw = this.owner ? null : message.match(/^\/btw(?:\s+([\s\S]*))?$/);
-    if (btw && this.agent !== CLAUDE) {
-      this.push({ type: "error", text: "Side chats work in Claude Code chats only." });
-      return;
-    }
     if (btw) {
       const question = (btw[1] ?? "").trim();
       if (question) await this.askSide(question);
@@ -1782,6 +1778,8 @@ export class Chat {
       if (image && !images.includes(image)) images.push(image);
     }
     if (from === this.draftImages) this.draftImages = [];
+    // A side chat's first question starts it on the chat's agent as it is now.
+    if (this.owner && !this.started) this.agent = this.owner.started ? this.owner.ranOn : this.owner.agent;
     // A chat's first message saves it on the agent picked.
     if (!this.started) this.ranOn = this.agent;
     // A switch goes through with this message: its line sits above it.
@@ -1793,7 +1791,18 @@ export class Chat {
       const owner = this.owner;
       if (owner) {
         // Pictures are for the main chat; a side chat gets the words only.
-        await sideSend(this.sessionId, owner.projectPath.trim(), owner.modelChoice, owner.effortChoice, message, messageId);
+        // The model and effort picked go along only when they are for the
+        // agent the side chat runs on, not one picked for the chat's next message.
+        const ownPicks = owner.agent === this.agent;
+        await sideSend(
+          this.sessionId,
+          owner.projectPath.trim(),
+          this.agent,
+          ownPicks ? owner.modelChoice : null,
+          ownPicks ? owner.effortChoice : null,
+          message,
+          messageId,
+        );
       } else {
         // A fact, not "the user means X": the agent judges whether it applies.
         // Not with a `/command`: the note would sit in front of it.
@@ -1931,6 +1940,8 @@ export class Chat {
     // Random, not counted: a reloaded window must not reuse an id the core may still know.
     const side = new Chat(`${this.sessionId}#side-${crypto.randomUUID().slice(0, 8)}`, this);
     side.born = ++this.sidesMade;
+    // On the chat's agent: the one it runs on, or the one picked if it hasn't started.
+    side.agent = side.ranOn = this.started ? this.ranOn : this.agent;
     side.projectPath = this.projectPath;
     side.workPath = this.workPath;
     this.sides.push(side);

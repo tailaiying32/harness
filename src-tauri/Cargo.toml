@@ -32,9 +32,10 @@ trash = "5.4.0"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Keeping the computer awake on Windows (keep_awake.rs).
+# Keeping the computer awake on Windows (keep_awake.rs), the title bar's
+# colours (`title_bar` in lib.rs), and whether a process runs (side_chat.rs).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Power", "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_Power", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse"] }
 
 # The browser's screenshots on Mac. Same versions wry already uses.
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -18,7 +18,7 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SideOptions, SpawnOptions, notes_instruction,
+    AgentAdapter, AppTools, EventSink, ImagePayload, RunningAgent, SIDE_INSTRUCTION, SideCopy, SideOptions, SpawnOptions, notes_instruction,
     preferences_instruction,
 };
 use crate::events::{AgentEvent, ApprovalKind, BackgroundTask, Block, CommandInfo, ContextPart, Decision, ModelInfo, SessionState};
@@ -191,10 +191,6 @@ fn mcp_config(tools: &[AppTools]) -> String {
     json!({ "mcpServers": servers }).to_string()
 }
 
-/// Added to a side chat's instructions on every launch.
-const SIDE_INSTRUCTION: &str = "This is a side conversation about the chat above. The user asks \
-quick questions here while the main chat carries on. You can read and search files but not change \
-anything or run commands. Answer briefly.";
 
 /// A plan the user edited replaces the agent's in the approved input: Claude
 /// Code works from that text (tested on CLI 2.1.322; no file write needed).
@@ -277,11 +273,13 @@ fn launch_args(opts: &SpawnOptions) -> Vec<String> {
 }
 
 /// A side chat's command line. Read-only: only the file reading and search
-/// tools, and `--strict-mcp-config` with no config, so no tool servers load
-/// (without it the user's online connectors appeared from the second message
-/// on; tested on CLI 2.1.322). No approval channel: anything needing
-/// permission is refused without asking. Its session is saved, so it can be
-/// resumed after an idle close; `forget_session` removes it when it ends.
+/// tools, and `--strict-mcp-config`, so only the app's tool servers given
+/// load (without it the user's online connectors appeared from the second
+/// message on; tested on CLI 2.1.322). A side chat that couldn't copy its
+/// chat gets the earlier-chats tool, allowed without asking. No approval
+/// channel: anything else needing permission is refused without asking. Its
+/// session is saved, so it can be resumed after an idle close;
+/// `forget_session` removes it when it ends.
 fn side_args(opts: &SpawnOptions, side: &SideOptions) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
@@ -299,6 +297,15 @@ fn side_args(opts: &SpawnOptions, side: &SideOptions) -> Vec<String> {
     .map(String::from)
     .to_vec();
     let mut instructions = SIDE_INSTRUCTION.to_string();
+    if !opts.tools.is_empty() {
+        args.extend(["--mcp-config".to_string(), mcp_config(&opts.tools)]);
+        let allowed: Vec<String> = opts.tools.iter().map(|t| format!("mcp__{}", t.server)).collect();
+        args.extend(["--allowedTools".to_string(), allowed.join(",")]);
+        for tools in &opts.tools {
+            instructions.push_str("\n\n");
+            instructions.push_str(&tools.instruction);
+        }
+    }
     // The same memory as its chat: read when it starts, like the main chat's.
     if let Some(memory) = &opts.memory {
         args.extend(["--settings".to_string(), memory_settings(memory)]);
@@ -668,6 +675,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn has_session(&self, agent_session_id: &str) -> bool {
         !saved_session_files(agent_session_id).is_empty()
     }
+
+    fn side_copy(&self) -> SideCopy {
+        SideCopy::Fork
+    }
 }
 
 /// Claude Code keeps each session as `~/.claude/projects/<folder>/<id>.jsonl`
@@ -676,9 +687,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
 /// for the exact file name. These are a session's files.
 fn saved_session_files(agent_session_id: &str) -> Vec<std::path::PathBuf> {
     // Only a plain ID; never anything that could reach outside the folder.
-    if agent_session_id.is_empty()
-        || !agent_session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
+    if !super::plain_id(agent_session_id) {
         return Vec::new();
     }
     let base = std::env::var_os("CLAUDE_CONFIG_DIR")
@@ -930,7 +939,21 @@ fn parse_models(reply: &Value) -> Vec<ModelInfo> {
             if value == "default" || value.contains('-') {
                 return None;
             }
-            let name = m["displayName"].as_str().unwrap_or(&value).to_string();
+            let mut name = m["displayName"].as_str().unwrap_or(&value).to_string();
+            // Some Claude Code versions name the family only ("Opus") and put
+            // the version in the description; the picker should say which.
+            if !name.chars().any(|c| c.is_ascii_digit()) {
+                if let Some(versioned) = m["resolvedModel"].as_str().and_then(versioned_name) {
+                    name = versioned;
+                }
+            }
+            // The description then often repeats it: "Opus 5.5 · Best for ...".
+            let detail = m["description"].as_str().map(|d| {
+                d.strip_prefix(name.as_str())
+                    .and_then(|rest| rest.strip_prefix(" · "))
+                    .unwrap_or(d)
+                    .to_owned()
+            });
             let efforts = m["supportedEffortLevels"]
                 .as_array()
                 .into_iter()
@@ -943,7 +966,7 @@ fn parse_models(reply: &Value) -> Vec<ModelInfo> {
                 ModelInfo {
                     value,
                     name,
-                    detail: m["description"].as_str().map(str::to_owned),
+                    detail,
                     efforts,
                     default_effort: None,
                 },
@@ -953,6 +976,19 @@ fn parse_models(reply: &Value) -> Vec<ModelInfo> {
     // Stable: the rest keep Claude Code's order.
     models.sort_by_key(|(first, _)| !first);
     models.into_iter().map(|(_, m)| m).collect()
+}
+
+/// "claude-opus-5-5" → "Opus 5.5"; "claude-haiku-4-5-20251001" → "Haiku 4.5".
+/// None if the id doesn't have that shape.
+fn versioned_name(model: &str) -> Option<String> {
+    let mut parts = model.strip_prefix("claude-")?.split('-');
+    let family = parts.next().filter(|f| !f.is_empty() && f.chars().all(|c| c.is_ascii_alphabetic()))?;
+    let mut letters = family.chars();
+    let family: String = letters.next()?.to_uppercase().chain(letters).collect();
+    let version: Vec<&str> = parts
+        .take_while(|p| !p.is_empty() && p.len() < 8 && p.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    (!version.is_empty()).then(|| format!("{family} {}", version.join(".")))
 }
 
 impl ClaudeCodeProcess {
@@ -2364,6 +2400,25 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
     }
 
     #[test]
+    fn a_model_named_without_its_version_gets_it_from_the_model_id() {
+        let reply = json!({ "response": { "response": { "models": [
+            { "value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus", "description": "Opus 5.5 · Best for everyday, complex tasks" },
+            { "value": "haiku", "resolvedModel": "claude-haiku-4-5-20251001", "displayName": "Haiku", "description": "Fast" },
+            { "value": "odd", "resolvedModel": "something-else", "displayName": "Odd" },
+        ]}}});
+        let names: Vec<(String, Option<String>)> =
+            parse_models(&reply).into_iter().map(|m| (m.name, m.detail)).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("Opus 5.5".into(), Some("Best for everyday, complex tasks".into())),
+                ("Haiku 4.5".into(), Some("Fast".into())),
+                ("Odd".into(), None),
+            ]
+        );
+    }
+
+    #[test]
     fn a_refused_request_becomes_an_error() {
         let got = events(
             r#"{"type":"control_response","response":{"subtype":"error","request_id":"m2","error":"Model 'nope' not found","error_code":"not_found"}}"#,
@@ -2660,6 +2715,7 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
                 effort: None,
                 side: Some(SideOptions {
                     fork_from: Some("main-1".into()),
+                    first: true,
                 }),
                 tools: Vec::new(),
                 notes: None,
@@ -2712,5 +2768,25 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
         assert!(!folder.join("side-1.jsonl").exists());
         assert!(folder.join("main-1.jsonl").exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_side_chat_given_the_chats_tool_may_use_it_without_asking() {
+        let tools = vec![AppTools {
+            server: "harness_chats",
+            instruction: "Look up earlier chats.".into(),
+            list: json!([]),
+            call: Arc::new(|_, _| Box::pin(async { Ok(Vec::new()) })),
+        }];
+        let args = launch_args(&SpawnOptions { tools, side: Some(SideOptions::default()), ..bare_options() });
+        let at = |flag: &str| args.iter().position(|a| a == flag).map(|i| args[i + 1].clone());
+        assert!(at("--mcp-config").unwrap().contains("harness_chats"));
+        assert_eq!(at("--allowedTools").as_deref(), Some("mcp__harness_chats"));
+        assert_eq!(at("--tools").as_deref(), Some("Read,Grep,Glob"));
+        assert!(args.contains(&"--strict-mcp-config".to_string()));
+        assert!(at("--append-system-prompt").unwrap().contains("Look up earlier chats."));
+        // Without tools, none load.
+        let bare = launch_args(&SpawnOptions { side: Some(SideOptions::default()), ..bare_options() });
+        assert!(!bare.contains(&"--mcp-config".to_string()) && !bare.contains(&"--allowedTools".to_string()));
     }
 }

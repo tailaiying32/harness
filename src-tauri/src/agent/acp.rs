@@ -33,6 +33,9 @@ const STDERR_TAIL_LINES: usize = 30;
 const STOP_GRACE: Duration = Duration::from_secs(5);
 /// ACP's error code for "sign in first".
 const AUTH_REQUIRED: i64 = -32000;
+/// Told to a side chat's agent that stopped at a refusal without a word.
+const REFUSED_NOTE: &str = "(From the app, not the user: That was refused. In this side chat you can read \
+and search files, but not change anything or run commands. Answer in words from what you can read.)";
 /// How long the agent may go quiet before a follow-up it started on its own
 /// counts as finished.
 const FOLLOW_UP_QUIET: Duration = Duration::from_secs(8);
@@ -46,6 +49,10 @@ pub struct AcpConfig {
     /// `clientCapabilities._meta`: the agent's own extension switches.
     pub client_meta: Value,
     pub dialect: &'static Dialect,
+    /// A side chat: read-only, so every request to ask the user (a
+    /// permission, a plan, questions) is refused at once, as a Claude Code
+    /// side chat with no way to ask refuses them.
+    pub side: bool,
 }
 
 /// Where a new conversation's instructions from the app go.
@@ -405,6 +412,11 @@ struct State {
     effort: Option<String>,
     /// Notes waiting for the next prompt.
     notes: Vec<String>,
+    /// A side chat: something was refused this turn and no words came after.
+    refused: bool,
+    /// A side chat: the agent was told once, since the user's last message,
+    /// why something was refused.
+    told_refused: bool,
     /// A plan was approved: leave plan mode before the next prompt.
     build_after_turn: bool,
     /// A plan written this turn as a file, to offer for approval when the
@@ -492,6 +504,8 @@ struct Shared {
     own_tools: Vec<String>,
     label: &'static str,
     dialect: &'static Dialect,
+    /// A side chat: nothing waits for the user (`AcpConfig::side`).
+    side: bool,
 }
 
 impl Shared {
@@ -578,6 +592,7 @@ pub fn spawn(binary: PathBuf, cfg: AcpConfig, opts: SpawnOptions, sink: EventSin
         own_tools: opts.tools.iter().map(|t| t.server.to_string()).collect(),
         label,
         dialect: cfg.dialect,
+        side: cfg.side,
     });
     shared.emit(AgentEvent::Status {
         state: SessionState::Starting,
@@ -841,7 +856,10 @@ async fn drive(
     });
 
     // What a new conversation is told once, with its first message.
-    let mut intro = if fresh && dialect.intro == Intro::FirstPrompt { told } else { None };
+    // A side chat's first start is told too: it loaded a copy of a chat that
+    // heard other instructions.
+    let new_side = opts.side.as_ref().is_some_and(|s| s.first);
+    let mut intro = if (fresh || new_side) && dialect.intro == Intro::FirstPrompt { told } else { None };
 
     while let Some(first) = items.recv().await {
         let mut batch = vec![first];
@@ -873,6 +891,7 @@ async fn drive(
                     if !shared.state.lock().unwrap().queued.remove(&id) {
                         continue;
                     }
+                    shared.state.lock().unwrap().told_refused = false;
                     for (media_type, data) in images {
                         body.push(json!({ "type": "image", "mimeType": media_type, "data": data }));
                     }
@@ -960,6 +979,16 @@ async fn drive(
                     false
                 }
             };
+            // A side chat whose agent stopped at a refusal without a word
+            // (Antigravity does) is told why once, and answers in the same
+            // turn, as Claude Code does on its own.
+            if shared.side && ok && !stopped && !closing {
+                let mut state = shared.state.lock().unwrap();
+                if std::mem::take(&mut state.refused) && !state.told_refused {
+                    state.told_refused = true;
+                    state.notes.push(REFUSED_NOTE.to_string());
+                }
+            }
             // Notes from the turn (an approved plan, say) carry it on at once:
             // to the user it is one turn, as with Claude Code. Not after a
             // stop, a failure, or when closing.
@@ -1048,13 +1077,19 @@ fn sign_in_needed(shared: &Shared, e: RpcError) {
 /// project's memory and the user's preferences. Where it goes is the
 /// dialect's `intro`.
 fn instructions(opts: &SpawnOptions) -> Option<String> {
-    let mut lines: Vec<String> = opts.tools.iter().map(|t| t.instruction.to_string()).collect();
+    let side = opts.side.is_some();
+    let mut lines: Vec<String> = Vec::new();
+    // A side chat reads and answers: told so, and given no way to write notes or memory.
+    if side {
+        lines.push(super::SIDE_INSTRUCTION.to_string());
+    }
+    lines.extend(opts.tools.iter().map(|t| t.instruction.to_string()));
     if let Some(notes) = &opts.notes {
-        lines.push(super::notes_instruction(notes, opts.project_docs.as_deref(), true));
+        lines.push(super::notes_instruction(notes, opts.project_docs.as_deref(), !side));
     }
     // Cursor keeps no memory of its own, and Antigravity's own isn't shared
     // with the app's other agents, so each is told about the project's.
-    if let Some(memory) = &opts.memory {
+    if let Some(memory) = opts.memory.as_ref().filter(|_| !side) {
         lines.push(super::memory_instruction(memory));
     }
     if let Some(preferences) = &opts.preferences {
@@ -1192,6 +1227,20 @@ fn request(shared: &Shared, method: &str, rpc_id: &Value, params: &Value) {
             for event in events {
                 shared.emit(event);
             }
+            // A side chat changes nothing: refused without asking.
+            if shared.side && !own {
+                shared.state.lock().unwrap().refused = true;
+                let reject = options
+                    .iter()
+                    .find(|(_, kind)| kind == "reject_once")
+                    .or_else(|| options.iter().find(|(_, kind)| kind.starts_with("reject")));
+                let result = match reject {
+                    Some((option, _)) => json!({ "outcome": { "outcome": "selected", "optionId": option } }),
+                    None => json!({ "outcome": { "outcome": "cancelled" } }),
+                };
+                shared.rpc.respond(rpc_id, result);
+                return;
+            }
             // The app's own tools never ask, as with Claude Code.
             if own {
                 let allow = options
@@ -1228,6 +1277,10 @@ fn request(shared: &Shared, method: &str, rpc_id: &Value, params: &Value) {
 
         // Cursor's plan approval. A rejection's reason reaches the model; an
         // edited plan follows as a note.
+        "cursor/create_plan" if shared.side => shared.rpc.respond(
+            rpc_id,
+            json!({ "outcome": { "outcome": "rejected", "reason": "This is a read-only side chat; answer in words." } }),
+        ),
         "cursor/create_plan" => {
             let tool_id = params["toolCallId"].as_str().unwrap_or_default().to_string();
             let plan = params["plan"].as_str().unwrap_or_default().to_string();
@@ -1257,6 +1310,10 @@ fn request(shared: &Shared, method: &str, rpc_id: &Value, params: &Value) {
         }
 
         // Cursor's multiple-choice questions, shown like Claude Code's.
+        "cursor/ask_question" if shared.side => shared.rpc.respond(
+            rpc_id,
+            json!({ "outcome": { "outcome": "skipped", "reason": "This is a side chat; answer without asking." } }),
+        ),
         "cursor/ask_question" => {
             let mut questions = Vec::new();
             let mut shown = Vec::new();
@@ -1301,7 +1358,7 @@ fn request(shared: &Shared, method: &str, rpc_id: &Value, params: &Value) {
         // carries on without an answer.
         "elicitation/create" => {
             let fields = form_fields(&params["requestedSchema"]);
-            if params["mode"] != "form" || fields.is_empty() {
+            if params["mode"] != "form" || fields.is_empty() || shared.side {
                 shared.rpc.respond(rpc_id, json!({ "action": "decline" }));
                 return;
             }
@@ -1487,6 +1544,9 @@ fn update(state: &mut State, d: &Dialect, own: &[String], u: &Value) -> Vec<Agen
             let Some(text) = u["content"]["text"].as_str() else {
                 return out;
             };
+            if !thinking {
+                state.refused = false;
+            }
             if state.run.as_ref().is_some_and(|r| r.thinking != thinking) {
                 out.extend(close_run(state));
             }
@@ -2018,6 +2078,11 @@ mod tests {
 
     /// The rig for one agent's dialect, and what the driver would be sent.
     fn rig_for(dialect: &'static Dialect) -> (Rig, mpsc::UnboundedReceiver<Item>) {
+        rig_as(dialect, false)
+    }
+
+    /// The same, for a side chat or not.
+    fn rig_as(dialect: &'static Dialect, side: bool) -> (Rig, mpsc::UnboundedReceiver<Item>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let (items, items_rx) = mpsc::unbounded_channel();
         let seen: Arc<Mutex<Vec<AgentEvent>>> = Arc::default();
@@ -2034,6 +2099,7 @@ mod tests {
             own_tools: vec!["harness_browser".into()],
             label: "Cursor",
             dialect,
+            side,
         });
         ((shared, rx, seen), items_rx)
     }
@@ -2517,5 +2583,49 @@ mod tests {
         assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(config.modes, vec!["agent", "plan"]);
         assert_eq!(config.effort, Some(("reasoning".into(), vec!["low".into(), "high".into()])));
+    }
+
+    #[test]
+    fn a_side_chat_refuses_every_ask_at_once_but_lets_the_apps_tools_run() {
+        let ((shared, mut rx, seen), _) = rig_as(&crate::agent::cursor::DIALECT, true);
+        line(&shared, r#"{"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t","title":"`rm x`","kind":"execute"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}"#);
+        line(&shared, r#"{"jsonrpc":"2.0","id":2,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"u","title":"x","kind":"edit"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"}]}}"#);
+        line(&shared, r#"{"jsonrpc":"2.0","id":3,"method":"cursor/ask_question","params":{"toolCallId":"q","questions":[{"id":"a","prompt":"Which?","options":[{"id":"1","label":"One"}]}]}}"#);
+        line(&shared, r#"{"jsonrpc":"2.0","id":4,"method":"cursor/create_plan","params":{"toolCallId":"p","plan":"do it"}}"#);
+        upd(&shared, r#"{"sessionUpdate":"tool_call_update","toolCallId":"b","title":"harness_browser: open","kind":"other","rawInput":{"providerIdentifier":"harness_browser","toolName":"open","args":{}}}"#);
+        line(&shared, r#"{"jsonrpc":"2.0","id":5,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"b","title":"harness_browser-open: open","kind":"other"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"}]}}"#);
+        assert!(take(&seen).iter().all(|e| !matches!(e, AgentEvent::ApprovalRequest { .. })));
+        assert!(shared.state.lock().unwrap().waiting.is_empty());
+        let out = written(&mut rx);
+        assert_eq!(out[0]["result"]["outcome"]["optionId"], "reject-once");
+        assert_eq!(out[1]["result"]["outcome"]["outcome"], "cancelled");
+        assert_eq!(out[2]["result"]["outcome"]["outcome"], "skipped");
+        assert_eq!(out[3]["result"]["outcome"]["outcome"], "rejected");
+        assert_eq!(out[4]["result"]["outcome"]["optionId"], "allow-once");
+    }
+
+    #[test]
+    fn a_side_chat_is_told_it_is_one_and_may_only_read_the_notes() {
+        let dir = std::env::temp_dir().join(format!("harness-acp-side-{}", uuid::Uuid::new_v4()));
+        let opts = SpawnOptions {
+            binary: "agent".into(),
+            project_path: "/p".into(),
+            resume_id: None,
+            mode: None,
+            model: None,
+            effort: None,
+            side: Some(crate::agent::SideOptions { fork_from: None, first: true }),
+            tools: Vec::new(),
+            notes: Some(dir.join("notes.md")),
+            project_docs: None,
+            memory: Some(dir.join("memory")),
+            preferences: None,
+            env: Vec::new(),
+        };
+        let told = instructions(&opts).unwrap();
+        assert!(told.contains(crate::agent::SIDE_INSTRUCTION));
+        assert_eq!(told, told.replace(&crate::agent::notes_instruction(&dir.join("notes.md"), None, true), ""));
+        assert!(told.contains(&crate::agent::notes_instruction(&dir.join("notes.md"), None, false)));
+        assert!(!told.contains(&crate::agent::memory_instruction(&dir.join("memory"))));
     }
 }

@@ -1,5 +1,7 @@
 //! Keep awake: holds the computer (not the display) awake while the user is
-//! away, so chats keep working. One for the whole app; the sidebar button and
+//! away, so chats keep working. The one exception is a Windows laptop with
+//! Modern Standby on battery, where only a lit screen holds sleep off (see
+//! `platform::modern_standby`). One for the whole app; the sidebar button and
 //! an agent tool both start it. It ends on its own at the first of:
 //!
 //! - the user is back: once there has been no keyboard or mouse input for
@@ -352,7 +354,7 @@ pub fn tools() -> Value {
     json!([
         {
             "name": "keep_awake",
-            "description": "Keep the computer awake (the screen still turns off) so chats keep working while \
+            "description": "Keep the computer awake (the screen still turns off, except on a Windows laptop on battery) so chats keep working while \
 the user is away. Use it instead of running caffeinate when the user asks to keep the computer awake, \
 caffeinate, or keep the session alive. It ends on its own when the user is back, when no chat is working, \
 or after 2 hours. Give `until` only when the user asks for a later time, such as overnight; that needs the \
@@ -470,10 +472,14 @@ mod platform {
     use std::time::Duration;
 
     use windows_sys::Win32::System::Power::{
-        ES_CONTINUOUS, ES_SYSTEM_REQUIRED, GetSystemPowerStatus, SYSTEM_POWER_STATUS, SetThreadExecutionState,
+        ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, GetPwrCapabilities, GetSystemPowerStatus,
+        SYSTEM_POWER_CAPABILITIES, SYSTEM_POWER_STATUS, SetThreadExecutionState,
     };
     use windows_sys::Win32::System::SystemInformation::GetTickCount;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+
+    /// How often the hold looks again at whether the screen must stay on.
+    const RECHECK: Duration = Duration::from_secs(30);
 
     /// A thread that holds the system awake: Windows ties the request to the
     /// thread that made it, so the same thread lets it go.
@@ -482,17 +488,32 @@ mod platform {
     impl Hold {
         pub fn take() -> Result<Self, String> {
             let (tx, rx) = mpsc::channel::<()>();
+            let modern = modern_standby();
             std::thread::Builder::new()
                 .name("keep-awake".into())
-                .spawn(move || {
+                .spawn(move || loop {
+                    let flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | if modern && on_battery() { ES_DISPLAY_REQUIRED } else { 0 };
                     // SAFETY: plain calls with flag values.
-                    unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) };
-                    let _ = rx.recv();
-                    unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+                    unsafe { SetThreadExecutionState(flags) };
+                    if !matches!(rx.recv_timeout(RECHECK), Err(mpsc::RecvTimeoutError::Timeout)) {
+                        unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+                        return;
+                    }
                 })
                 .map_err(|e| format!("Can't keep the computer awake: {e}"))?;
             Ok(Hold(Some(tx)))
         }
+    }
+
+    /// Whether the PC sleeps the Modern Standby way, where sleep starts when
+    /// the screen goes off. There, on battery, Windows drops a system-awake
+    /// request 5 minutes after the sleep timeout, and only a screen kept on
+    /// holds sleep off; so on battery the screen stays on too. Plugged in, the
+    /// request holds and the screen may go dark as usual.
+    fn modern_standby() -> bool {
+        // SAFETY: an all-zero SYSTEM_POWER_CAPABILITIES is valid; the call fills it.
+        let mut caps: SYSTEM_POWER_CAPABILITIES = unsafe { std::mem::zeroed() };
+        unsafe { GetPwrCapabilities(&mut caps) && caps.AoAc }
     }
 
     impl Drop for Hold {

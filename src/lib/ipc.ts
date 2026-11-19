@@ -276,14 +276,16 @@ export const withdrawMessage = (sessionId: string, messageId: string) =>
  * Ask one of a chat's side chats something. `sideId` is `<chat id>#side-<tab>`.
  * Starts it as a copy of the chat on its first question.
  */
+/** `agent`: the chat's agent, for a chat not saved yet; a saved chat's own agent wins. */
 export const sideSend = (
   sideId: string,
   projectPath: string,
-  model: string,
-  effort: string,
+  agent: AgentId,
+  model: string | null,
+  effort: string | null,
   text: string,
   messageId: string,
-) => invoke<void>("side_send", { sideId, projectPath, model, effort, text, messageId });
+) => invoke<void>("side_send", { sideId, projectPath, agent, model, effort, text, messageId });
 /** `sideSend`'s error when the side chat's saved copy was deleted; the core has forgotten it (side_chat.rs GONE). */
 export const SIDE_GONE = "side chat gone";
 export const sideInterrupt = (sideId: string) => invoke<void>("side_interrupt", { sideId });
@@ -537,3 +539,5 @@ export const terminalMove = (tab: string, to: number) => invoke<void>("terminal_
 export const terminalText = (tab: string, lines: number) => invoke<string>("terminal_text", { tab, lines });
 /** Closes the window, as Cmd+W does outside a terminal. */
 export const closeWindow = () => invoke<void>("close_window");
+/** Colours Windows' title bar like the theme; nothing elsewhere. */
+export const titleBar = (bg: string, fg: string, dark: boolean) => invoke<void>("title_bar", { bg, fg, dark });

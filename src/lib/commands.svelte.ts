@@ -85,7 +85,6 @@ const SCREEN_ONLY: Record<AgentId, Record<string, string>> = {
     rewind: "",
     resume: "",
     fork: "",
-    btw: "",
     copy: "",
     "add-dir": "",
   },
@@ -105,7 +104,6 @@ const SCREEN_ONLY: Record<AgentId, Record<string, string>> = {
     mcp: "",
     commit: "",
     changes: "",
-    btw: "",
     about: "",
     "add-dir": "",
   },
@@ -121,7 +119,7 @@ const CLEAR: Command = {
 };
 
 const MODEL: Command = { name: "model", description: "Model and effort", hint: null, aliases: [], harness: "model" };
-/** Harness's side chat (see `send` in state/chat.svelte.ts): Claude Code chats only. */
+/** Harness's side chat (see `send` in state/chat.svelte.ts), on the chat's own agent. */
 const BTW: Command = {
   name: "btw",
   description: "Ask a side question in a side chat, without adding to this one",
@@ -200,7 +198,7 @@ export function fetchCommands(agent: AgentId, folder: string): void {
 
 /** What the `/` menu offers: Harness's own commands and skills, then the agent's, by name. */
 export function commandsFor(agent: AgentId, folder: string): Command[] {
-  const own = agent === "claude-code" ? [MODEL, BTW, CLEAR] : [MODEL, CLEAR];
+  const own = [MODEL, BTW, CLEAR];
   const out: Command[] = [...own];
   const taken = new Set(own.map((c) => c.name));
   for (const skill of store.skills) {

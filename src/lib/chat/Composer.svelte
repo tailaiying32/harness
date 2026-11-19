@@ -87,9 +87,8 @@
   const modes = $derived(agentModes[chat.agent]);
   const modeLabel = $derived(modes.find((m) => m.id === chat.mode)?.label ?? chat.mode);
 
-  function nextMode() {
-    const index = modes.findIndex((m) => m.id === chat.mode);
-    const mode: Mode = modes[(index + 1) % modes.length].id;
+  function pickMode(mode: Mode) {
+    open = null;
     void chat.changeMode(mode);
     // New chats start in the last mode picked. Plan is for one task, so it
     // isn't kept; Cursor's modes aren't either (Claude Code's are the saved kind).
@@ -143,11 +142,12 @@
     efforts.includes(chat.effortChoice) ? chat.effortChoice : (picked?.default_effort ?? null),
   );
 
-  // The line under the box has two menus, one open at a time: the chat's
-  // pull requests, and the model.
-  let open = $state<"prs" | "model" | null>(null);
+  // The line under the box has three menus, one open at a time: the chat's
+  // pull requests, the model, and the mode.
+  type Menu = "prs" | "model" | "mode";
+  let open = $state<Menu | null>(null);
   let menus = $state<Record<string, HTMLElement | undefined>>({});
-  const toggle = (which: "prs" | "model") => (open = open === which ? null : which);
+  const toggle = (which: Menu) => (open = open === which ? null : which);
 
   // Any click outside the open menu, or Escape, closes it.
   $effect(() => {
@@ -772,7 +772,23 @@
           </div>
         {/if}
       </span>
-      <button onclick={nextMode} title="Switch mode">{modeLabel}</button>
+      <span class="picker" bind:this={menus.mode}>
+        <button onclick={() => toggle("mode")} title="Mode" aria-haspopup="menu" aria-expanded={open === "mode"}>
+          {modeLabel}
+        </button>
+        {#if open === "mode"}
+          <div class="menu" role="menu">
+            {#each modes as m (m.id)}
+              <button
+                role="menuitemradio"
+                aria-checked={m.id === chat.mode}
+                class:on={m.id === chat.mode}
+                onclick={() => pickMode(m.id)}>{m.label}</button
+              >
+            {/each}
+          </div>
+        {/if}
+      </span>
     </div>
   </div>
 </div>

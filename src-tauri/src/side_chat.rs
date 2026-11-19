@@ -1,6 +1,10 @@
 //! Side chats: small read-only conversations beside a chat, opened with
 //! `/btw` or the side chat view's +. A chat may have several, one per tab;
-//! each starts as a copy of the chat as it is then and goes its own way.
+//! each runs on the chat's agent, starts as a copy of the chat as it is then
+//! and goes its own way. The copy is the agent's own fork (Claude Code,
+//! Codex), or a copy of its saved files the app makes (Cursor, Antigravity).
+//! When neither works, the side chat starts fresh and reads the chat with
+//! the app's earlier-chats tool first.
 //! Nothing is saved by the app: a side chat's events go to the window under
 //! its own id, `<chat id>#side-<tab>`, and are gone when it ends. Its process
 //! closes after the same idle time as a chat's and resumes on the next
@@ -11,13 +15,15 @@
 //! side chat's copy is gone anyway, asking it again fails with [`GONE`] and
 //! the window moves the question to a new side chat.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::agent::{AgentAdapter, EventSink, RunningAgent, SideOptions, SpawnOptions};
+use serde::{Deserialize, Serialize};
+
+use crate::agent::{AgentAdapter, Agents, AppTools, CLAUDE, EventSink, RunningAgent, SideCopy, SideOptions, SpawnOptions};
 #[cfg(test)]
 use crate::agent::ImagePayload;
 use crate::events::{AgentEvent, Envelope, SessionState};
@@ -39,6 +45,49 @@ pub const GONE: &str = "side chat gone";
 /// The start of each running Harness's list of copies: `side_copies-<pid>.json`.
 /// An older build kept one shared `side_copies.json`.
 const COPIES: &str = "side_copies";
+/// Shown in a side chat that couldn't copy its chat and reads it instead.
+const READS_INSTEAD: &str = "Couldn't copy the chat into this side chat, so it reads the chat first.";
+
+/// The earlier-chats tool for a side chat that reads its chat: given the
+/// chat's ID and project folder.
+pub type ChatTools = Arc<dyn Fn(&str, &str) -> AppTools + Send + Sync>;
+
+/// One agent session copied for a side chat, to delete when it ends.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Copy {
+    agent: String,
+    id: String,
+}
+
+/// A list entry as saved: earlier builds listed Claude Code's copies by ID alone.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Listed {
+    Copy(Copy),
+    Plain(String),
+}
+
+impl From<Listed> for Copy {
+    fn from(listed: Listed) -> Self {
+        match listed {
+            Listed::Copy(copy) => copy,
+            Listed::Plain(id) => Copy { agent: CLAUDE.to_string(), id },
+        }
+    }
+}
+
+/// How a side chat's process starts.
+enum Start {
+    /// Its own session, after an idle close.
+    Resume(String),
+    /// The agent copies the chat's session itself.
+    Fork(String),
+    /// The app copied the chat's session; this is the copy.
+    Copied(String),
+    /// A new session. `read`: the chat has messages it can't see, so it
+    /// reads them with the earlier-chats tool first.
+    Fresh { read: bool },
+}
 
 /// The chat a side chat belongs to, from the side chat's id.
 pub fn chat_of(side_id: &str) -> Result<&str, String> {
@@ -51,6 +100,8 @@ pub fn chat_of(side_id: &str) -> Result<&str, String> {
 #[derive(Default)]
 struct Side {
     agent: Option<Arc<dyn RunningAgent>>,
+    /// The agent it runs on, fixed when it first starts: the chat's then.
+    agent_id: Option<String>,
     /// The side chat's own session, once the agent has named it.
     agent_session_id: Option<String>,
     /// The latest process start; events from an older process are ignored.
@@ -63,20 +114,22 @@ struct Side {
 }
 
 struct Inner {
-    adapter: Arc<dyn AgentAdapter>,
+    agents: Agents,
+    /// The earlier-chats tool, for side chats that read their chat.
+    chat_tools: Mutex<Option<ChatTools>>,
     store: Arc<Store>,
     out: Out,
     /// The chats' notes: a side chat may read its chat's.
     notes: Notes,
     /// By side chat id.
     sides: Mutex<HashMap<String, Side>>,
-    /// Side chats ended before their copy was named: the copy is deleted
-    /// when the name arrives.
-    ended: Mutex<HashSet<String>>,
+    /// Side chats ended before their copy was named, with their agent: the
+    /// copy is deleted when the name arrives.
+    ended: Mutex<HashMap<String, String>>,
     next_run: AtomicU64,
-    /// The agent's copies not yet deleted, kept on disk so a crash can't
+    /// The agents' copies not yet deleted, kept on disk so a crash can't
     /// leave them behind for good.
-    copies: Mutex<Vec<String>>,
+    copies: Mutex<Vec<Copy>>,
     /// This process's list (`side_copies-<pid>.json`).
     copies_file: PathBuf,
     /// Fixed idle time for tests. None = the chats' setting.
@@ -91,10 +144,11 @@ impl SideChats {
     /// `dir` holds each running Harness's list of the agent's copies still to
     /// delete. Lists left by a Harness that is no longer running are deleted
     /// now, with their copies; a running one's are left alone.
-    pub fn new(adapter: Arc<dyn AgentAdapter>, store: Arc<Store>, out: Out, home: Home, dir: &Path) -> Self {
+    pub fn new(agents: Agents, store: Arc<Store>, out: Out, home: Home, dir: &Path) -> Self {
         let pid = std::process::id();
         let chats = Self(Arc::new(Inner {
-            adapter,
+            agents,
+            chat_tools: Mutex::default(),
             notes: Notes::for_store(home, store.clone()),
             store,
             out,
@@ -114,23 +168,38 @@ impl SideChats {
         self.0.idle.unwrap_or_else(|| configured_idle(&self.0.store))
     }
 
+    /// Set once at startup: the earlier-chats tool.
+    pub fn set_chat_tools(&self, tools: ChatTools) {
+        *self.0.chat_tools.lock().unwrap() = Some(tools);
+    }
+
     /// Ask a side chat something, starting it (or bringing it back after an
-    /// idle close) when it has no process. A new side chat copies its chat.
+    /// idle close) when it has no process. A new side chat copies its chat,
+    /// on the chat's agent; `agent` is the window's word for it, used only
+    /// for a chat not saved yet.
     #[allow(clippy::too_many_arguments)]
     pub fn send(
         &self,
         side_id: &str,
-        binary: PathBuf,
         project_path: &Path,
+        agent: Option<&str>,
         model: Option<String>,
         effort: Option<String>,
         text: &str,
         message_id: &str,
     ) -> Result<(), String> {
         let chat_id = chat_of(side_id)?;
+        let saved = self.0.store.session(chat_id).ok().flatten();
+        let recorded = self.0.sides.lock().unwrap().get(side_id).and_then(|s| s.agent_id.clone());
+        let agent_id = recorded
+            .or_else(|| saved.as_ref().map(|s| s.agent.clone()).filter(|a| !a.is_empty()))
+            .or_else(|| agent.filter(|a| crate::agent::ALL.contains(a)).map(str::to_string))
+            .unwrap_or_else(|| CLAUDE.to_string());
+        let (adapter, binary) = self.0.agents.get(&agent_id)?;
         let (live, run, own_id, first) = {
             let mut sides = self.0.sides.lock().unwrap();
             let side = sides.entry(side_id.to_string()).or_default();
+            side.agent_id.get_or_insert_with(|| agent_id.clone());
             side.round += 1;
             if side.agent.is_none() {
                 side.run = self.0.next_run.fetch_add(1, Ordering::Relaxed);
@@ -140,36 +209,57 @@ impl SideChats {
             (side.agent.clone(), side.run, side.agent_session_id.clone(), first)
         };
         if first {
-            self.write_title(side_id, binary.clone(), text);
+            self.write_title(side_id, adapter.clone(), binary.clone(), text);
         }
 
+        let mut text = text.to_string();
         let agent = match live {
             Some(agent) => agent,
             None => {
-                let fork_from = self
-                    .0
-                    .store
-                    .session(chat_id)
-                    .ok()
-                    .flatten()
-                    .and_then(|s| s.agent_session_id);
                 // Its copy was deleted while it sat idle (by hand, or by
                 // something outside Harness): it can't go on. Forgotten here;
                 // the window starts a new side chat with the question.
                 if let Some(own) = &own_id {
-                    if !self.0.adapter.has_session(own) {
+                    if !adapter.has_session(own) {
                         let mut sides = self.0.sides.lock().unwrap();
                         if sides.get(side_id).is_some_and(|s| s.run == run) {
                             sides.remove(side_id);
                         }
                         drop(sides);
-                        self.forget(own);
+                        self.forget(&agent_id, own);
                         return Err(GONE.to_string());
                     }
                 }
-                let resume_id = own_id.or_else(|| fork_from.clone());
+                // Only the chat's session on this same agent can be copied:
+                // a chat moved to another agent since has one of another kind.
+                let fork_from = saved
+                    .filter(|s| s.agent == agent_id)
+                    .and_then(|s| s.agent_session_id);
+                let start = match own_id {
+                    Some(own) => Start::Resume(own),
+                    None => self.first_start(chat_id, side_id, run, &agent_id, adapter.as_ref(), fork_from)?,
+                };
+                let (resume_id, side, read) = match start {
+                    Start::Resume(own) => (Some(own), SideOptions { fork_from: None, first: false }, false),
+                    Start::Fork(from) => (Some(from.clone()), SideOptions { fork_from: Some(from), first: true }, false),
+                    Start::Copied(copy) => (Some(copy), SideOptions { fork_from: None, first: true }, false),
+                    Start::Fresh { read } => (None, SideOptions { fork_from: None, first: true }, read),
+                };
+                let mut tools = Vec::new();
+                if read {
+                    if let Some(chat_tools) = self.0.chat_tools.lock().unwrap().clone() {
+                        tools.push(chat_tools(chat_id, &project_path.to_string_lossy()));
+                    }
+                    text = reads_first(chat_id, &text);
+                    (self.0.out)(Envelope {
+                        session_id: side_id.to_string(),
+                        event: AgentEvent::Error {
+                            message: READS_INSTEAD.to_string(),
+                        },
+                    });
+                }
                 // Not under the lock: starting reports through the sink, which takes it.
-                let agent: Arc<dyn RunningAgent> = Arc::from(self.0.adapter.spawn(
+                let agent: Arc<dyn RunningAgent> = Arc::from(adapter.spawn(
                     SpawnOptions {
                         binary,
                         project_path: self.folder(chat_id, project_path),
@@ -177,8 +267,8 @@ impl SideChats {
                         mode: None,
                         model,
                         effort,
-                        side: Some(SideOptions { fork_from }),
-                        tools: Vec::new(),
+                        side: Some(side),
+                        tools,
                         notes: notes_for(&self.0.notes, chat_id),
                         project_docs: project_docs_for(&self.0.notes, chat_id),
                         memory: self.0.notes.project_memory(chat_id),
@@ -200,17 +290,65 @@ impl SideChats {
             }
         };
         // Pictures are for the main chat; a side question is words only.
-        agent.send_user_message(text, &[], message_id)
+        agent.send_user_message(&text, &[], message_id)
+    }
+
+    /// How a side chat's first process gets its copy of the chat `fork_from`
+    /// (the chat's session on this agent; None if it has none yet). A copy
+    /// the app makes is the side chat's own session from here on.
+    fn first_start(
+        &self,
+        chat_id: &str,
+        side_id: &str,
+        run: u64,
+        agent_id: &str,
+        adapter: &dyn AgentAdapter,
+        fork_from: Option<String>,
+    ) -> Result<Start, String> {
+        let Some(from) = fork_from else {
+            // Nothing to copy. A chat with no messages yet has nothing to
+            // read either; one just moved to this agent has.
+            let read = self.0.store.turn_count(chat_id).unwrap_or(0) > 0;
+            return Ok(Start::Fresh { read });
+        };
+        if !adapter.has_session(&from) {
+            return Ok(Start::Fresh { read: true });
+        }
+        match adapter.side_copy() {
+            SideCopy::Fork => Ok(Start::Fork(from)),
+            SideCopy::None => Ok(Start::Fresh { read: true }),
+            SideCopy::Files => match adapter.copy_session(&from) {
+                Ok(copy) => {
+                    self.remember_copy(agent_id, &copy);
+                    let mut sides = self.0.sides.lock().unwrap();
+                    match sides.get_mut(side_id) {
+                        Some(side) if side.run == run => {
+                            side.agent_session_id = Some(copy.clone());
+                            Ok(Start::Copied(copy))
+                        }
+                        // Ended while copying.
+                        _ => {
+                            drop(sides);
+                            self.forget(agent_id, &copy);
+                            Err("The side chat was ended".to_string())
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("harness: couldn't copy chat {chat_id} for a side chat: {e}");
+                    Ok(Start::Fresh { read: true })
+                }
+            },
+        }
     }
 
     /// Names the side chat from its first question, the way chats are named.
     /// The name only goes to the window; nothing is saved.
-    fn write_title(&self, side_id: &str, binary: PathBuf, question: &str) {
+    fn write_title(&self, side_id: &str, adapter: Arc<dyn AgentAdapter>, binary: PathBuf, question: &str) {
         let chats = self.clone();
         let id = side_id.to_string();
         let question = question.to_string();
         tokio::spawn(async move {
-            let adapter = chats.0.adapter.clone();
             let title = tokio::task::spawn_blocking(move || adapter.make_title(&binary, &question)).await;
             let Ok(Ok(title)) = title else {
                 return;
@@ -284,14 +422,15 @@ impl SideChats {
         if let Some(agent) = &side.agent {
             agent.stop();
         }
+        let agent_id = side.agent_id.unwrap_or_else(|| CLAUDE.to_string());
         match side.agent_session_id {
             Some(id) => {
                 let wait = if side.agent.is_some() { self.0.forget_after } else { Duration::ZERO };
-                self.forget_later(id, wait);
+                self.forget_later(agent_id, id, wait);
             }
             // Its copy isn't named yet; delete it when the name arrives.
             None if side.agent.is_some() => {
-                self.0.ended.lock().unwrap().insert(side_id.to_string());
+                self.0.ended.lock().unwrap().insert(side_id.to_string(), agent_id);
             }
             None => {}
         }
@@ -310,7 +449,7 @@ impl SideChats {
         std::thread::sleep(Duration::from_millis(300));
         for side in sides {
             if let Some(id) = side.agent_session_id {
-                self.forget(&id);
+                self.forget(side.agent_id.as_deref().unwrap_or(CLAUDE), &id);
             }
         }
     }
@@ -339,42 +478,47 @@ impl SideChats {
             if owner.is_some_and(|owner| owner != pid && running(owner)) {
                 continue;
             }
-            let left: Vec<String> = std::fs::read_to_string(file.path())
+            let left: Vec<Listed> = std::fs::read_to_string(file.path())
                 .ok()
                 .and_then(|text| serde_json::from_str(&text).ok())
                 .unwrap_or_default();
-            for id in left {
-                self.0.adapter.forget_session(&id);
+            for copy in left.into_iter().map(Copy::from) {
+                if let Some(adapter) = self.0.agents.adapter(&copy.agent) {
+                    adapter.forget_session(&copy.id);
+                }
             }
             let _ = std::fs::remove_file(file.path());
         }
     }
 
-    fn remember_copy(&self, id: &str) {
+    fn remember_copy(&self, agent: &str, id: &str) {
+        let copy = Copy { agent: agent.to_string(), id: id.to_string() };
         let mut copies = self.0.copies.lock().unwrap();
-        if !copies.iter().any(|c| c == id) {
-            copies.push(id.to_string());
+        if !copies.contains(&copy) {
+            copies.push(copy);
             self.save_copies(&copies);
         }
     }
 
-    fn forget(&self, id: &str) {
-        self.0.adapter.forget_session(id);
+    fn forget(&self, agent: &str, id: &str) {
+        if let Some(adapter) = self.0.agents.adapter(agent) {
+            adapter.forget_session(id);
+        }
         let mut copies = self.0.copies.lock().unwrap();
-        copies.retain(|c| c != id);
+        copies.retain(|c| !(c.agent == agent && c.id == id));
         self.save_copies(&copies);
     }
 
-    fn forget_later(&self, id: String, wait: Duration) {
+    fn forget_later(&self, agent: String, id: String, wait: Duration) {
         let chats = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(wait).await;
-            chats.forget(&id);
+            chats.forget(&agent, &id);
         });
     }
 
     /// Written to a side file and moved into place, so a crash never leaves half a list.
-    fn save_copies(&self, copies: &[String]) {
+    fn save_copies(&self, copies: &[Copy]) {
         let file = &self.0.copies_file;
         let tmp = file.with_extension("tmp");
         let Ok(text) = serde_json::to_string(copies) else {
@@ -397,9 +541,9 @@ impl SideChats {
                     drop(sides);
                     // Ended before its copy was named: now it can go.
                     if let AgentEvent::SessionStarted { agent_session_id, .. } = &event {
-                        if chats.0.ended.lock().unwrap().remove(&id) {
-                            chats.remember_copy(agent_session_id);
-                            chats.forget_later(agent_session_id.clone(), chats.0.forget_after);
+                        if let Some(agent) = chats.0.ended.lock().unwrap().remove(&id) {
+                            chats.remember_copy(&agent, agent_session_id);
+                            chats.forget_later(agent, agent_session_id.clone(), chats.0.forget_after);
                         }
                     }
                     return;
@@ -408,8 +552,9 @@ impl SideChats {
                     AgentEvent::SessionStarted { agent_session_id, .. } => {
                         side.agent_session_id = Some(agent_session_id.clone());
                         let copy = agent_session_id.clone();
+                        let agent = side.agent_id.clone().unwrap_or_else(|| CLAUDE.to_string());
                         drop(sides);
-                        chats.remember_copy(&copy);
+                        chats.remember_copy(&agent, &copy);
                     }
                     AgentEvent::Status {
                         state: SessionState::Exited,
@@ -454,6 +599,17 @@ impl SideChats {
     }
 }
 
+/// The first question of a side chat that couldn't copy its chat: told to
+/// read the chat first, the way an agent that takes over a chat is.
+fn reads_first(chat_id: &str, question: &str) -> String {
+    format!(
+        "(From the app, not the user: This is a side chat about chat {chat_id}, which you can't see yet. \
+Before you answer, read that chat with the {} read tool (id {chat_id}). If it comes in parts, read every \
+part, using upto_turn for the earlier ones.)\n\n{question}",
+        crate::chats::SERVER
+    )
+}
+
 /// Whether a process with this id is running.
 #[cfg(unix)]
 fn running(pid: u32) -> bool {
@@ -465,8 +621,26 @@ fn running(pid: u32) -> bool {
     sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// Whether a process with this id is running: it opens, and hasn't exited.
+#[cfg(windows)]
+fn running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: plain calls; the handle is checked and closed.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        ok && code == STILL_ACTIVE as u32
+    }
+}
+
 /// Not checked elsewhere: an earlier list is taken to be a dead one's.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn running(_: u32) -> bool {
     false
 }
@@ -477,15 +651,40 @@ mod tests {
     use crate::events::{Decision, ModelInfo};
     use std::collections::BTreeMap;
 
-    #[derive(Default)]
     struct Fake {
+        /// How it copies a chat; `copy_session` fails when `copy_fails`.
+        copy: SideCopy,
+        copy_fails: bool,
         /// Each start: (resume id, fork_from).
         spawns: Mutex<Vec<(Option<String>, Option<String>)>>,
+        /// Each start: whether it was the side chat's first, and its app tool servers.
+        starts: Mutex<Vec<(bool, Vec<String>)>>,
         sinks: Mutex<Vec<EventSink>>,
         told: Arc<Mutex<Vec<String>>>,
         forgotten: Mutex<Vec<String>>,
         /// Sessions deleted behind Harness's back.
         missing: Mutex<Vec<String>>,
+    }
+
+    impl Default for Fake {
+        fn default() -> Self {
+            Self::copying(SideCopy::Fork)
+        }
+    }
+
+    impl Fake {
+        fn copying(copy: SideCopy) -> Self {
+            Self {
+                copy,
+                copy_fails: false,
+                spawns: Mutex::default(),
+                starts: Mutex::default(),
+                sinks: Mutex::default(),
+                told: Arc::default(),
+                forgotten: Mutex::default(),
+                missing: Mutex::default(),
+            }
+        }
     }
 
     struct FakeAgent {
@@ -542,6 +741,8 @@ mod tests {
         fn spawn(&self, opts: SpawnOptions, sink: EventSink) -> Result<Box<dyn RunningAgent>, String> {
             let side = opts.side.expect("a side chat");
             self.spawns.lock().unwrap().push((opts.resume_id, side.fork_from));
+            let tools = opts.tools.iter().map(|t| t.server.to_string()).collect();
+            self.starts.lock().unwrap().push((side.first, tools));
             self.sinks.lock().unwrap().push(sink.clone());
             Ok(Box::new(FakeAgent {
                 sink,
@@ -563,6 +764,15 @@ mod tests {
         fn has_session(&self, id: &str) -> bool {
             !self.missing.lock().unwrap().iter().any(|m| m == id) && !self.forgotten.lock().unwrap().iter().any(|f| f == id)
         }
+        fn side_copy(&self) -> SideCopy {
+            self.copy
+        }
+        fn copy_session(&self, id: &str) -> Result<String, String> {
+            if self.copy_fails {
+                return Err("no".into());
+            }
+            Ok(format!("copy-of-{id}"))
+        }
     }
 
     struct Rig {
@@ -573,7 +783,17 @@ mod tests {
     }
 
     fn rig(idle: Option<Duration>) -> Rig {
-        let fake = Arc::new(Fake::default());
+        rig_with(idle, Fake::default())
+    }
+
+    fn agents_with(id: &str, fake: Arc<Fake>) -> Agents {
+        let agents = Agents::default();
+        agents.add(id, fake, Some("agent".into()));
+        agents
+    }
+
+    fn rig_with(idle: Option<Duration>, fake: Fake) -> Rig {
+        let fake = Arc::new(fake);
         let dir = std::env::temp_dir().join(format!("harness-side-{}", uuid::Uuid::new_v4()));
         let store = Arc::new(Store::open(&dir).unwrap());
         store.touch_session("c1", "/work", "hi", "default", "default").unwrap();
@@ -584,7 +804,7 @@ mod tests {
             Arc::new(move |e: Envelope| seen.lock().unwrap().push(e))
         };
         let mut chats = SideChats::new(
-            fake.clone(),
+            agents_with(CLAUDE, fake.clone()),
             store,
             out,
             Home::new(dir.join("home")),
@@ -601,9 +821,7 @@ mod tests {
             self.ask_in("c1#side-a", text);
         }
         fn ask_in(&self, side: &str, text: &str) {
-            self.chats
-                .send(side, "claude".into(), Path::new("/work"), None, None, text, "m")
-                .unwrap();
+            self.chats.send(side, Path::new("/work"), None, None, None, text, "m").unwrap();
         }
         /// Plays the latest process: it names its session and ends a turn.
         fn answers(&self, side_session: &str) {
@@ -691,9 +909,7 @@ mod tests {
     #[tokio::test]
     async fn a_chat_with_nothing_to_copy_starts_fresh() {
         let rig = rig(None);
-        rig.chats
-            .send("new#side-a", "claude".into(), Path::new("/work"), None, None, "hi", "m")
-            .unwrap();
+        rig.chats.send("new#side-a", Path::new("/work"), None, None, None, "hi", "m").unwrap();
         assert_eq!(*rig.fake.spawns.lock().unwrap(), vec![(None, None)]);
     }
 
@@ -728,7 +944,7 @@ mod tests {
             assert!(chat_of(bad).is_err(), "{bad}");
         }
         let rig = rig(None);
-        assert!(rig.chats.send("c1", "claude".into(), Path::new("/work"), None, None, "hi", "m").is_err());
+        assert!(rig.chats.send("c1", Path::new("/work"), None, None, None, "hi", "m").is_err());
     }
 
     #[tokio::test]
@@ -816,13 +1032,13 @@ mod tests {
         rig.ask("why?");
         rig.answers("side-1");
         let file = rig.dir.join(format!("side_copies-{}.json", std::process::id()));
-        let listed: Vec<String> = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        assert_eq!(listed, vec!["side-1".to_string()]);
+        let listed: Vec<Copy> = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(listed, vec![Copy { agent: CLAUDE.into(), id: "side-1".into() }]);
 
         // The app dies here; the next start reads the list.
         let fake = Arc::new(Fake::default());
         let store = Arc::new(Store::open(&rig.dir).unwrap());
-        let _again = SideChats::new(fake.clone(), store, Arc::new(|_| {}), Home::new(rig.dir.join("home")), &rig.dir);
+        let _again = SideChats::new(agents_with(CLAUDE, fake.clone()), store, Arc::new(|_| {}), Home::new(rig.dir.join("home")), &rig.dir);
         assert_eq!(*fake.forgotten.lock().unwrap(), vec!["side-1".to_string()]);
         assert!(!file.exists());
     }
@@ -831,12 +1047,23 @@ mod tests {
     async fn a_start_leaves_a_running_harnesss_copies_alone() {
         let rig = rig(None);
         // A Harness that has quit (an older build's shared list, and one that
-        // ended), and one still running (pid 1 always is).
+        // ended), and one still running (pid 1 always is on Unix; Windows has
+        // none, so a process that waits).
+        let quick = if cfg!(windows) { ["cmd", "/c", "exit"] } else { ["sh", "-c", "true"] };
         let ended = {
-            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let mut child = std::process::Command::new(quick[0]).args(&quick[1..]).spawn().unwrap();
             child.wait().unwrap();
             child.id()
         };
+        #[cfg(windows)]
+        let mut waiting = std::process::Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+            .spawn()
+            .unwrap();
+        #[cfg(windows)]
+        let alive = waiting.id();
+        #[cfg(not(windows))]
+        let alive = 1;
         let list = |name: String, ids: &[&str]| {
             let file = rig.dir.join(name);
             std::fs::write(&file, serde_json::to_string(ids).unwrap()).unwrap();
@@ -844,16 +1071,18 @@ mod tests {
         };
         let old = list("side_copies.json".into(), &["old-1"]);
         let dead = list(format!("side_copies-{ended}.json"), &["dead-1"]);
-        let live = list("side_copies-1.json".into(), &["live-1"]);
+        let live = list(format!("side_copies-{alive}.json"), &["live-1"]);
 
         let fake = Arc::new(Fake::default());
         let store = Arc::new(Store::open(&rig.dir).unwrap());
-        let _again = SideChats::new(fake.clone(), store, Arc::new(|_| {}), Home::new(rig.dir.join("home")), &rig.dir);
+        let _again = SideChats::new(agents_with(CLAUDE, fake.clone()), store, Arc::new(|_| {}), Home::new(rig.dir.join("home")), &rig.dir);
         let mut gone = fake.forgotten.lock().unwrap().clone();
         gone.sort();
         assert_eq!(gone, vec!["dead-1".to_string(), "old-1".to_string()]);
         assert!(!old.exists() && !dead.exists());
         assert!(live.exists());
+        #[cfg(windows)]
+        let _ = waiting.kill();
     }
 
     #[tokio::test]
@@ -864,7 +1093,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(60)).await;
         // Deleted while it sat idle.
         rig.fake.missing.lock().unwrap().push("side-1".into());
-        let asked = rig.chats.send("c1#side-a", "claude".into(), Path::new("/work"), None, None, "and then?", "m");
+        let asked = rig.chats.send("c1#side-a", Path::new("/work"), None, None, None, "and then?", "m");
         assert_eq!(asked, Err(GONE.to_string()));
         // Nothing resumed; the side chat and its listing are gone.
         assert_eq!(rig.fake.spawns.lock().unwrap().len(), 1);
@@ -885,5 +1114,112 @@ mod tests {
         let listed: Vec<String> =
             serde_json::from_str(&std::fs::read_to_string(rig.chats.0.copies_file.clone()).unwrap()).unwrap();
         assert!(listed.is_empty());
+    }
+
+    fn errors(rig: &Rig) -> Vec<String> {
+        rig.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match &e.event {
+                AgentEvent::Error { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_agent_whose_files_the_app_copies_resumes_the_copy_and_it_is_deleted_at_the_end() {
+        let rig = rig_with(None, Fake::copying(SideCopy::Files));
+        rig.ask("why?");
+        // Its own session from the start: nothing for the agent to fork.
+        assert_eq!(*rig.fake.spawns.lock().unwrap(), vec![(Some("copy-of-main-1".into()), None)]);
+        assert_eq!(rig.fake.starts.lock().unwrap()[0], (true, Vec::new()));
+        rig.answers("copy-of-main-1");
+        assert_eq!(rig.told(), vec!["say why?"]);
+        rig.chats.end("c1#side-a");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(forgotten(&rig), vec!["copy-of-main-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn after_an_idle_close_a_copy_resumes_as_not_the_first_start() {
+        let rig = rig_with(Some(Duration::from_millis(20)), Fake::copying(SideCopy::Files));
+        rig.ask("why?");
+        rig.answers("copy-of-main-1");
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        rig.ask("and then?");
+        assert_eq!(rig.fake.spawns.lock().unwrap()[1], (Some("copy-of-main-1".into()), None));
+        assert!(!rig.fake.starts.lock().unwrap()[1].0);
+    }
+
+    #[tokio::test]
+    async fn a_copy_that_fails_starts_fresh_and_reads_the_chat_first() {
+        let mut fake = Fake::copying(SideCopy::Files);
+        fake.copy_fails = true;
+        let rig = rig_with(None, fake);
+        let tools: ChatTools = Arc::new(|_: &str, _: &str| AppTools {
+            server: crate::chats::SERVER,
+            instruction: String::new(),
+            list: serde_json::json!([]),
+            call: Arc::new(|_, _| Box::pin(async { Ok(Vec::new()) })),
+        });
+        rig.chats.set_chat_tools(tools);
+        rig.ask("why?");
+        assert_eq!(*rig.fake.spawns.lock().unwrap(), vec![(None, None)]);
+        assert_eq!(rig.fake.starts.lock().unwrap()[0], (true, vec![crate::chats::SERVER.to_string()]));
+        let told = rig.told();
+        assert!(told[0].starts_with("say (From the app, not the user: This is a side chat about chat c1"), "{told:?}");
+        assert!(told[0].ends_with("\n\nwhy?"));
+        assert_eq!(errors(&rig), vec![READS_INSTEAD.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_agent_that_cant_copy_reads_the_chat_and_so_does_a_chat_whose_session_is_gone() {
+        let rig = rig_with(None, Fake::copying(SideCopy::None));
+        rig.ask("why?");
+        assert_eq!(*rig.fake.spawns.lock().unwrap(), vec![(None, None)]);
+        assert!(rig.told()[0].contains("read tool (id c1)"));
+
+        let gone = rig_with(None, Fake::default());
+        gone.fake.missing.lock().unwrap().push("main-1".into());
+        gone.ask("why?");
+        assert_eq!(*gone.fake.spawns.lock().unwrap(), vec![(None, None)]);
+        assert!(gone.told()[0].contains("read tool (id c1)"));
+    }
+
+    #[tokio::test]
+    async fn a_side_chat_runs_on_its_chats_agent_and_keeps_it_after_the_chat_moves() {
+        let claude = Arc::new(Fake::default());
+        let codex = Arc::new(Fake::default());
+        let agents = Agents::default();
+        agents.add(CLAUDE, claude.clone(), Some("claude".into()));
+        agents.add(crate::agent::CODEX, codex.clone(), Some("codex".into()));
+        let dir = std::env::temp_dir().join(format!("harness-side-{}", uuid::Uuid::new_v4()));
+        let store = Arc::new(Store::open(&dir).unwrap());
+        store.touch_session("c1", "/work", "hi", "default", "default").unwrap();
+        store.set_agent("c1", crate::agent::CODEX).unwrap();
+        store.set_agent_session_id("c1", "thread-1").unwrap();
+        let mut chats = SideChats::new(agents, store.clone(), Arc::new(|_| {}), Home::new(dir.join("home")), &dir);
+        Arc::get_mut(&mut chats.0).unwrap().idle = Some(Some(Duration::from_millis(20)));
+        let send = |side: &str, agent: Option<&str>| chats.send(side, Path::new("/work"), agent, None, None, "q", "m").unwrap();
+
+        // The window's word for the agent counts only for a chat not saved yet.
+        send("c1#side-a", Some(CLAUDE));
+        assert_eq!(*codex.spawns.lock().unwrap(), vec![(Some("thread-1".into()), Some("thread-1".into()))]);
+        assert!(claude.spawns.lock().unwrap().is_empty());
+        send("new#side-a", Some(crate::agent::CODEX));
+        assert_eq!(codex.spawns.lock().unwrap().len(), 2);
+
+        // The chat moves to Claude Code; the side chat stays on Codex.
+        let sink = codex.sinks.lock().unwrap()[0].clone();
+        sink(AgentEvent::SessionStarted { agent_session_id: "fork-1".into(), model: None, mode: None });
+        sink(AgentEvent::TurnEnded { ok: true, duration_ms: None });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        store.set_agent("c1", CLAUDE).unwrap();
+        send("c1#side-a", None);
+        assert_eq!(codex.spawns.lock().unwrap()[2], (Some("fork-1".into()), None));
+        assert!(claude.spawns.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

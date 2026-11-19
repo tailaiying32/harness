@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use super::acp::{self, AcpConfig, Dialect, Intro, PrintCommand, Tool};
 use super::acp_sync::{self, SyncRpc, effort_levels, model_option};
-use super::{AgentAdapter, EventSink, RunningAgent, SpawnOptions};
+use super::{AgentAdapter, EventSink, RunningAgent, SideCopy, SpawnOptions, copy_database, copy_folder, plain_id};
 use crate::events::{AgentEvent, CommandInfo, ModelInfo};
 
 pub struct AntigravityAdapter;
@@ -60,8 +60,13 @@ static PRINT_COMMANDS: &[PrintCommand] = &[
 
 impl AgentAdapter for AntigravityAdapter {
     fn spawn(&self, opts: SpawnOptions, sink: EventSink) -> Result<Box<dyn RunningAgent>, String> {
-        if opts.side.is_some() {
-            return Err("Side chats work with Claude Code only".to_string());
+        let mut opts = opts;
+        let side = opts.side.is_some();
+        // Antigravity has no mode without edits: a side chat runs in Default,
+        // which asks before edits and commands, and every ask is refused
+        // (`AcpConfig::side`).
+        if side {
+            opts.mode = Some("default".to_string());
         }
         // The chat's notes folder, the project's docs and its memory are
         // outside the project: added to the workspace so the agent may write
@@ -76,8 +81,13 @@ impl AgentAdapter for AntigravityAdapter {
             args,
             client_meta: json!({}),
             dialect: &DIALECT,
+            side,
         };
-        // Usage limits aren't sent over ACP: read them now and after each turn.
+        if side {
+            return acp::spawn(opts.binary.clone(), config, opts, sink);
+        }
+        // Usage limits aren't sent over ACP: read them now and after each
+        // turn (main chats only; a side chat's readings aren't used).
         let usage = UsageReader::new(opts.binary.clone(), sink.clone());
         usage.read();
         let sink: EventSink = Arc::new(move |event| {
@@ -165,7 +175,96 @@ impl AgentAdapter for AntigravityAdapter {
             .map_err(|e| if e.contains("took too long") { "Sign-in took too long".to_string() } else { e })
     }
 
-    fn forget_session(&self, _agent_session_id: &str) {}
+    fn forget_session(&self, agent_session_id: &str) {
+        if let Some(data) = data_folder() {
+            forget_in(&data, agent_session_id);
+        }
+    }
+
+    fn has_session(&self, agent_session_id: &str) -> bool {
+        plain_id(agent_session_id)
+            && data_folder().is_some_and(|data| data.join("conversations").join(format!("{agent_session_id}.db")).is_file())
+    }
+
+    fn side_copy(&self) -> SideCopy {
+        SideCopy::Files
+    }
+
+    fn copy_session(&self, agent_session_id: &str) -> Result<String, String> {
+        let data = data_folder().ok_or("No home folder")?;
+        copy_session_in(&data, agent_session_id)
+    }
+}
+
+/// Where agy keeps its conversations: `~/.gemini/antigravity-cli/`, with
+/// `conversations/<id>.db` (the conversation), `annotations/<id>.pbtxt` and a
+/// `brain/<id>/` folder for each. Not documented; seen on agy 1.5.12.
+fn data_folder() -> Option<PathBuf> {
+    crate::home::user_home().map(|home| home.join(".gemini").join("antigravity-cli"))
+}
+
+/// A session's saved things, for a plain ID only: its database, notes file
+/// and folder.
+fn session_paths(data: &Path, id: &str) -> Option<[PathBuf; 3]> {
+    plain_id(id).then(|| {
+        [
+            data.join("conversations").join(format!("{id}.db")),
+            data.join("annotations").join(format!("{id}.pbtxt")),
+            data.join("brain").join(id),
+        ]
+    })
+}
+
+/// Copies a conversation under a new ID: the database whole (with what is
+/// still in its log), its notes file and folder if there are any. The
+/// database names its conversation in `trajectory_meta.cascade_id`, which
+/// must be the new ID or the copy loads but can't take a message ("trajectory
+/// not found"). The old ID also shows up inside the stored steps; tested
+/// without changing those: the copy remembers the chat, and neither sees the
+/// other's messages after.
+fn copy_session_in(data: &Path, id: &str) -> Result<String, String> {
+    let [db, notes, brain] = session_paths(data, id).ok_or("Not a session ID")?;
+    if !db.is_file() {
+        return Err(format!("Antigravity has no saved conversation {id}"));
+    }
+    let new = uuid::Uuid::new_v4().to_string();
+    let [new_db, new_notes, new_brain] = session_paths(data, &new).ok_or("Not a session ID")?;
+    let copied = (|| {
+        copy_database(&db, &new_db)?;
+        let copy = rusqlite::Connection::open(&new_db).map_err(|e| e.to_string())?;
+        let named = copy
+            .execute("UPDATE trajectory_meta SET cascade_id = ?1", [&new])
+            .map_err(|e| format!("Couldn't rename the copy: {e}"))?;
+        if named == 0 {
+            return Err("The copy names no conversation".to_string());
+        }
+        drop(copy);
+        if notes.is_file() {
+            std::fs::copy(&notes, &new_notes).map_err(|e| e.to_string())?;
+        }
+        if brain.is_dir() {
+            copy_folder(&brain, &new_brain).map_err(|e| e.to_string())?;
+        }
+        Ok::<(), String>(())
+    })();
+    match copied {
+        Ok(()) => Ok(new),
+        Err(e) => {
+            forget_in(data, &new);
+            Err(e)
+        }
+    }
+}
+
+/// Deletes a conversation's saved things, its database's log files too.
+fn forget_in(data: &Path, id: &str) {
+    let Some([db, notes, brain]) = session_paths(data, id) else {
+        return;
+    };
+    for file in [db.clone(), db.with_extension("db-wal"), db.with_extension("db-shm"), notes] {
+        let _ = std::fs::remove_file(file);
+    }
+    let _ = std::fs::remove_dir_all(brain);
 }
 
 /// The models in a `configOptions` list. The current model's thinking
@@ -557,5 +656,63 @@ mod tests {
             ]
         );
         assert!(usage_events("").is_empty());
+    }
+
+    #[test]
+    fn a_conversation_is_copied_under_a_new_id_that_its_database_names_and_forgotten_whole() {
+        let data = std::env::temp_dir().join(format!("harness-agy-copy-{}", uuid::Uuid::new_v4()));
+        for folder in ["conversations", "annotations", "brain/c-1"] {
+            std::fs::create_dir_all(data.join(folder)).unwrap();
+        }
+        let db = rusqlite::Connection::open(data.join("conversations/c-1.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE trajectory_meta (trajectory_id TEXT, cascade_id TEXT);
+             INSERT INTO trajectory_meta VALUES ('t-1', 'c-1');",
+        )
+        .unwrap();
+        drop(db);
+        std::fs::write(data.join("annotations/c-1.pbtxt"), "x").unwrap();
+        std::fs::write(data.join("brain/c-1/scratch"), "y").unwrap();
+
+        let new = copy_session_in(&data, "c-1").unwrap();
+        let named: String = rusqlite::Connection::open(data.join(format!("conversations/{new}.db")))
+            .unwrap()
+            .query_row("SELECT cascade_id FROM trajectory_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(named, new);
+        assert_eq!(std::fs::read_to_string(data.join(format!("annotations/{new}.pbtxt"))).unwrap(), "x");
+        assert_eq!(std::fs::read_to_string(data.join(format!("brain/{new}/scratch"))).unwrap(), "y");
+        // The original is untouched.
+        let original: String = rusqlite::Connection::open(data.join("conversations/c-1.db"))
+            .unwrap()
+            .query_row("SELECT cascade_id FROM trajectory_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(original, "c-1");
+
+        forget_in(&data, &new);
+        assert!(!data.join(format!("conversations/{new}.db")).exists());
+        assert!(!data.join(format!("annotations/{new}.pbtxt")).exists());
+        assert!(!data.join(format!("brain/{new}")).exists());
+        assert!(data.join("conversations/c-1.db").exists());
+        let _ = std::fs::remove_dir_all(data);
+    }
+
+    #[test]
+    fn a_conversation_with_only_a_database_still_copies_and_a_bad_one_leaves_nothing() {
+        let data = std::env::temp_dir().join(format!("harness-agy-copy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(data.join("conversations")).unwrap();
+        let db = rusqlite::Connection::open(data.join("conversations/c-1.db")).unwrap();
+        db.execute_batch("CREATE TABLE trajectory_meta (trajectory_id TEXT, cascade_id TEXT); INSERT INTO trajectory_meta VALUES ('t', 'c-1');")
+            .unwrap();
+        drop(db);
+        assert!(copy_session_in(&data, "c-1").is_ok());
+        // A database that names no conversation: refused, and the copy removed.
+        let empty = rusqlite::Connection::open(data.join("conversations/c-2.db")).unwrap();
+        empty.execute_batch("CREATE TABLE trajectory_meta (trajectory_id TEXT, cascade_id TEXT);").unwrap();
+        drop(empty);
+        assert!(copy_session_in(&data, "c-2").is_err());
+        assert_eq!(std::fs::read_dir(data.join("conversations")).unwrap().count(), 3);
+        assert!(copy_session_in(&data, "../c-1").is_err());
+        let _ = std::fs::remove_dir_all(data);
     }
 }

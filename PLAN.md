@@ -265,12 +265,11 @@ the login itself.
 - Agents other than Claude Code, Codex, Antigravity and Cursor (Gemini CLI,
   Copilot, OpenCode). Most ACP agents would reuse `agent/acp.rs` with a
   `Dialect` of their own.
-- In Antigravity chats: side chat, worktrees moving an existing chat, a
+- In Antigravity chats: worktrees moving an existing chat, a
   subagent's own steps (agy doesn't send them), and sign-in other than
   Google's (API key, Enterprise).
-- In Codex chats: side chat (Codex can fork a thread, so it's doable), and
-  chats made in Codex's own CLI or app.
-- In Cursor chats: side chat, worktrees (loading a session in another folder
+- In Codex chats: chats made in Codex's own CLI or app.
+- In Cursor chats: worktrees (loading a session in another folder
   works, so the same move Claude chats make is possible), the usage meter,
   and moving a chat between agents.
 - Chats made earlier in the desktop app or the terminal. Only chats started in
@@ -339,7 +338,7 @@ src-tauri/
       mod.rs           AgentAdapter and RunningAgent traits
       claude_code.rs   the only file that knows Claude Code's wire format
     sessions.rs        SessionManager: live processes, saving, resume, idle shutdown
-    side_chat.rs       SideChats: read-only side chats, several per chat as tabs (/btw), never saved
+    side_chat.rs       SideChats: read-only side chats on the chat's agent, several per chat as tabs (/btw), never saved
     store.rs           SQLite schema, reads, writes, and the search index over what chats said
     chats.rs           the earlier-chats tools: search, list and read a project's chats
     home.rs            where the home folder (~/.harness) is, and each project's and chat's place in it
@@ -637,7 +636,7 @@ Commands in each agent's own syntax (2026-11-19). The menus follow how
 each agent's own screen takes them; Harness's own commands sit beside them
 where the names don't clash:
 - **Harness's**: `/model` (model menu), `/clear` or `/new` (a new chat in
-  the same folder, as Cmd+N), `/btw` (Claude Code), and its skills, in every
+  the same folder, as Cmd+N), `/btw` (a side chat), and its skills, in every
   agent's `/` menu. Claude Code's own `/clear` stays hidden.
 - **Codex**: its app-server takes `/` and `$` as plain text; its own screen
   turns them into calls, so the app does too (`Builtin` in `codex.rs`):
@@ -1069,7 +1068,7 @@ interrupt(session_id)
 set_mode(session_id, mode) / set_model(session_id, model)   saved; a live process is told
 list_models()
 close_session(session_id) ask the chat's process to exit (used by the self-test)
-side_send(side_id, project_path, model, effort, text, message_id)   ask a side chat (`<chat id>#side-<tab>`); starts it as a copy
+side_send(side_id, project_path, agent, model, effort, text, message_id)   ask a side chat (`<chat id>#side-<tab>`); starts it as a copy on the chat's agent (`agent`: only for a chat not saved yet)
 side_interrupt(side_id) / side_end(side_id)   stop its turn / end it and forget it
 side_end_all()            a fresh window ends the side chats a reloaded one left running
 autotest() / autotest_wait(ms) / autotest_report(text)
@@ -1366,6 +1365,56 @@ Mocked up on the same board:
   `@endside`): answers from the copied chat, a file read, idle close then
   resume with its history, the saved copy deleted on end, the main chat
   untouched, and a plan arriving while in side chat.
+- **Side chats on every agent (2026-11-19).** A side chat runs on its chat's
+  agent (the saved chat's; the window's pick for a chat not saved yet), fixed
+  at its first question: if the chat moves to another agent, the side chat
+  stays where it started, and new ones use the new agent. How each gets its
+  copy (`AgentAdapter::side_copy`):
+
+  | Agent | Copy | Read-only |
+  |---|---|---|
+  | Claude Code | its fork (`--resume … --fork-session`) | `--tools Read,Grep,Glob`, no approval channel |
+  | Codex | its fork (`thread/fork`, `excludeTurns`); later starts `thread/resume` the fork | a `side` mode: `read-only` sandbox, approvals `never`; `mcp_servers` replaced by the app's own only |
+  | Cursor | the app copies `~/.cursor/acp-sessions/<id>/` (`CURSOR_CONFIG_DIR` replaces `~/.cursor`) under a new ID, then `session/load`s it | Ask mode |
+  | Antigravity | the app copies `~/.gemini/antigravity-cli/conversations/<id>.db`, `annotations/<id>.pbtxt` and `brain/<id>/`, and sets `trajectory_meta.cascade_id` to the new ID | Default mode, every ask refused at once (`AcpConfig::side`) |
+
+  Neither ACP agent offers `session/fork` (both answer "method not found",
+  Cursor CLI 2026.11.19, agy 1.5.12), and neither documents its files, so
+  the copy is the app's (`copy_session`). Databases are copied with SQLite's
+  `VACUUM INTO`, which takes what is still in the log too, while the chat may
+  be writing it. Cursor's session folder names nothing inside, so a plain
+  copy loads as itself. Antigravity's copy without the `cascade_id` change
+  loads, then fails its first prompt ("trajectory not found"); the old ID
+  also appears inside stored steps, left as is. A copy is the side chat's own
+  session from the start and is listed for deleting like a fork. Deleting:
+  Cursor removes the folder, Antigravity the three, Codex calls
+  `thread/delete` through a short `app-server` (it finds its own program,
+  since startup cleanup runs before programs are found). Codex refuses to
+  delete a thread a fork still points at ("forked history still references
+  it"); the app only ever deletes side chats, the forks, so it never meets
+  that. The list of copies records each copy's agent; an older list's bare
+  IDs are Claude Code's.
+
+  ACP side chats are told `SIDE_INSTRUCTION`, may read but not write the
+  notes, and get no memory instruction. Cursor hears it with the first prompt
+  of a side chat's first start, though it loaded a copy (`SideOptions::first`).
+  Antigravity stops its turn without a word when a call is refused; a side
+  chat then tells it once why (`REFUSED_NOTE`) and it answers in the same turn.
+
+  **If there's nothing to copy** (the agent can't, its copy fails, or the
+  chat's saved session is gone; `has_session` is checked first), the side
+  chat starts fresh with the earlier-chats tool (`harness_chats`; Claude Code
+  gets `--mcp-config` for it and `--allowedTools mcp__harness_chats`), its
+  first question carries a note to read the chat first (as an agent switch
+  does), and the side chat shows "Couldn't copy the chat into this side chat,
+  so it reads the chat first." A chat moved to another agent and not yet run
+  on it reads the same way. **Tested** live with the self-test on each agent
+  (`HARNESS_AUTOTEST_MODEL=<agent>:<model>`, then a secret word, two `/btw`
+  questions, a main-chat question): every side chat answered from the copy;
+  none created the file it was asked to (Cursor and Antigravity said they
+  couldn't; Codex's sandbox refused); the main chat's history held none of the
+  side's messages; and ending the side chat deleted its copy (Cursor's folder,
+  Codex's thread).
 - **Drag tabs to reorder (2026-11-16).** In the docs, side chat, browser and
   terminal rows, a tab can be dragged along its own row (never to another
   view). Press and move 4 px to start; the other tabs make room as it passes
