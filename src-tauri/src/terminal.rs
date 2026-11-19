@@ -412,6 +412,11 @@ impl Terminals {
         let run = tab.run;
         let weak = Arc::downgrade(&self.0);
         let id = id.to_string();
+        #[cfg(windows)]
+        {
+            let (weak, id) = (weak.clone(), id.clone());
+            std::thread::spawn(move || watch_exit(weak, id, run));
+        }
         std::thread::spawn(move || read_loop(weak, id, run, reader));
         Ok(())
     }
@@ -968,6 +973,14 @@ pub fn plain_text(raw: &[u8], max_lines: usize) -> String {
                             col = 0;
                         }
                         Some('G') => col = params.parse::<usize>().unwrap_or(1).saturating_sub(1),
+                        // Windows' ConPTY skips over blanks with "forward"
+                        // and places text with row;col; only the column is
+                        // kept, which reads right for ordinary output.
+                        Some('C') => col += params.parse::<usize>().unwrap_or(1).max(1),
+                        Some('H' | 'f') => {
+                            let column = params.split(';').nth(1).and_then(|c| c.parse::<usize>().ok());
+                            col = column.unwrap_or(1).saturating_sub(1);
+                        }
                         _ => {}
                     }
                 }
@@ -1080,10 +1093,49 @@ fn shell_command() -> CommandBuilder {
         cmd.arg("-l");
         cmd
     }
+    // PowerShell, as Windows Terminal opens: PowerShell 7 if installed, else
+    // the one Windows ships. The profile still loads, so the user's prompt
+    // and PSReadLine are as they know them. cmd.exe only if neither is found.
     #[cfg(not(unix))]
     {
-        CommandBuilder::new_default_prog()
+        match windows_shell() {
+            Some(shell) => {
+                let mut cmd = CommandBuilder::new(shell);
+                cmd.arg("-NoLogo");
+                cmd
+            }
+            None => CommandBuilder::new_default_prog(),
+        }
     }
+}
+
+#[cfg(not(unix))]
+fn windows_shell() -> Option<PathBuf> {
+    let on_path = |name: &str| {
+        let paths = std::env::var_os("PATH")?;
+        std::env::split_paths(&paths).map(|d| d.join(name)).find(|p| p.is_file())
+    };
+    let shipped = || {
+        let root = std::env::var_os("SystemRoot")?;
+        let p = PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+        p.is_file().then_some(p)
+    };
+    on_path("pwsh.exe").or_else(shipped).or_else(|| on_path("powershell.exe"))
+}
+
+/// ConPTY, as portable-pty opens it, asks where the cursor is (`ESC[6n`)
+/// before it draws anything, and waits for the answer. The window's xterm
+/// would answer, but a tab can run before any window shows it (an agent's
+/// command, the tests), and the question would stay in the tab's output to be
+/// answered again on every replay, typing the answer into the shell. So the
+/// core answers it once, "top left", and drops it from the output.
+const CURSOR_QUESTION: &[u8] = b"\x1b[6n";
+
+fn take_cursor_question(chunk: &[u8]) -> Option<Vec<u8>> {
+    let at = chunk.windows(CURSOR_QUESTION.len()).position(|w| w == CURSOR_QUESTION)?;
+    let mut rest = chunk[..at].to_vec();
+    rest.extend_from_slice(&chunk[at + CURSOR_QUESTION.len()..]);
+    Some(rest)
 }
 
 /// The process group in front, if it isn't the shell itself.
@@ -1122,6 +1174,8 @@ fn command_line(pid: i32) -> Option<String> {
 /// Reads a shell's output until it ends.
 fn read_loop(weak: Weak<Inner>, id: String, run: u64, mut reader: Box<dyn Read + Send>) {
     let mut buf = vec![0u8; 64 * 1024];
+    // Only ConPTY's opening question is answered here; see CURSOR_QUESTION.
+    let mut asked = !cfg!(windows);
     loop {
         let n = match reader.read(&mut buf) {
             Ok(0) | Err(_) => break,
@@ -1133,10 +1187,47 @@ fn read_loop(weak: Weak<Inner>, id: String, run: u64, mut reader: Box<dyn Read +
         if tab.run != run {
             return;
         }
+        if !asked {
+            if let Some(rest) = take_cursor_question(&buf[..n]) {
+                asked = true;
+                if let Some(live) = tab.live.as_mut() {
+                    let _ = live.writer.write_all(b"\x1b[1;1R").and_then(|_| live.writer.flush());
+                }
+                tab.push(&rest);
+                continue;
+            }
+        }
         tab.push(&buf[..n]);
     }
-    // The shell ended. If nothing closed it on purpose, it exited by itself:
-    // its tab goes too.
+    shell_ended(&weak, &id, run);
+}
+
+/// ConPTY keeps its output open after the shell exits (until the pseudo
+/// console is closed), so on Windows the reader never sees the end: this
+/// checks on the shell instead.
+#[cfg(windows)]
+fn watch_exit(weak: Weak<Inner>, id: String, run: u64) {
+    loop {
+        std::thread::sleep(Duration::from_millis(250));
+        let Some(inner) = weak.upgrade() else { return };
+        let mut state = lock(&inner.state);
+        let Some(tab) = state.tabs.get_mut(&id) else { return };
+        if tab.run != run {
+            return;
+        }
+        let Some(live) = tab.live.as_mut() else { return };
+        if matches!(live.child.try_wait(), Ok(Some(_))) {
+            drop(state);
+            shell_ended(&weak, &id, run);
+            return;
+        }
+    }
+}
+
+/// The shell ended. If nothing closed it on purpose, it exited by itself:
+/// its tab goes too.
+fn shell_ended(weak: &Weak<Inner>, id: &str, run: u64) {
+    let id = id.to_string();
     let Some(inner) = weak.upgrade() else { return };
     let ended = {
         let mut state = lock(&inner.state);
@@ -1196,6 +1287,12 @@ fn end_shell(live: Live, fg: Option<i32>, grace: Duration) {
 mod tests {
     use super::*;
 
+    /// Prints the terminal's size as "rows cols" in the platform's shell.
+    #[cfg(unix)]
+    const SIZE: &str = "stty size";
+    #[cfg(not(unix))]
+    const SIZE: &str = "$s = $Host.UI.RawUI.WindowSize; \"$($s.Height) $($s.Width)\"";
+
     fn rig(idle: Duration) -> (Terminals, Arc<Mutex<Vec<Envelope>>>) {
         let seen: Arc<Mutex<Vec<Envelope>>> = Arc::default();
         let out: Out = {
@@ -1234,6 +1331,8 @@ mod tests {
         assert_eq!(plain_text(b"old\n\x1b[H\x1b[2Jnew\n", 10), "new");
         // Only the last lines.
         assert_eq!(plain_text(b"1\n2\n3\n4\n", 2), "3\n4");
+        // ConPTY's cursor forward and placement keep the words apart.
+        assert_eq!(plain_text(b"a\x1b[3Cb\n\x1b[5;4Hc\n", 10), "a   b\n   c");
     }
 
     #[test]
@@ -1252,28 +1351,34 @@ mod tests {
     fn a_shell_runs_commands_and_reports_what_runs() {
         let (t, _) = rig(IDLE);
         let tab = t.open(&folder(), None, None, 80, 24).unwrap();
-        t.write(&tab.id, "echo hel''lo\n").unwrap();
+        t.write(&tab.id, "echo hel''lo\r").unwrap();
         assert!(wait_for(&t, &tab.id, "hello"));
+        // What runs is only known on Unix (Windows has no foreground group).
+        #[cfg(unix)]
+        what_runs(&t, &tab.id);
+        t.close(&tab.id);
+        assert!(t.tabs(&folder()).is_empty());
+    }
 
-        t.write(&tab.id, "sleep 30\n").unwrap();
+    #[cfg(unix)]
+    fn what_runs(t: &Terminals, id: &str) {
+        t.write(id, "sleep 30\r").unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut running = None;
         while Instant::now() < deadline && running.is_none() {
             std::thread::sleep(Duration::from_millis(100));
-            running = t.running(&tab.id);
+            running = t.running(id);
         }
         assert_eq!(running.as_deref(), Some("sleep 30"));
         assert_eq!(t.tabs(&folder())[0].title, "sleep");
 
         // Ctrl+C: back at the prompt.
-        t.write(&tab.id, "\x03").unwrap();
+        t.write(id, "\x03").unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline && t.running(&tab.id).is_some() {
+        while Instant::now() < deadline && t.running(id).is_some() {
             std::thread::sleep(Duration::from_millis(100));
         }
-        assert_eq!(t.running(&tab.id), None);
-        t.close(&tab.id);
-        assert!(t.tabs(&folder()).is_empty());
+        assert_eq!(t.running(id), None);
     }
 
     #[test]
@@ -1287,7 +1392,7 @@ mod tests {
         assert_eq!(t.tabs(&folder()).len(), 1);
         // Once the window has given a size, the agent's next tab starts at it.
         t.resize(&tab.id, 52, 30).unwrap();
-        let next = t.run_for_agent(&folder(), None, "stty size", &|_| {}).unwrap();
+        let next = t.run_for_agent(&folder(), None, SIZE, &|_| {}).unwrap();
         assert!(wait_for(&t, &next.id, "30 52"));
         // Shown first, the tab's shell waits for the size the panel gives it.
         let shown = |info: &TabInfo| {
@@ -1297,7 +1402,7 @@ mod tests {
                 t.resize(&id, 47, 19).unwrap();
             });
         };
-        let third = t.run_for_agent(&folder(), None, "stty size", &shown).unwrap();
+        let third = t.run_for_agent(&folder(), None, SIZE, &shown).unwrap();
         assert!(wait_for(&t, &third.id, "19 47"));
         t.close(&tab.id);
         t.close(&next.id);
@@ -1308,7 +1413,7 @@ mod tests {
     fn an_unused_tab_closes_keeps_its_output_and_starts_again_when_typed_in() {
         let (t, _) = rig(Duration::from_millis(1));
         let tab = t.open(&folder(), None, None, 80, 24).unwrap();
-        t.write(&tab.id, "echo before\n").unwrap();
+        t.write(&tab.id, "echo before\r").unwrap();
         assert!(wait_for(&t, &tab.id, "before"));
         std::thread::sleep(Duration::from_millis(20));
         t.close_unused();
@@ -1318,7 +1423,7 @@ mod tests {
         assert!(text.contains("before"));
         assert!(text.contains("closed after 0 s unused"));
 
-        t.write(&tab.id, "echo after\n").unwrap();
+        t.write(&tab.id, "echo after\r").unwrap();
         assert!(wait_for(&t, &tab.id, "after"));
         assert!(!t.tabs(&folder())[0].closed);
         t.close(&tab.id);
@@ -1339,7 +1444,7 @@ mod tests {
     fn a_shell_that_exits_takes_its_tab() {
         let (t, seen) = rig(IDLE);
         let tab = t.open(&folder(), None, None, 80, 24).unwrap();
-        t.write(&tab.id, "exit\n").unwrap();
+        t.write(&tab.id, "exit\r").unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline && !t.tabs(&folder()).is_empty() {
             std::thread::sleep(Duration::from_millis(50));
@@ -1380,7 +1485,7 @@ mod tests {
         let t = Terminals::with(out.clone(), store.clone(), IDLE);
         let tab = t.open(&project, None, Some("scratch".into()), 80, 24).unwrap();
         t.resize(&tab.id, 52, 30).unwrap();
-        t.write(&tab.id, "echo kept\n").unwrap();
+        t.write(&tab.id, "echo kept\r").unwrap();
         assert!(wait_for(&t, &tab.id, "kept"));
         t.shutdown();
 
@@ -1394,7 +1499,7 @@ mod tests {
         assert!(text.contains("kept"));
         assert!(text.contains("restored"));
         // The panel's size comes back too: the agent's first tab starts at it.
-        let tab = again.run_for_agent(&project, None, "stty size", &|_| {}).unwrap();
+        let tab = again.run_for_agent(&project, None, SIZE, &|_| {}).unwrap();
         assert!(wait_for(&again, &tab.id, "30 52"));
         again.close(&tab.id);
     }
@@ -1431,7 +1536,7 @@ mod tests {
         let none = t.call(&project, "read", &json!({})).await.unwrap();
         assert!(none[0]["text"].as_str().unwrap().contains("No terminal tabs"));
         let tab = t.open(&project, None, Some("scratch".into()), 80, 24).unwrap();
-        t.write(&tab.id, "echo for-claude\n").unwrap();
+        t.write(&tab.id, "echo for-claude\r").unwrap();
         assert!(wait_for(&t, &tab.id, "for-claude"));
         let read = t.call(&project, "read", &json!({ "tab": "scratch" })).await.unwrap();
         assert!(read[0]["text"].as_str().unwrap().contains("for-claude"));
