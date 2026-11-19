@@ -502,6 +502,14 @@ impl Drop for SyncRpc {
     }
 }
 
+/// How a plan reaches the app's approve card outside plan mode: Codex's own
+/// plan block, which it only knows about in plan mode (Codex can't enter plan
+/// mode itself). Without this it planned in the chat and sometimes built in
+/// the same turn (tested on codex-cli 0.169.1).
+const PLAN_INSTRUCTION: &str = "When you present a plan for the user to approve before building, \
+wrap the whole plan in a <proposed_plan> block (keep the tags exactly) and end your turn. Don't write \
+the plan only in the chat: the app shows the block with approve buttons and tells you when to build.";
+
 /// What the agent is told on every start and resume, after Codex's own
 /// instructions: the app's tools, the chat's notes and docs, the project's
 /// memory and the user's preferences. Sent each time like Claude Code's
@@ -512,6 +520,8 @@ fn instructions(opts: &SpawnOptions) -> Option<String> {
     // A side chat reads and answers: told so, and given no way to write notes or memory.
     if side {
         lines.push(super::SIDE_INSTRUCTION.to_string());
+    } else {
+        lines.push(PLAN_INSTRUCTION.to_string());
     }
     lines.extend(opts.tools.iter().map(|t| t.instruction.to_string()));
     if let Some(notes) = &opts.notes {
@@ -1806,6 +1816,11 @@ fn notification(shared: &Shared, method: &str, params: &Value) -> Vec<AgentEvent
                 out.push(AgentEvent::Compacting { active: true });
             }
             for (id, name, input) in item_tools(item) {
+                // A plan block Codex went on past (outside plan mode it may
+                // build in the same turn) is no longer waiting for the user.
+                if parent.is_none() && state.mode != "plan" {
+                    state.plan = None;
+                }
                 out.extend(show(&mut state, &id, &name, input, parent.clone()));
             }
         }
@@ -1814,7 +1829,19 @@ fn notification(shared: &Shared, method: &str, params: &Value) -> Vec<AgentEvent
             let id = item["id"].as_str().unwrap_or_default().to_string();
             match item["type"].as_str().unwrap_or_default() {
                 "agentMessage" => {
-                    if let Some(text) = item["text"].as_str().filter(|t| !t.trim().is_empty()) {
+                    // Outside plan mode Codex's plan block is only text: the
+                    // plan is cut out and offered when the turn ends, as a
+                    // plan mode `plan` item is. The rest replaces the draft,
+                    // even when empty.
+                    let proposed = item["text"].as_str().filter(|_| parent.is_none() && state.mode != "plan").and_then(proposed_plan);
+                    if let Some((plan, rest)) = proposed {
+                        state.plan = Some((format!("{id}-plan"), plan));
+                        out.push(AgentEvent::AssistantBlock {
+                            message_id: id.clone(),
+                            block: Block::Text { text: rest },
+                            parent_tool_id: None,
+                        });
+                    } else if let Some(text) = item["text"].as_str().filter(|t| !t.trim().is_empty()) {
                         out.push(AgentEvent::AssistantBlock {
                             message_id: id.clone(),
                             block: Block::Text { text: text.to_string() },
@@ -1977,7 +2004,7 @@ fn notification(shared: &Shared, method: &str, params: &Value) -> Vec<AgentEvent
                 out.push(AgentEvent::ApprovalCancelled { request_id });
             }
             // A plan: shown for approval; the turn the user sees goes on.
-            if let Some((tool_id, plan)) = state.plan.take().filter(|_| ok && !stopped && state.mode == "plan") {
+            if let Some((tool_id, plan)) = state.plan.take().filter(|_| ok && !stopped) {
                 out.extend(show(&mut state, &tool_id, "ExitPlanMode", json!({ "plan": plan }), None));
                 let request_id = wait(&mut state, Waiting::Plan { tool_id: tool_id.clone() });
                 out.push(AgentEvent::ApprovalRequest {
@@ -2018,6 +2045,20 @@ fn notification(shared: &Shared, method: &str, params: &Value) -> Vec<AgentEvent
         _ => {}
     }
     out
+}
+
+/// A message's `<proposed_plan>` block: the plan, and the message without it.
+fn proposed_plan(text: &str) -> Option<(String, String)> {
+    const OPEN: &str = "<proposed_plan>";
+    const CLOSE: &str = "</proposed_plan>";
+    let start = text.find(OPEN)?;
+    let end = start + text[start..].find(CLOSE)?;
+    let plan = text[start + OPEN.len()..end].trim().to_string();
+    if plan.is_empty() {
+        return None;
+    }
+    let rest = format!("{}\n\n{}", text[..start].trim_end(), text[end + CLOSE.len()..].trim_start());
+    Some((plan, rest.trim().to_string()))
 }
 
 /// A plan's first heading, for the card's title.
@@ -2099,9 +2140,13 @@ impl RunningAgent for CodexProcess {
             Waiting::Plan { tool_id } => {
                 let mut state = self.shared.state.lock().unwrap();
                 let (text, events) = if allow {
-                    // Planning is over: build in the default mode, from the
-                    // plan as the user left it.
-                    state.mode = DEFAULT_MODE.to_string();
+                    // Planning is over: build from the plan as the user left
+                    // it, in the default mode if it was made in plan mode (a
+                    // plan block made in another mode is built in that mode).
+                    let leave_plan = state.mode == "plan";
+                    if leave_plan {
+                        state.mode = DEFAULT_MODE.to_string();
+                    }
                     notes.push(match plan {
                         Some(plan) => format!(
                             "The user approved the plan after editing it. Build it now, from this version, \
@@ -2109,7 +2154,8 @@ not your original:\n\n{plan}"
                         ),
                         None => "The user approved the plan. Build it now.".to_string(),
                     });
-                    ("The user approved the plan.".to_string(), vec![AgentEvent::ModeChanged { mode: DEFAULT_MODE.to_string() }])
+                    let events = if leave_plan { vec![AgentEvent::ModeChanged { mode: DEFAULT_MODE.to_string() }] } else { Vec::new() };
+                    ("The user approved the plan.".to_string(), events)
                 } else {
                     let message = message.unwrap_or_else(|| "Keep planning.".to_string());
                     notes.push(format!("The user didn't approve the plan yet. What they said: {message}"));
@@ -2447,6 +2493,45 @@ mod tests {
         drop(state);
         assert!(r.woken());
         assert!(r.sent().is_empty(), "nothing goes to Codex for the plan card itself");
+    }
+
+    #[test]
+    fn a_plan_block_outside_plan_mode_gets_the_card_and_keeps_the_mode() {
+        // As codex-cli 0.169.1 wrote it in default mode, told to use the block.
+        let mut r = rig();
+        r.shared.state.lock().unwrap().mode = "full-access".into();
+        r.feed(note("turn/started", json!({ "threadId": "t1", "turn": { "id": "u1" } })));
+        let text = "Here's the plan.\n\n<proposed_plan>\n# Add hello.txt\n\n1. Write it.\n</proposed_plan>";
+        r.feed(note("item/completed", json!({ "threadId": "t1", "item": { "type": "agentMessage", "id": "m1", "text": text } })));
+        r.feed(note("turn/completed", json!({ "threadId": "t1", "turn": { "id": "u1", "status": "completed" } })));
+        let events = r.events();
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::AssistantBlock { block: Block::Text { text }, .. } if text == "Here's the plan.")));
+        let card = events.iter().find_map(|e| match e {
+            AgentEvent::ApprovalRequest { approval: ApprovalKind::Plan, title, input, .. } => Some((title.clone(), input["plan"].clone())),
+            _ => None,
+        });
+        assert_eq!(card, Some(("Add hello.txt".to_string(), json!("# Add hello.txt\n\n1. Write it."))));
+        let id = r.request_id(&events);
+        r.process().answer_approval(&id, Decision::Allow, None, None, None).unwrap();
+        let events = r.events();
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::ModeChanged { .. })), "built in the mode it was made in");
+        assert_eq!(r.shared.state.lock().unwrap().mode, "full-access");
+
+        // A block it went on past (it started building) gets no card.
+        r.feed(note("turn/started", json!({ "threadId": "t1", "turn": { "id": "u2" } })));
+        r.feed(note("item/completed", json!({ "threadId": "t1", "item": { "type": "agentMessage", "id": "m2", "text": "<proposed_plan>\nPlan\n</proposed_plan>" } })));
+        r.feed(note("item/started", json!({ "threadId": "t1", "item": { "type": "commandExecution", "id": "c1", "command": "ls", "cwd": "/" } })));
+        r.feed(note("turn/completed", json!({ "threadId": "t1", "turn": { "id": "u2", "status": "completed" } })));
+        assert!(!r.events().iter().any(|e| matches!(e, AgentEvent::ApprovalRequest { .. })));
+    }
+
+    #[test]
+    fn proposed_plan_cuts_the_block_out() {
+        assert_eq!(proposed_plan("a <proposed_plan>\nP\n</proposed_plan> b"), Some(("P".into(), "a\n\nb".into())));
+        assert_eq!(proposed_plan("<proposed_plan>P</proposed_plan>"), Some(("P".into(), String::new())));
+        assert_eq!(proposed_plan("<proposed_plan> </proposed_plan>"), None);
+        assert_eq!(proposed_plan("<proposed_plan>never closed"), None);
+        assert_eq!(proposed_plan("plain"), None);
     }
 
     #[test]

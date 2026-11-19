@@ -2416,6 +2416,11 @@ stdin/stdout. What a live test showed:
   do it in the background and cache it.
 - **Modes**: `session/set_mode {modeId}` replies `{}` and sends
   `current_mode_update`. Plan mode has a `SwitchMode` tool the agent may use.
+  **Tested 2026-11-19 (CLI 2026.11.19)**: agent mode has it too; asked to
+  "make a plan first", the agent switches itself to `plan` and calls
+  `createPlan`. The switch is a tool call (`rawInput.targetModeId`) with no
+  `current_mode_update`, so the app takes the mode from the finished call.
+  Given a build task with no word about plans, it builds straight away.
 - **Turn text**: `agent_thought_chunk` then `agent_message_chunk` deltas;
   no message ids. `session_info_update {title}` arrives at the start of the
   first turn with a short chat title.
@@ -2540,7 +2545,11 @@ probes showed:
 - **Plans**: in `plan` mode the plan is a `write_file` into
   `~/.gemini/antigravity-cli/brain/<session>/` with
   `rawInput.ArtifactMetadata.RequestFeedback: true`; the turn then ends with a
-  text ask. There is no plan request to answer.
+  text ask. There is no plan request to answer. **Tested 2026-11-19 (agy
+  1.5.12)**: the agent has no tool to enter plan mode (it said only the
+  user's `/plan` can), but asked for a plan in `default` mode it writes the
+  same marked file and stops. A walkthrough written after building is
+  `userFacing` with no `requestFeedback`.
 - **MCP over HTTP** works as Cursor's does.
 - **Questions**: an `ask_question` tool call (`rawInput.questions[]` with
   `question`, `options`, `is_multi_select`), then an `elicitation/create`
@@ -2576,9 +2585,20 @@ plan-as-file detection, output tidying, the mode a plan is built in
 (Cursor `agent`, Antigravity `default`), where the app's instructions go
 (Cursor: end of the first prompt; Antigravity: the system prompt, on every
 start), and whether a chat with no model picks one. A plan written as a file
-in plan mode is offered for approval once the turn ends (`Waiting::Plan`
-with no RPC ID); the answer becomes the next prompt, switching to `default`
-first if approved. `usage_update` feeds the context meter for any ACP agent;
+is offered for approval once the turn ends (`Waiting::Plan` with no RPC ID);
+the answer becomes the next prompt, switching to `default` first if
+approved. **Changed 2026-11-19** (branch `harness/plan-card-for-every-agent-30d44b`,
+the user's call: agents plan natively, and any plan they present gets the
+card): the marked file is a plan in any mode, dropped if the agent starts
+another tool call after it outside plan mode (it went on to build); an
+approved plan leaves plan mode only if the chat is in it, so a plan made in
+Auto is built in Auto. Each dialect's `plan_instruction` (left out of side
+chats) tells the agent to present a plan through its own path: Cursor
+`CreatePlan`, switching with `SwitchMode` first; Antigravity its plan artifact
+with `RequestFeedback`. Without it, Antigravity (Gemini 4 Hydrogen, in Auto,
+with the user's preferences) once wrote the plan only in the chat. **Tested
+live by the user** (2026-11-19, test copy): the plan card for every agent.
+`usage_update` feeds the context meter for any ACP agent;
 question forms are shown as question cards for any ACP agent whose dialect
 offers them (`forms`), and answered as a form; updates that come with no
 prompt open make a follow-up turn, ended by the closing `usage_update` (or 8
@@ -2645,6 +2665,18 @@ also accepts them with it). One app-server per chat, ~140 MB idle.
   like the same turn. Questions come as `item/tool/requestUserInput` and are
   answered by question `id` (`gpt-6-luna` once sent a malformed question
   call; `gpt-5.6-terra` asked properly).
+- **Plans outside plan mode** (tested 2026-11-19, codex-cli 0.169.1): only
+  the app sets the collaboration mode; Codex's plan-mode prompt says the mode
+  never changes by user intent, and there is no request or notice for the
+  agent to switch. Plan mode tells it to wrap its plan in `<proposed_plan>`,
+  which the app server makes the `plan` item. Asked to "make a plan first" in
+  default mode, it once planned in the chat and waited, and once planned and
+  built in the same turn. Told by the app's instructions to use the block, it
+  wrote one and ended the turn; outside plan mode the block arrives as plain
+  `agentMessage` text. The app now tells it so (`PLAN_INSTRUCTION` in
+  `codex.rs`), cuts the block out of the message and shows the plan card at
+  turn end, dropped if a tool call follows it. Approving builds in the mode
+  the chat is in.
 - **Mid-turn messages**: `turn/steer` takes them; the model read one sent
   during a `sleep 8`. If steering fails the message waits for the next turn.
 - **Resume**: `thread/resume {threadId, cwd}` keeps history and works in

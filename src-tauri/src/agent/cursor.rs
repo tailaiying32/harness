@@ -24,6 +24,7 @@ pub static DIALECT: Dialect = Dialect {
     is_plan: |_| false,
     clean_output: |text| text,
     build_mode: "agent",
+    plan_instruction: PLAN_INSTRUCTION,
     intro: Intro::FirstPrompt,
     session_meta: |_| Value::Null,
     pick_default_model: true,
@@ -31,6 +32,14 @@ pub static DIALECT: Dialect = Dialect {
     print_commands: &[],
     compacts: false,
 };
+
+/// How a plan reaches the app's approve card: Cursor's own plan request,
+/// which only plan mode has. Its SwitchMode tool gets it there (tested on
+/// CLI 2026.11.19: asked to plan first, it switched and called createPlan).
+const PLAN_INSTRUCTION: &str = "When you present a plan for the user to approve before building, \
+present it with CreatePlan, switching to plan mode with SwitchMode first if you are not in it. Don't \
+write the plan only in the chat: the app shows a CreatePlan plan with approve buttons and tells you \
+when to build.";
 
 /// Asks for plain model ids with names, and each model's effort levels as
 /// options of their own, instead of one id per combination.
