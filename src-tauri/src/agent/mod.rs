@@ -1,8 +1,10 @@
 //! The boundary between the app and any coding agent. Each agent is one
-//! adapter here: `claude_code` (Claude Code's own channel), `cursor`
-//! (Cursor's agent over ACP, see `acp`) and `codex` (Codex's app-server).
+//! adapter here: `claude_code` (Claude Code's own channel), `codex` (Codex's
+//! app-server), and `antigravity` and `cursor` (both over ACP, see `acp`).
 
 pub mod acp;
+pub(crate) mod acp_sync;
+pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
 pub mod cursor;
@@ -25,12 +27,18 @@ use crate::events::{AgentEvent, CommandInfo, Decision, ModelInfo};
 pub const CLAUDE: &str = "claude-code";
 pub const CURSOR: &str = "cursor";
 pub const CODEX: &str = "codex";
+pub const ANTIGRAVITY: &str = "antigravity";
+
+/// Every agent, in the order the app lists them: the most used first, and
+/// Cursor (the longest model list) last.
+pub const ALL: [&str; 4] = [CLAUDE, CODEX, ANTIGRAVITY, CURSOR];
 
 /// What the user sees an agent called.
 pub fn label(agent: &str) -> &'static str {
     match agent {
         CURSOR => "Cursor",
         CODEX => "Codex",
+        ANTIGRAVITY => "Antigravity",
         _ => "Claude Code",
     }
 }
@@ -51,10 +59,13 @@ impl Agents {
         }
     }
 
-    /// The agents whose program was found.
+    /// The agents whose program was found, in `ALL`'s order.
     pub fn installed(&self) -> Vec<String> {
         let agents = self.0.lock().unwrap();
-        agents.iter().filter(|(_, (_, binary))| binary.is_some()).map(|(id, _)| id.clone()).collect()
+        let mut found: Vec<String> =
+            agents.iter().filter(|(_, (_, binary))| binary.is_some()).map(|(id, _)| id.clone()).collect();
+        found.sort_by_key(|id| ALL.iter().position(|a| a == id).unwrap_or(ALL.len()));
+        found
     }
 
     /// The agent and its program, or why it can't be used.

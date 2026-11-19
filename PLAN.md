@@ -1,5 +1,10 @@
 # Harness v1 plan
 
+Added 2026-11-18 (branch `harness/antigravity-agent-3ca873`): chats can run
+on Google's Antigravity CLI (`agy acp`) through the same ACP layer as Cursor.
+Agents are listed Claude Code, Codex, Antigravity, Cursor everywhere. See
+"Antigravity over ACP".
+
 Added 2026-11-15 (branch `harness/cursor-acp-217ae2`): chats can run on
 Cursor's agent as well as Claude Code, picked from the model menu before the
 first message. See "Cursor over ACP".
@@ -257,8 +262,12 @@ the login itself.
 - Editing skills in the app, and a screen for managing app connections.
   Skills can be imported and removed (see "Skills"); instructions and
   connections you already have still work, with no UI for editing them.
-- Agents other than Claude Code, Cursor and Codex (Gemini, Copilot,
-  OpenCode). Most ACP agents would reuse `agent/acp.rs`.
+- Agents other than Claude Code, Codex, Antigravity and Cursor (Gemini CLI,
+  Copilot, OpenCode). Most ACP agents would reuse `agent/acp.rs` with a
+  `Dialect` of their own.
+- In Antigravity chats: side chat, worktrees moving an existing chat,
+  question forms (ACP elicitation is declined, so the agent carries on
+  unanswered), and sign-in other than Google's (API key, Enterprise).
 - In Codex chats: side chat (Codex can fork a thread, so it's doable), and
   chats made in Codex's own CLI or app.
 - In Cursor chats: side chat, worktrees (loading a session in another folder
@@ -2381,6 +2390,66 @@ conversation, and the model list loaded. Not tested live: the sign-in card
   required" (`data.message` says to run `agent login`).
 - **Errors in a turn** show up as message text ("Error: RetriableError: …")
   with `stopReason: "end_turn"`.
+
+### Antigravity over ACP (probed 2026-11-18, agy 1.5.11)
+
+Antigravity's CLI (`agy`, in `~/.local/bin`) has a built-in ACP server,
+`agy acp`, Google's own way for editors to drive it. It runs through the same
+`agent/acp.rs` as Cursor; what differs is `antigravity::DIALECT`. What live
+probes showed:
+
+- **`initialize`**: `loadSession: true`; `sessionCapabilities` resume, close,
+  load, list, additionalDirectories; `_meta.antigravity.systemPrompt.append:
+  true`; four `authMethods` (Google, Gemini Enterprise, API key, Agent
+  Platform).
+- **`session/new`** returns `models`, `modes` (`default`, `accept-edits`,
+  `auto`, `plan`) and `configOptions`: `model` (plain names such as
+  `gemini-4-neon`, `claude-opus-5-5`), `thought_level` and `mode`. Thinking
+  levels differ by model (Gemini 4 to `xhigh`, Claude Opus and Flash to
+  `high`, GPT-OSS none) and show once a model is picked. A new session does
+  not start on the last model used elsewhere. A `usage_update {used, size}`
+  follows, then `available_commands_update` (`/goal`, `/compact`, `/plan`,
+  `/grill-me`, `/learn`, ...).
+- **System prompt**: `_meta: {antigravity: {systemPrompt: {append}}}` on
+  `session/new` and `session/load` is followed (tested: "end every reply with
+  BANANA"; after a load the agent still knew the notes path, which only the
+  appended prompt gives).
+- **Tool calls** carry a top-level `name` (`run_command`, `read_file`,
+  `write_file`, `mcp_<server>_<tool>`), `kind`, `title`, `locations[].path`,
+  and `rawInput` with capitalized keys (`CommandLine`, `Path`, `Content`,
+  `toolSummary`). A command's `rawOutput` is `{output, exit_code}`, its output
+  after a "Created At / Completed At / Command exited ... Command output:"
+  header, lines ending `\r\n`. Writes carry a `diff` content block. MCP calls
+  carry their arguments in `rawInput` but no output.
+- **Approvals**: standard `session/request_permission`, options
+  `{optionId: allow, kind: allow_once}` and `{deny, reject_once}`. Commands,
+  writes and MCP calls ask; reads don't.
+- **Plans**: in `plan` mode the plan is a `write_file` into
+  `~/.gemini/antigravity-cli/brain/<session>/` with
+  `rawInput.ArtifactMetadata.RequestFeedback: true`; the turn then ends with a
+  text ask. There is no plan request to answer.
+- **MCP over HTTP** works as Cursor's does.
+
+**As built (2026-11-18, branch `harness/antigravity-agent-3ca873`):**
+`acp.rs` takes a `Dialect` per agent: tool naming, own-tool detection,
+plan-as-file detection, output tidying, the mode a plan is built in
+(Cursor `agent`, Antigravity `default`), where the app's instructions go
+(Cursor: end of the first prompt; Antigravity: the system prompt, on every
+start), and whether a chat with no model picks one. A plan written as a file
+in plan mode is offered for approval once the turn ends (`Waiting::Plan`
+with no RPC ID); the answer becomes the next prompt, switching to `default`
+first if approved. `usage_update` feeds the context meter for any ACP agent;
+elicitation requests are declined. The notes folder, the project's docs and
+its memory are passed with `--add-dir`. Short jobs (models, commands,
+sign-in with `agy acp --login`) share `acp_sync.rs` with Cursor. Agents are
+one ordered list, `agent::ALL` and `src/lib/agents.ts`: Claude Code, Codex,
+Antigravity, Cursor. **Tested live** with the self-test on Gemini 3.8 Flash: a
+command, a read and a write approved; a plan shown in the panel, approved and
+built in Default mode; the context meter; titles; resume after a restart
+(history and instructions kept); the worktree card through
+`mcp__harness_worktree__ask`; a write to the chat's notes. A Cursor run
+(command, plan approved and built) still passed. **Not tested live**: the
+sign-in card, "Keep planning", a question form, subagents.
 
 ### Codex over app-server (built 2026-11-18, codex-cli 0.169.1)
 

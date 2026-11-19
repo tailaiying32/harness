@@ -1,4 +1,4 @@
-//! Find the agents' programs: Claude Code, Cursor's agent and Codex. Sign-in isn't checked here: a chat finds out
+//! Find the agents' programs: Claude Code, Codex, Antigravity's `agy` and Cursor's agent. Sign-in isn't checked here: a chat finds out
 //! from Claude Code itself (see `SignInNeeded`). Checking at startup with
 //! `claude auth status` reported a working login as signed out.
 
@@ -17,7 +17,9 @@ pub struct SetupInfo {
     pub cursor: Option<String>,
     /// Codex's program.
     pub codex: Option<String>,
-    /// The agents found, Claude Code first ("claude-code", "cursor", "codex").
+    /// Antigravity's program (`agy`).
+    pub antigravity: Option<String>,
+    /// The agents found, in `agent::ALL`'s order.
     pub agents: Vec<String>,
     /// What to tell the user when no agent was found.
     pub problem: Option<String>,
@@ -101,6 +103,15 @@ pub fn find_codex() -> Option<PathBuf> {
         .or_else(|| from_login_shell("codex"))
 }
 
+/// Antigravity's CLI, `agy`. Its installer puts it in `~/.local/bin`.
+pub fn find_antigravity() -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "agy.exe" } else { "agy" };
+    std::env::var_os("HARNESS_ANTIGRAVITY_PATH")
+        .and_then(existing)
+        .or_else(|| home().and_then(|h| existing(h.join(".local").join("bin").join(exe))))
+        .or_else(|| from_login_shell("agy"))
+}
+
 /// A helper program (git, gh): its usual install spots first, then the login
 /// shell. Looked up once per run.
 fn find_tool(name: &str, usual: &[&str]) -> Option<PathBuf> {
@@ -137,16 +148,18 @@ pub fn check_setup() -> SetupInfo {
     let claude = find_claude();
     let cursor = find_cursor();
     let codex = find_codex();
-    let mut agents = Vec::new();
-    if claude.is_some() {
-        agents.push(crate::agent::CLAUDE.to_string());
-    }
-    if cursor.is_some() {
-        agents.push(crate::agent::CURSOR.to_string());
-    }
-    if codex.is_some() {
-        agents.push(crate::agent::CODEX.to_string());
-    }
+    let antigravity = find_antigravity();
+    let agents = crate::agent::ALL
+        .iter()
+        .filter(|id| match **id {
+            crate::agent::CLAUDE => claude.is_some(),
+            crate::agent::CODEX => codex.is_some(),
+            crate::agent::ANTIGRAVITY => antigravity.is_some(),
+            crate::agent::CURSOR => cursor.is_some(),
+            _ => false,
+        })
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>();
     let shown = |p: Option<PathBuf>| p.map(|p| p.to_string_lossy().into_owned());
     SetupInfo {
         problem: agents
@@ -155,6 +168,7 @@ pub fn check_setup() -> SetupInfo {
         binary: shown(claude),
         cursor: shown(cursor),
         codex: shown(codex),
+        antigravity: shown(antigravity),
         agents,
     }
 }

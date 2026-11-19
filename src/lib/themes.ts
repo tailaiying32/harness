@@ -2,6 +2,8 @@
 // properties set here, so adding a theme never touches a component.
 // See PLAN.md, "Look" and "Appearance settings".
 
+import { isAgent } from "./agents";
+
 export type Theme = {
   id: string;
   name: string;
@@ -263,7 +265,7 @@ type Prefs = {
   appearance: Appearance;
   size: Size;
   model: string;
-  /** The agent of the model new chats start on ("claude-code", "cursor", "codex"). */
+  /** The agent of the model new chats start on (one of `AGENTS`). */
   agent: string;
   fontSize: number;
   /** The permission mode new chats start in: the last one picked, plan aside. */
@@ -323,7 +325,7 @@ export function loadPrefs(): Prefs {
       size,
       // Any saved name is kept; if Claude Code no longer knows it, the chat says so.
       model: typeof saved.model === "string" && saved.model ? saved.model : "default",
-      agent: saved.agent === "cursor" || saved.agent === "codex" ? saved.agent : "claude-code",
+      agent: isAgent(saved.agent) ? saved.agent : "claude-code",
       // With none saved, keep the text size the saved spacing used to give.
       fontSize: (fontSizes as readonly number[]).includes(saved.fontSize as number) ? saved.fontSize! : fontOfSize[size],
       mode: modes.includes(saved.mode as string) ? saved.mode! : DEFAULT_MODE,
@@ -336,7 +338,7 @@ export function loadPrefs(): Prefs {
       projectOrder: Array.isArray(saved.projectOrder) ? saved.projectOrder.filter((p) => typeof p === "string") : [],
       projectModels: Object.fromEntries(
         Object.entries(saved.projectModels ?? {}).filter(
-          ([, pick]) => pick && typeof pick.model === "string" && pick.model && (pick.agent === "cursor" || pick.agent === "codex" || pick.agent === "claude-code"),
+          ([, pick]) => pick && typeof pick.model === "string" && pick.model && isAgent(pick.agent),
         ),
       ),
       overnightUntil: overnightTimes.includes(saved.overnightUntil as string) ? saved.overnightUntil! : DEFAULT_OVERNIGHT,

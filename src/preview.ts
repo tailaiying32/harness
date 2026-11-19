@@ -657,7 +657,7 @@ const commands: Record<string, (args: Args) => unknown> = {
       emit("unseen", ended);
     }, 50);
   },
-  check_setup: () => ({ binary: "claude", cursor: "agent", codex: "codex", agents: ["claude-code", "cursor", "codex"], problem: null }),
+  check_setup: () => ({ binary: "claude", cursor: "agent", codex: "codex", antigravity: "agy", agents: ["claude-code", "codex", "antigravity", "cursor"], problem: null }),
   keep_awake_state: () => keepAwake,
   keep_awake_start: (args) => {
     const ends_at = args.mode === "overnight" ? args.endsAt : Date.now() + 2 * 60 * 60 * 1000;
@@ -781,6 +781,13 @@ const commands: Record<string, (args: Args) => unknown> = {
     // As the core sends them (trimmed): Claude Code's, then Cursor's and Codex's.
     if (args.agent === "codex")
       return [{ name: "compact", description: "Summarize the conversation to free up context", hint: null, aliases: [] }];
+    if (args.agent === "antigravity")
+      return [
+        { name: "goal", description: "Run until the specified goal is completely finished.", hint: null, aliases: [] },
+        { name: "compact", description: "Compact the conversation now (summarize history to free up the context window).", hint: null, aliases: [] },
+        { name: "grill-me", description: "Interview me to align on a plan.", hint: null, aliases: [] },
+        { name: "learn", description: "Reflect on recent successes or corrections to capture reusable skills or rules.", hint: null, aliases: [] },
+      ];
     if (args.agent === "cursor")
       return [
         {"name": "autopilot", "description": "Keep a PR merge-ready by triaging comments, resolving clear conflicts, and fixing CI in a loop. (builtin skill)", "hint": null, "aliases": []},
@@ -826,6 +833,17 @@ const commands: Record<string, (args: Args) => unknown> = {
         { value: "gpt-6-luna", name: "GPT-6-Luna", detail: "Fast and affordable model for easier tasks.", efforts: all, default_effort: "medium" },
         { value: "gpt-5.6-terra", name: "GPT-5.6-Terra", detail: "Legacy balanced model for agentic coding.", efforts: all, default_effort: "medium" },
       ];
+    // Antigravity's, as the core sends them: its default first, one thinking level for all.
+    if (args.agent === "antigravity") {
+      const levels = ["low", "medium", "high", "xhigh"];
+      return [
+        { value: "gemini-4-neon", name: "Gemini 4 Neon", detail: null, efforts: levels, default_effort: "high" },
+        { value: "gemini-4-argon", name: "Gemini 4 Argon", detail: null, efforts: levels, default_effort: "high" },
+        { value: "gemini-3.8-flash", name: "Gemini 3.8 Flash", detail: null, efforts: levels, default_effort: "high" },
+        { value: "claude-opus-5-5", name: "Claude Opus 5.5", detail: null, efforts: levels, default_effort: "high" },
+        { value: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", detail: null, efforts: levels, default_effort: "high" },
+      ];
+    }
     // Cursor's, as the core sends them: Auto first, newest of each family.
     if (args.agent === "cursor")
       return [
