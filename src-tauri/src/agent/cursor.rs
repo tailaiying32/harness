@@ -2,7 +2,7 @@
 //! driven over ACP (`agent acp`; see `acp.rs`). Tested on Cursor CLI
 //! 2026.11.13; what it sends is in PLAN.md, "Cursor over ACP".
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -11,7 +11,7 @@ use super::acp::{self, AcpConfig, Dialect, Intro, Tool};
 use super::acp_sync::{self, SyncRpc, effort_levels, model_option};
 #[cfg(test)]
 use super::acp_sync::parse_commands;
-use super::{AgentAdapter, EventSink, RunningAgent, SpawnOptions};
+use super::{AgentAdapter, EventSink, RunningAgent, SideCopy, SpawnOptions, copy_database, plain_id};
 use crate::events::{CommandInfo, ModelInfo};
 
 pub struct CursorAdapter;
@@ -47,14 +47,18 @@ const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
 impl AgentAdapter for CursorAdapter {
     fn spawn(&self, opts: SpawnOptions, sink: EventSink) -> Result<Box<dyn RunningAgent>, String> {
-        if opts.side.is_some() {
-            return Err("Side chats work with Claude Code only".to_string());
+        let mut opts = opts;
+        let side = opts.side.is_some();
+        // A side chat answers in Ask mode: no edits, no commands.
+        if side {
+            opts.mode = Some("ask".to_string());
         }
         let config = AcpConfig {
             label: "Cursor",
             args: vec!["acp".to_string()],
             client_meta: client_meta(),
             dialect: &DIALECT,
+            side,
         };
         acp::spawn(opts.binary.clone(), config, opts, sink)
     }
@@ -139,7 +143,76 @@ impl AgentAdapter for CursorAdapter {
         acp_sync::sign_in(binary, &["login"], "Cursor", SIGN_IN_TIMEOUT)
     }
 
-    fn forget_session(&self, _agent_session_id: &str) {}
+    fn forget_session(&self, agent_session_id: &str) {
+        if let Some(folder) = sessions_folder().and_then(|f| session_folder(&f, agent_session_id)) {
+            let _ = std::fs::remove_dir_all(folder);
+        }
+    }
+
+    fn has_session(&self, agent_session_id: &str) -> bool {
+        sessions_folder()
+            .and_then(|f| session_folder(&f, agent_session_id))
+            .is_some_and(|folder| folder.is_dir())
+    }
+
+    fn side_copy(&self) -> SideCopy {
+        SideCopy::Files
+    }
+
+    fn copy_session(&self, agent_session_id: &str) -> Result<String, String> {
+        let folder = sessions_folder().ok_or("No home folder")?;
+        copy_session_in(&folder, agent_session_id)
+    }
+}
+
+/// Where Cursor keeps the sessions its ACP server makes: a folder each,
+/// `<config>/acp-sessions/<id>/`, holding `store.db` (the conversation) and
+/// `meta.json` (its folder and title). `CURSOR_CONFIG_DIR` replaces
+/// `~/.cursor`. Not documented; seen on Cursor CLI 2026.11.19.
+fn sessions_folder() -> Option<PathBuf> {
+    let config = std::env::var_os("CURSOR_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| crate::home::user_home().map(|home| home.join(".cursor")))?;
+    Some(config.join("acp-sessions"))
+}
+
+/// A session's folder, for a plain ID only.
+fn session_folder(sessions: &Path, id: &str) -> Option<PathBuf> {
+    plain_id(id).then(|| sessions.join(id))
+}
+
+/// Copies a session's folder under a new ID: the database whole (with what
+/// is still in its log, while the chat may be writing it), every other file
+/// as is. Nothing inside names the session, so the copy loads as itself
+/// (tested: the copy remembers the chat, and neither sees the other's
+/// messages after).
+fn copy_session_in(sessions: &Path, id: &str) -> Result<String, String> {
+    let from = session_folder(sessions, id).ok_or("Not a session ID")?;
+    if !from.join("store.db").is_file() {
+        return Err(format!("Cursor has no saved session {id}"));
+    }
+    let new = uuid::Uuid::new_v4().to_string();
+    let to = sessions.join(&new);
+    let copied = (|| {
+        std::fs::create_dir(&to).map_err(|e| e.to_string())?;
+        copy_database(&from.join("store.db"), &to.join("store.db"))?;
+        for entry in std::fs::read_dir(&from).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with("store.db") || !entry.file_type().map_err(|e| e.to_string())?.is_file() {
+                continue;
+            }
+            std::fs::copy(entry.path(), to.join(&name)).map_err(|e| e.to_string())?;
+        }
+        Ok::<(), String>(())
+    })();
+    match copied {
+        Ok(()) => Ok(new),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&to);
+            Err(e)
+        }
+    }
 }
 
 /// Whether a tool call is one of the app's own tools.
@@ -239,5 +312,34 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_session_is_copied_whole_under_a_new_id_and_a_bad_id_is_refused() {
+        let sessions = std::env::temp_dir().join(format!("harness-cursor-copy-{}", uuid::Uuid::new_v4()));
+        let from = sessions.join("s-1");
+        std::fs::create_dir_all(&from).unwrap();
+        let db = rusqlite::Connection::open(from.join("store.db")).unwrap();
+        db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE blobs (id TEXT, data TEXT); INSERT INTO blobs VALUES ('a', 'PELICAN');")
+            .unwrap();
+        std::fs::write(from.join("meta.json"), r#"{"title":"t"}"#).unwrap();
+
+        // Copied while the database is still open, its rows still in the log.
+        let new = copy_session_in(&sessions, "s-1").unwrap();
+        drop(db);
+        let copy = sessions.join(&new);
+        let word: String = rusqlite::Connection::open(copy.join("store.db"))
+            .unwrap()
+            .query_row("SELECT data FROM blobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(word, "PELICAN");
+        assert_eq!(std::fs::read_to_string(copy.join("meta.json")).unwrap(), r#"{"title":"t"}"#);
+
+        for bad in ["../s-1", "s-1/..", "", "missing"] {
+            assert!(copy_session_in(&sessions, bad).is_err(), "{bad}");
+        }
+        // Nothing half-made left behind.
+        assert_eq!(std::fs::read_dir(&sessions).unwrap().count(), 2);
+        let _ = std::fs::remove_dir_all(sessions);
     }
 }

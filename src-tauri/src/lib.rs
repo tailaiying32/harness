@@ -281,20 +281,18 @@ async fn side_send(
     state: State<'_, AppState>,
     side_id: String,
     project_path: String,
+    agent: Option<String>,
     model: Option<String>,
     effort: Option<String>,
     text: String,
     message_id: String,
 ) -> Result<(), String> {
-    // Side chats run on Claude Code, which can copy a conversation.
-    let (_, binary) = state.agents.get(agent::CLAUDE)?;
+    // Side chats run on their chat's agent; `agent` is for a chat not saved yet.
     let project_path = PathBuf::from(project_path);
     if !project_path.is_dir() {
         return Err(format!("Not a folder: {}", project_path.display()));
     }
-    state
-        .side
-        .send(&side_id, binary, &project_path, model, effort, &text, &message_id)
+    state.side.send(&side_id, &project_path, agent.as_deref(), model, effort, &text, &message_id)
 }
 
 #[tauri::command]
@@ -1117,7 +1115,7 @@ pub fn run() {
                 eprintln!("harness: couldn't write harness-tab: {e}");
             }
             let tab_command = home.tab_command();
-            let side = SideChats::new(claude, store.clone(), out.clone(), home.clone(), &dir);
+            let side = SideChats::new(agents.clone(), store.clone(), out.clone(), home.clone(), &dir);
             let browsers = Browsers::new(app.handle().clone(), out.clone());
             let terminals = Terminals::new(out.clone(), store.clone());
             let panel_out = out.clone();
@@ -1132,6 +1130,27 @@ pub fn run() {
                     store.clone(),
                     Arc::new(notes::Notes::for_store(sessions.home().clone(), store.clone())),
                 );
+                // A side chat that couldn't copy its chat reads it with this.
+                let chats_tools: side_chat::ChatTools = {
+                    let chats = chats.clone();
+                    Arc::new(move |chat_id: &str, project: &str| {
+                        let chats = chats.clone();
+                        let chat_id = chat_id.to_string();
+                        let project = project.to_string();
+                        AppTools {
+                            server: chats::SERVER,
+                            instruction: chats::INSTRUCTION.into(),
+                            list: chats::tools(),
+                            call: Arc::new(move |tool, args| {
+                                let chats = chats.clone();
+                                let chat_id = chat_id.clone();
+                                let project = project.clone();
+                                Box::pin(async move { chats.call(&chat_id, &project, &tool, &args).await })
+                            }),
+                        }
+                    })
+                };
+                side.set_chat_tools(chats_tools.clone());
                 let keep_awake = keep_awake.clone();
                 let panel_out = panel_out.clone();
                 let tab_command = tab_command.clone();
@@ -1165,22 +1184,7 @@ pub fn run() {
                         }
                     };
                     // Every chat's agent can look up the project's earlier chats.
-                    let chats_tools = {
-                        let chats = chats.clone();
-                        let chat_id = chat_id.to_string();
-                        let project = project.to_string();
-                        AppTools {
-                            server: chats::SERVER,
-                            instruction: chats::INSTRUCTION.into(),
-                            list: chats::tools(),
-                            call: Arc::new(move |tool, args| {
-                                let chats = chats.clone();
-                                let chat_id = chat_id.clone();
-                                let project = project.clone();
-                                Box::pin(async move { chats.call(&chat_id, &project, &tool, &args).await })
-                            }),
-                        }
-                    };
+                    let chats_tools = chats_tools(chat_id, project);
                     // Every chat's agent can keep the computer awake.
                     let keep_awake_tools = {
                         let keep_awake = keep_awake.clone();
