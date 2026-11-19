@@ -495,7 +495,12 @@ fn only_reveal(path: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        ["exe", "bat", "cmd", "com", "msi", "ps1", "vbs", "js", "lnk", "scr"].contains(&extension(path).as_str())
+        // Everything Windows runs on a double-click, not only programs.
+        [
+            "exe", "bat", "cmd", "com", "msi", "msp", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "lnk",
+            "scr", "pif", "cpl", "msc", "jar", "reg", "appref-ms", "application", "url", "inf", "scf",
+        ]
+        .contains(&extension(path).as_str())
     }
 }
 
@@ -819,10 +824,54 @@ fn terminal_text(state: State<'_, AppState>, tab: String, lines: usize) -> Resul
     state.terminals.text(&tab, lines)
 }
 
+/// How long after launch background upkeep (worktree sweep, pull request
+/// checks) waits, so it doesn't compete with the window's first paint.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// When the app started.
+fn launched() -> std::time::Instant {
+    static AT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *AT.get_or_init(std::time::Instant::now)
+}
+
 /// Closes the window: Cmd+W outside a terminal, as the default menu did.
 #[tauri::command]
 fn close_window(window: tauri::Window) -> Result<(), String> {
     window.close().map_err(|e| e.to_string())
+}
+
+/// Colours Windows' title bar like the theme ("#rrggbb"), so it reads as part
+/// of the window instead of a system-grey strip. Windows 11 only; older
+/// Windows keeps its own bar (the dark-mode switch still applies on 10).
+/// A Mac draws into its title bar already, so there it does nothing.
+#[tauri::command]
+fn title_bar(window: tauri::Window, bg: String, fg: String, dark: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Graphics::Dwm::{
+            DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
+        };
+        // COLORREF is 0x00BBGGRR.
+        let colorref = |hex: &str| -> Option<u32> {
+            let v = u32::from_str_radix(hex.strip_prefix('#')?.get(..6)?, 16).ok()?;
+            Some(((v & 0xff) << 16) | (v & 0xff00) | ((v >> 16) & 0xff))
+        };
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?.0;
+        let set = |attr: i32, value: u32| {
+            // SAFETY: a valid window handle and a 4-byte value of the size given.
+            unsafe { DwmSetWindowAttribute(hwnd, attr as u32, (&value as *const u32).cast(), 4) };
+        };
+        set(DWMWA_USE_IMMERSIVE_DARK_MODE, dark as u32);
+        if let Some(c) = colorref(&bg) {
+            set(DWMWA_CAPTION_COLOR, c);
+        }
+        if let Some(c) = colorref(&fg) {
+            set(DWMWA_TEXT_COLOR, c);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (window, bg, fg, dark);
+    Ok(())
 }
 
 /// The models an agent offers (Claude Code if none is named). Starts a
@@ -1017,6 +1066,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            launched();
             let dir = match std::env::var_os("HARNESS_DATA_DIR") {
                 Some(dir) => PathBuf::from(dir),
                 None => app.path().app_data_dir()?,
@@ -1203,10 +1253,13 @@ pub fn run() {
                     sessions.sweep_chat_files();
                 });
             }
-            // The worktree cleanup pass: at start, then every hour.
+            // The worktree cleanup pass: soon after start, then every hour.
+            // Not at once: its git and gh calls would compete with the first
+            // paint, and on Windows each process start is slow.
             {
                 let sessions = sessions.clone();
                 tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(SETTLE).await;
                     loop {
                         sessions.sweep().await;
                         tokio::time::sleep(sessions::SWEEP_EVERY).await;
@@ -1227,11 +1280,16 @@ pub fn run() {
             Ok(())
         })
         // Back in front: pull requests merged or closed meanwhile show at once.
+        // The first focus, at launch, waits until startup has settled.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(true) = event {
                 if let Some(state) = window.try_state::<AppState>() {
                     let sessions = state.sessions.clone();
-                    tauri::async_runtime::spawn(async move { sessions.check_all_prs().await });
+                    let wait = SETTLE.saturating_sub(launched().elapsed());
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(wait).await;
+                        sessions.check_all_prs().await
+                    });
                 }
             }
         })
@@ -1305,6 +1363,7 @@ pub fn run() {
             terminal_move,
             terminal_text,
             close_window,
+            title_bar,
             save_image,
             read_image,
             read_image_file,

@@ -54,6 +54,23 @@ export function look(): { fontFamily: string; fontSize: number } {
   return { fontFamily, fontSize };
 }
 
+const WINDOWS = /Windows/.test(navigator.userAgent);
+
+// Windows' ConPTY: xterm needs to know it, and whether its build reflows
+// wrapped lines itself (21376 and later; every Windows 11 does). The browser
+// tells Windows 11 (platform version 13+) from 10 but not the exact build.
+let windowsBuild = 19041;
+if (WINDOWS) {
+  type UAData = { getHighEntropyValues(h: string[]): Promise<{ platformVersion?: string }> };
+  const data = (navigator as Navigator & { userAgentData?: UAData }).userAgentData;
+  void data
+    ?.getHighEntropyValues(["platformVersion"])
+    .then((v) => {
+      if (parseInt(v.platformVersion ?? "0") >= 13) windowsBuild = 22000;
+    })
+    .catch(() => {});
+}
+
 /**
  * A terminal drawn into its own element, which the panel moves into view.
  * `keys` sees app shortcuts first: when it returns true the terminal ignores
@@ -66,9 +83,12 @@ export function makeTerminal(theme: Theme, onData: (data: string) => void, keys:
     ...look(),
     theme: xtermTheme(theme),
     scrollback: 5000,
-    cursorBlink: false,
+    // On Windows a blinking bar, as Windows Terminal draws it.
+    cursorBlink: WINDOWS,
+    cursorStyle: WINDOWS ? "bar" : "block",
     allowProposedApi: false,
     macOptionClickForcesSelection: true,
+    ...(WINDOWS ? { windowsPty: { backend: "conpty" as const, buildNumber: windowsBuild } } : {}),
   });
   const fit = new FitAddon();
   term.loadAddon(fit);

@@ -1961,12 +1961,14 @@ are there now, so use the new paths.)\n\ncarry on",
     fn scratch_repo() -> PathBuf {
         let root = std::env::temp_dir().join(format!("harness-repo-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = crate::worktree::canonical(&root).unwrap();
         let git = |args: &[&str]| {
             let ok = Command::new("git").arg("-C").arg(&root).args(args).output().unwrap().status.success();
             assert!(ok, "git {args:?}");
         };
         git(&["init", "-q", "-b", "main"]);
+        // Files come back as written, whatever the machine's autocrlf.
+        git(&["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("app.py"), "one\n").unwrap();
         git(&["add", "-A"]);
         git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]);
@@ -2288,7 +2290,12 @@ are there now, so use the new paths.)\n\ncarry on",
         };
         *found.lock().unwrap() = Some(pr("open"));
         rig.turn_ends();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // The refresh runs in the background; how long it takes depends on
+        // the machine (git is slow to start on Windows).
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while rig.store.session("s1").unwrap().unwrap().prs.is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         assert_eq!(rig.store.session("s1").unwrap().unwrap().prs[0].state, "open");
         assert_eq!(rig.saw(|e| matches!(e, AgentEvent::PrsChanged { .. })), 1);
 
@@ -2334,10 +2341,25 @@ are there now, so use the new paths.)\n\ncarry on",
         let before = asked.load(Ordering::SeqCst);
 
         // Every turn asks, however close together.
+        // Each waits for the background check: fixed waits were too short
+        // with many tests at once, where every git start is slow (Windows).
+        let asked_to = |n: usize| {
+            let asked = asked.clone();
+            async move {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while asked.load(Ordering::SeqCst) < n && std::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }
+        };
         rig.turn_ends();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        asked_to(before + 1).await;
         rig.turn_ends();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        asked_to(before + 2).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while rig.store.session("s1").unwrap().unwrap().prs.is_empty() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         assert_eq!(asked.load(Ordering::SeqCst), before + 2);
         assert_eq!(rig.store.session("s1").unwrap().unwrap().prs[0].state, "open");
 

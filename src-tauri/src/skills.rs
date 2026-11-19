@@ -168,8 +168,8 @@ impl Skills {
             return Err(format!("Give a path inside the skill, like references/guide.md, not {file}"));
         }
         let path = folder.join(relative);
-        let real = path.canonicalize().map_err(|_| format!("No file {file} in skill {name}"))?;
-        let real_folder = folder.canonicalize().map_err(|e| e.to_string())?;
+        let real = crate::worktree::canonical(&path).map_err(|_| format!("No file {file} in skill {name}"))?;
+        let real_folder = crate::worktree::canonical(&folder).map_err(|e| e.to_string())?;
         if !real.starts_with(&real_folder) || !real.is_file() {
             return Err(format!("No file {file} in skill {name}"));
         }

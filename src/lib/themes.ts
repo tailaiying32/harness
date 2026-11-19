@@ -3,6 +3,7 @@
 // See PLAN.md, "Look" and "Appearance settings".
 
 import { isAgent } from "./agents";
+import { titleBar } from "./ipc";
 
 export type Theme = {
   id: string;
@@ -237,6 +238,7 @@ export function applyTheme(id: string): void {
   set("--syn-num", t.syn.num);
   set("--syn-comment", t.syn.comment);
   root.style.colorScheme = t.dark ? "dark" : "light";
+  if (WINDOWS) void titleBar(t.bg, t.dim, t.dark).catch(() => {});
   window.dispatchEvent(new Event(LOOK_CHANGED));
 }
 
@@ -245,11 +247,27 @@ export function applySize(size: Size): void {
   document.documentElement.dataset.size = size;
 }
 
+// Windows draws text on whole pixels (ClearType hinting), and its displays
+// mostly run at 100-150%, where a half-pixel size lands between pixels and
+// blurs; a Mac's Retina screen doubles every size, so halves are sharp there.
+const WINDOWS = typeof navigator !== "undefined" && /Windows/.test(navigator.userAgent);
+
 /** Text sizes on offer, in px. */
-export const fontSizes = [11, 11.5, 12, 12.5, 13, 13.5, 14, 15, 16] as const;
-export const DEFAULT_FONT_SIZE = 12.5;
+export const fontSizes: readonly number[] = WINDOWS
+  ? [11, 12, 13, 14, 15, 16]
+  : [11, 11.5, 12, 12.5, 13, 13.5, 14, 15, 16];
+export const DEFAULT_FONT_SIZE = WINDOWS ? 13 : 12.5;
 /** The text size each spacing used to bring with it, before the two were separate settings. */
-const fontOfSize: Record<Size, number> = { compact: 11.5, regular: 12.5, roomy: 13.5 };
+const fontOfSize: Record<Size, number> = WINDOWS
+  ? { compact: 12, regular: 13, roomy: 14 }
+  : { compact: 11.5, regular: 12.5, roomy: 13.5 };
+
+/** A saved size, as offered here: on Windows a half size goes up to the whole one. */
+function offeredSize(px: unknown): number | null {
+  if (typeof px !== "number") return null;
+  const size = WINDOWS ? Math.ceil(px) : px;
+  return fontSizes.includes(size) ? size : null;
+}
 
 /** The text size. Spacing (`applySize`) is separate and doesn't change it. */
 export function applyFontSize(px: number): void {
@@ -327,7 +345,7 @@ export function loadPrefs(): Prefs {
       model: typeof saved.model === "string" && saved.model ? saved.model : "default",
       agent: isAgent(saved.agent) ? saved.agent : "claude-code",
       // With none saved, keep the text size the saved spacing used to give.
-      fontSize: (fontSizes as readonly number[]).includes(saved.fontSize as number) ? saved.fontSize! : fontOfSize[size],
+      fontSize: offeredSize(saved.fontSize) ?? fontOfSize[size],
       mode: modes.includes(saved.mode as string) ? saved.mode! : DEFAULT_MODE,
       panelWidth:
         typeof saved.panelWidth === "number" && saved.panelWidth > 0.1 && saved.panelWidth < 0.9

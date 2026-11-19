@@ -139,12 +139,30 @@ fn saved_ref(chat_id: &str) -> String {
     format!("refs/harness/saved/{chat_id}")
 }
 
+/// `Path::canonicalize`, but without Windows' `\\?\` prefix. git can't take
+/// that form (it fails with "could not create leading directories"), and the
+/// paths are shown and compared as plain ones.
+pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    let full = path.canonicalize()?;
+    #[cfg(windows)]
+    {
+        let text = full.to_string_lossy();
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            return Ok(PathBuf::from(format!(r"\\{unc}")));
+        }
+        if let Some(plain) = text.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(plain));
+        }
+    }
+    Ok(full)
+}
+
 /// The repo a folder belongs to: its top folder and the folder's place inside
 /// it. None for a folder outside any repo.
 pub fn repo_of(folder: &Path) -> Option<(PathBuf, String)> {
     let top = git(folder, ["rev-parse", "--show-toplevel"]).ok()?;
-    let root = PathBuf::from(top).canonicalize().ok()?;
-    let folder = folder.canonicalize().ok()?;
+    let root = canonical(Path::new(&top)).ok()?;
+    let folder = canonical(folder).ok()?;
     let sub = folder.strip_prefix(&root).ok()?.to_string_lossy().into_owned();
     Some((root, sub))
 }
@@ -277,9 +295,11 @@ pub fn follow(wt: &Worktree) -> Option<Worktree> {
 
 /// Copies every file git ignores in `main` into the worktree: build output,
 /// packages, and secrets like `.env`. On a Mac they are copy-on-write clones,
-/// which take no space until changed. Where cloning fails (another drive, or
-/// not a Mac), single files are copied plainly and folders are skipped, as
-/// they are usually large and can be rebuilt.
+/// which take no space until changed. Where cloning fails (another drive),
+/// single files are copied plainly and folders are skipped, as they are
+/// usually large and can be rebuilt. Elsewhere (Windows) a folder is copied
+/// when it is small (see `FOLDER_COPY_MAX`); on ReFS or a Dev Drive Windows
+/// makes those copies block clones by itself.
 ///
 /// Never copied: anything holding a nested repo or worktree (a `.git` in the
 /// folder or one level down), since a copy of one would act on the original.
@@ -307,8 +327,62 @@ pub fn copy_ignored(main: &Path, wt: &Path) {
                 continue;
             }
         }
-        if !clone_path(&src, &dst) && !is_dir {
+        if clone_path(&src, &dst) {
+            continue;
+        }
+        if !is_dir {
             let _ = std::fs::copy(&src, &dst);
+        } else if !cfg!(target_os = "macos") {
+            let mut left = FOLDER_COPY_MAX;
+            if within(&src, &mut left) {
+                copy_folder(&src, &dst);
+            }
+        }
+    }
+}
+
+/// The most an ignored folder may hold to be copied where it can't be
+/// cloned: bytes, files. Bigger ones (`node_modules`, `target`) are rebuilt
+/// faster than copied, and a copy would double their space.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+const FOLDER_COPY_MAX: (u64, u32) = (200 * 1024 * 1024, 20_000);
+
+/// Whether `dir` fits in what is `left`, counting it off. Links aren't
+/// followed (or counted).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn within(dir: &Path, left: &mut (u64, u32)) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.path().symlink_metadata() else { continue };
+        if meta.is_dir() {
+            if !within(&entry.path(), left) {
+                return false;
+            }
+        } else if meta.is_file() {
+            if left.1 == 0 || left.0 < meta.len() {
+                return false;
+            }
+            left.0 -= meta.len();
+            left.1 -= 1;
+        }
+    }
+    true
+}
+
+/// A plain copy of a folder: files and folders, not links. Best effort.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn copy_folder(src: &Path, dst: &Path) {
+    if std::fs::create_dir_all(dst).is_err() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(src) else { return };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.path().symlink_metadata() else { continue };
+        let to = dst.join(entry.file_name());
+        if meta.is_dir() {
+            copy_folder(&entry.path(), &to);
+        } else if meta.is_file() {
+            let _ = std::fs::copy(entry.path(), &to);
         }
     }
 }
@@ -549,6 +623,8 @@ mod tests {
             std::fs::create_dir_all(&root).unwrap();
             let repo = Repo { root, dir };
             repo.git(&["init", "-q", "-b", "main"]);
+            // Files come back as written, whatever the machine's autocrlf.
+            repo.git(&["config", "core.autocrlf", "false"]);
             repo.git(&["config", "user.name", "t"]);
             repo.git(&["config", "user.email", "t@t"]);
             repo.write("app.py", "one\n");
@@ -587,7 +663,7 @@ mod tests {
     impl CanonicalizeOrCreate for PathBuf {
         fn canonicalize_or_create(self) -> PathBuf {
             std::fs::create_dir_all(&self).unwrap();
-            self.canonicalize().unwrap()
+            canonical(&self).unwrap()
         }
     }
 
@@ -609,7 +685,9 @@ mod tests {
         let repo = Repo::new();
         repo.write("web/src/x.ts", "x");
         let (root, sub) = repo_of(&repo.root.join("web/src")).unwrap();
-        assert_eq!((root, sub.as_str()), (repo.root.clone(), "web/src"));
+        assert_eq!(root, repo.root.clone());
+        // In the platform's separators; compared as a path.
+        assert_eq!(Path::new(&sub), Path::new("web/src"));
         assert!(repo_of(&repo.dir).is_none());
     }
 

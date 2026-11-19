@@ -100,10 +100,17 @@ impl Home {
     pub fn write_tab_command(&self) -> Result<(), String> {
         let path = self.tab_command();
         let text = if cfg!(windows) {
-            // Untested: quotes inside %* may need work.
+            // One quoted argument (`harness-tab.cmd "npm run dev"`, as agents
+            // are told) is taken without its quotes; several bare words are
+            // joined as typed. Quoting `%*` instead split the quoted form into
+            // words, which curl took for URLs. Tested from Git Bash and
+            // PowerShell, with `&` inside the command too.
             "@echo off\r\n\
+setlocal DisableDelayedExpansion\r\n\
 if \"%HARNESS_TAB_URL%\"==\"\" (echo harness-tab: only works inside a Harness chat 1>&2 & exit /b 1)\r\n\
-curl.exe -sS --fail-with-body --max-time 20 --data-binary \"%*\" \"%HARNESS_TAB_URL%\"\r\n"
+if \"%~1\"==\"\" (echo usage: harness-tab \"command\" 1>&2 & exit /b 2)\r\n\
+if \"%~2\"==\"\" (set \"HT=%~1\") else (set \"HT=%*\")\r\n\
+curl.exe -sS --fail-with-body --max-time 20 --data-binary \"%HT%\" \"%HARNESS_TAB_URL%\"\r\n"
         } else {
             "#!/bin/sh\n\
 # Opens a tab in Harness's side-panel terminal and runs the command there.\n\
