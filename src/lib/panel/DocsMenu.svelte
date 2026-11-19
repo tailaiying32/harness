@@ -266,6 +266,8 @@
     align-self: stretch;
     display: flex;
     align-items: center;
+    /* The bar's gap is 2ch; the tabs beside it sit 3ch apart. */
+    margin-right: 1ch;
   }
   .icon {
     display: flex;
