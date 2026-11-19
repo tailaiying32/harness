@@ -823,6 +823,40 @@ fn close_window(window: tauri::Window) -> Result<(), String> {
     window.close().map_err(|e| e.to_string())
 }
 
+/// Colours Windows' title bar like the theme ("#rrggbb"), so it reads as part
+/// of the window instead of a system-grey strip. Windows 11 only; older
+/// Windows keeps its own bar (the dark-mode switch still applies on 10).
+/// A Mac draws into its title bar already, so there it does nothing.
+#[tauri::command]
+fn title_bar(window: tauri::Window, bg: String, fg: String, dark: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Graphics::Dwm::{
+            DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
+        };
+        // COLORREF is 0x00BBGGRR.
+        let colorref = |hex: &str| -> Option<u32> {
+            let v = u32::from_str_radix(hex.strip_prefix('#')?.get(..6)?, 16).ok()?;
+            Some(((v & 0xff) << 16) | (v & 0xff00) | ((v >> 16) & 0xff))
+        };
+        let hwnd = window.hwnd().map_err(|e| e.to_string())?.0;
+        let set = |attr: i32, value: u32| {
+            // SAFETY: a valid window handle and a 4-byte value of the size given.
+            unsafe { DwmSetWindowAttribute(hwnd, attr as u32, (&value as *const u32).cast(), 4) };
+        };
+        set(DWMWA_USE_IMMERSIVE_DARK_MODE, dark as u32);
+        if let Some(c) = colorref(&bg) {
+            set(DWMWA_CAPTION_COLOR, c);
+        }
+        if let Some(c) = colorref(&fg) {
+            set(DWMWA_TEXT_COLOR, c);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (window, bg, fg, dark);
+    Ok(())
+}
+
 /// The models an agent offers (Claude Code if none is named). Starts a
 /// short-lived agent process, so it runs off the main thread: about 7 seconds
 /// for Claude Code; for Cursor a few seconds plus about one per model named in
@@ -1302,6 +1336,7 @@ pub fn run() {
             terminal_move,
             terminal_text,
             close_window,
+            title_bar,
             save_image,
             read_image,
             read_image_file,

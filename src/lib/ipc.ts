@@ -536,3 +536,5 @@ export const terminalMove = (tab: string, to: number) => invoke<void>("terminal_
 export const terminalText = (tab: string, lines: number) => invoke<string>("terminal_text", { tab, lines });
 /** Closes the window, as Cmd+W does outside a terminal. */
 export const closeWindow = () => invoke<void>("close_window");
+/** Colours Windows' title bar like the theme; nothing elsewhere. */
+export const titleBar = (bg: string, fg: string, dark: boolean) => invoke<void>("title_bar", { bg, fg, dark });
