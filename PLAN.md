@@ -265,9 +265,9 @@ the login itself.
 - Agents other than Claude Code, Codex, Antigravity and Cursor (Gemini CLI,
   Copilot, OpenCode). Most ACP agents would reuse `agent/acp.rs` with a
   `Dialect` of their own.
-- In Antigravity chats: side chat, worktrees moving an existing chat,
-  question forms (ACP elicitation is declined, so the agent carries on
-  unanswered), and sign-in other than Google's (API key, Enterprise).
+- In Antigravity chats: side chat, worktrees moving an existing chat, a
+  subagent's own steps (agy doesn't send them), and sign-in other than
+  Google's (API key, Enterprise).
 - In Codex chats: side chat (Codex can fork a thread, so it's doable), and
   chats made in Codex's own CLI or app.
 - In Cursor chats: side chat, worktrees (loading a session in another folder
@@ -2429,6 +2429,23 @@ probes showed:
   `rawInput.ArtifactMetadata.RequestFeedback: true`; the turn then ends with a
   text ask. There is no plan request to answer.
 - **MCP over HTTP** works as Cursor's does.
+- **Questions**: an `ask_question` tool call (`rawInput.questions[]` with
+  `question`, `options`, `is_multi_select`), then an `elicitation/create`
+  request (`mode: "form"`, offered only when the client declares
+  `clientCapabilities.elicitation.form`). Each question is a `requestedSchema`
+  field with `oneOf [{const, title}]`, plus `<field>_other` for a free-form
+  answer. The answer is `{action: "accept", content: {q1: "1"}}`; `decline`
+  and `cancel` also exist.
+- **Subagents**: one `invoke_subagent` call (`Role`, `Prompt`, `TypeName`)
+  that returns at once; the agent may wait with `manage_subagents`. The
+  subagent's steps aren't sent. Its result arrives **after the turn's
+  `session/prompt` reply**, as more `agent_message_chunk`s and a closing
+  `usage_update`.
+- **Signed out**: `session/new` fails with `-32000` "Authentication
+  required". `agy acp --login` prints a Google link and waits for a pasted
+  code (redirect to `antigravity.google/oauth-callback`), so it can't run
+  without a terminal. ACP `authenticate {methodId: "oauth-personal"}` opens
+  the browser itself.
 
 **As built (2026-11-18, branch `harness/antigravity-agent-3ca873`):**
 `acp.rs` takes a `Dialect` per agent: tool naming, own-tool detection,
@@ -2439,17 +2456,22 @@ start), and whether a chat with no model picks one. A plan written as a file
 in plan mode is offered for approval once the turn ends (`Waiting::Plan`
 with no RPC ID); the answer becomes the next prompt, switching to `default`
 first if approved. `usage_update` feeds the context meter for any ACP agent;
-elicitation requests are declined. The notes folder, the project's docs and
+question forms are shown as question cards for any ACP agent whose dialect
+offers them (`forms`), and answered as a form; updates that come with no
+prompt open make a follow-up turn, ended by the closing `usage_update` (or 8
+seconds of quiet). `ask_question` and `invoke_subagent` show as Claude Code's
+question and subagent cards. Sign-in uses ACP `authenticate`. The notes folder, the project's docs and
 its memory are passed with `--add-dir`. Short jobs (models, commands,
-sign-in with `agy acp --login`) share `acp_sync.rs` with Cursor. Agents are
+listing commands) share `acp_sync.rs` with Cursor. Agents are
 one ordered list, `agent::ALL` and `src/lib/agents.ts`: Claude Code, Codex,
 Antigravity, Cursor. **Tested live** with the self-test on Gemini 3.8 Flash: a
 command, a read and a write approved; a plan shown in the panel, approved and
 built in Default mode; the context meter; titles; resume after a restart
 (history and instructions kept); the worktree card through
-`mcp__harness_worktree__ask`; a write to the chat's notes. A Cursor run
-(command, plan approved and built) still passed. **Not tested live**: the
-sign-in card, "Keep planning", a question form, subagents.
+`mcp__harness_worktree__ask`; a write to the chat's notes; a question card
+answered; a subagent whose result came after the turn and was kept. A Cursor
+run (command, plan approved and built) still passed. **Not tested live**: the
+sign-in card through to a signed-in agy, and "Keep planning" (unit-tested).
 
 ### Codex over app-server (built 2026-11-18, codex-cli 0.169.1)
 

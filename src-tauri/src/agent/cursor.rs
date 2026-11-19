@@ -27,6 +27,7 @@ pub static DIALECT: Dialect = Dialect {
     intro: Intro::FirstPrompt,
     session_meta: |_| Value::Null,
     pick_default_model: true,
+    forms: false,
 };
 
 /// Asks for plain model ids with names, and each model's effort levels as

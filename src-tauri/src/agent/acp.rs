@@ -33,6 +33,9 @@ const STDERR_TAIL_LINES: usize = 30;
 const STOP_GRACE: Duration = Duration::from_secs(5);
 /// ACP's error code for "sign in first".
 const AUTH_REQUIRED: i64 = -32000;
+/// How long the agent may go quiet before a follow-up it started on its own
+/// counts as finished.
+const FOLLOW_UP_QUIET: Duration = Duration::from_secs(8);
 
 /// How to start one ACP agent.
 pub struct AcpConfig {
@@ -77,6 +80,8 @@ pub struct Dialect {
     /// A new session starts on the last model used anywhere in the agent, so
     /// the model is set even when the chat picked none ("default").
     pub pick_default_model: bool,
+    /// Offer to show question forms (ACP elicitation).
+    pub forms: bool,
 }
 /// What the chat's driver sends next.
 enum Item {
@@ -110,21 +115,113 @@ enum Waiting {
         /// Each question: its id, its text, and its options as `(id, label)`.
         questions: Vec<(String, String, Vec<(String, String)>)>,
     },
+    /// Questions asked as a form (ACP elicitation), one field each.
+    Form {
+        rpc_id: Value,
+        fields: Vec<FormField>,
+    },
+}
+
+/// One question in an elicitation form: its field, its text, its choices as
+/// `(value, label)`, and the field for a free-form answer, if there is one.
+struct FormField {
+    key: String,
+    text: String,
+    options: Vec<(String, String)>,
+    multi: bool,
+    other: Option<String>,
+}
+
+/// The questions in an elicitation form's `requestedSchema`: every field
+/// with choices (`oneOf`/`enum`, or an array of them for several answers).
+/// A field `<key>_other` is that question's free-form answer.
+fn form_fields(schema: &Value) -> Vec<FormField> {
+    let Some(props) = schema["properties"].as_object() else { return Vec::new() };
+    let choices = |field: &Value| -> Vec<(String, String)> {
+        if let Some(one_of) = field["oneOf"].as_array().or(field["anyOf"].as_array()) {
+            return one_of
+                .iter()
+                .filter_map(|o| {
+                    let value = o["const"].as_str()?.to_string();
+                    Some((value.clone(), o["title"].as_str().unwrap_or(&value).to_string()))
+                })
+                .collect();
+        }
+        field["enum"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .enumerate()
+            .map(|(i, v)| {
+                let label = field["enumNames"][i].as_str().unwrap_or(v);
+                (v.to_string(), label.to_string())
+            })
+            .collect()
+    };
+    props
+        .iter()
+        .filter(|(key, _)| !key.ends_with("_other"))
+        .filter_map(|(key, field)| {
+            let multi = field["type"] == "array";
+            let options = choices(if multi { &field["items"] } else { field });
+            if options.is_empty() {
+                return None;
+            }
+            let other = format!("{key}_other");
+            Some(FormField {
+                key: key.clone(),
+                text: field["title"].as_str().or(field["description"].as_str()).unwrap_or(key).to_string(),
+                options,
+                multi,
+                other: props.contains_key(&other).then_some(other),
+            })
+        })
+        .collect()
+}
+
+/// The form's answer from the card's: each question's picked labels as
+/// their values, or what the user typed in its free-form field.
+fn form_content(fields: &[FormField], answers: &BTreeMap<String, String>) -> Value {
+    let mut content = serde_json::Map::new();
+    for field in fields {
+        let Some(answer) = answers.get(&field.text) else { continue };
+        let picked: Vec<&str> = answer
+            .split(", ")
+            .filter_map(|label| field.options.iter().find(|(_, l)| l == label).map(|(v, _)| v.as_str()))
+            .collect();
+        if picked.is_empty() {
+            if let Some(other) = &field.other {
+                content.insert(other.clone(), json!(answer));
+            }
+        } else if field.multi {
+            content.insert(field.key.clone(), json!(picked));
+        } else {
+            content.insert(field.key.clone(), json!(picked[0]));
+        }
+    }
+    Value::Object(content)
 }
 
 impl Waiting {
     fn rpc_id(&self) -> Option<&Value> {
         match self {
-            Waiting::Permission { rpc_id, .. } | Waiting::Question { rpc_id, .. } => Some(rpc_id),
+            Waiting::Permission { rpc_id, .. } | Waiting::Question { rpc_id, .. } | Waiting::Form { rpc_id, .. } => {
+                Some(rpc_id)
+            }
             Waiting::Plan { rpc_id } => rpc_id.as_ref(),
         }
     }
 
     /// What answers it as "never mind". (Every answer is wrapped the same way:
     /// `{outcome: {outcome: ...}}`, Cursor's own methods too, which its docs
-    /// show unwrapped; Cursor CLI 2026.11.13 reads `outcome.outcome`.)
+    /// show unwrapped; Cursor CLI 2026.11.13 reads `outcome.outcome`. A form
+    /// is answered ACP's elicitation way, `{action: ...}`.)
     fn cancelled(&self) -> Value {
-        json!({ "outcome": { "outcome": "cancelled" } })
+        match self {
+            Waiting::Form { .. } => json!({ "action": "cancel" }),
+            _ => json!({ "outcome": { "outcome": "cancelled" } }),
+        }
     }
 }
 
@@ -225,6 +322,11 @@ struct State {
     /// A plan written this turn as a file, to offer for approval when the
     /// turn ends: its tool call's ID, its text and where it is.
     written_plan: Option<(String, String, String)>,
+    /// A prompt is being answered.
+    in_turn: bool,
+    /// The agent is talking without a prompt (Antigravity reports a
+    /// subagent's result after its turn ended): when it last said something.
+    follow_up: Option<Instant>,
     /// Messages sent but not yet put in a prompt. One the user takes back
     /// leaves this set, and the driver skips it.
     queued: HashSet<String>,
@@ -472,6 +574,34 @@ pub fn spawn(binary: PathBuf, cfg: AcpConfig, opts: SpawnOptions, sink: EventSin
         });
     }
 
+    // A follow-up the agent started on its own ends when it goes quiet, if
+    // its closing update never came.
+    {
+        let weak = Arc::downgrade(&shared);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let Some(shared) = weak.upgrade() else { break };
+                let closed = {
+                    let mut state = shared.state.lock().unwrap();
+                    match state.follow_up {
+                        Some(at) if at.elapsed() >= FOLLOW_UP_QUIET && state.waiting.is_empty() => {
+                            state.follow_up = None;
+                            Some(close_run(&mut state))
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(block) = closed {
+                    if let Some(block) = block {
+                        shared.emit(block);
+                    }
+                    end_follow_up(&shared);
+                }
+            }
+        });
+    }
+
     // Driver: the chat's calls, in order.
     tokio::spawn(drive(shared.clone(), cfg.client_meta, opts, mcp_servers, items_rx));
 
@@ -487,6 +617,7 @@ async fn drive(
     mut items: mpsc::UnboundedReceiver<Item>,
 ) {
     let label = shared.label;
+    let dialect = shared.dialect;
     let fail = |message: String| {
         shared.emit(AgentEvent::Error { message });
         shared.stop();
@@ -500,6 +631,7 @@ async fn drive(
                 "clientCapabilities": {
                     "fs": { "readTextFile": false, "writeTextFile": false },
                     "terminal": false,
+                    "elicitation": if dialect.forms { json!({ "form": {} }) } else { Value::Null },
                     "_meta": client_meta,
                 },
                 "clientInfo": { "name": "harness", "version": env!("CARGO_PKG_VERSION") },
@@ -511,7 +643,6 @@ async fn drive(
         Err(e) => return fail(format!("{label} didn't start: {}", e.message)),
     };
     let cwd = opts.project_path.to_string_lossy().into_owned();
-    let dialect = shared.dialect;
     // Told again on every start when it goes in the system prompt, which a
     // loaded session doesn't keep.
     let told = instructions(&opts);
@@ -687,10 +818,17 @@ async fn drive(
                 state: SessionState::Working,
             });
             let started = Instant::now();
+            {
+                // A follow-up still going is folded into this turn.
+                let mut state = shared.state.lock().unwrap();
+                state.in_turn = true;
+                state.follow_up = None;
+            }
             let reply = shared
                 .rpc
                 .call("session/prompt", json!({ "sessionId": session_id, "prompt": prompt }))
                 .await;
+            shared.state.lock().unwrap().in_turn = false;
             end_run(&shared);
             // Nothing can still be waiting once the turn is over.
             let left: Vec<(String, Waiting)> = shared.state.lock().unwrap().waiting.drain().collect();
@@ -838,20 +976,56 @@ fn receive(shared: &Shared, v: &Value) {
         (None, Some(_)) => shared.rpc.settle(v),
         (Some(method), Some(id)) => request(shared, method, id, &v["params"]),
         (Some("session/update"), None) => {
-            let events = {
+            let (events, started, ended) = {
                 let mut state = shared.state.lock().unwrap();
                 let session = v["params"]["sessionId"].as_str().unwrap_or_default();
+                let u = &v["params"]["update"];
                 match state.children.get_mut(session) {
-                    Some(child) => child_update(child, shared.dialect, &shared.own_tools, &v["params"]["update"]),
-                    None => update(&mut state, shared.dialect, &shared.own_tools, &v["params"]["update"]),
+                    Some(child) => (child_update(child, shared.dialect, &shared.own_tools, u), false, false),
+                    None => {
+                        let mut events = update(&mut state, shared.dialect, &shared.own_tools, u);
+                        let (started, ended) = follow_up(&mut state, u);
+                        if ended {
+                            events.extend(close_run(&mut state));
+                        }
+                        (events, started, ended)
+                    }
                 }
             };
+            if started {
+                shared.emit(AgentEvent::Status { state: SessionState::Working });
+            }
             for event in events {
                 shared.emit(event);
+            }
+            if ended {
+                end_follow_up(shared);
             }
         }
         _ => {}
     }
+}
+
+/// Whether an update outside any prompt starts the agent talking on its own,
+/// or ends that: its closing `usage_update`.
+fn follow_up(state: &mut State, u: &Value) -> (bool, bool) {
+    if state.in_turn || state.loading || state.session_id.is_none() {
+        return (false, false);
+    }
+    let kind = u["sessionUpdate"].as_str().unwrap_or_default();
+    let talk = matches!(kind, "agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "tool_call_update");
+    if talk {
+        let started = state.follow_up.is_none();
+        state.follow_up = Some(Instant::now());
+        return (started, false);
+    }
+    let ended = kind == "usage_update" && state.waiting.is_empty() && state.follow_up.take().is_some();
+    (false, ended)
+}
+
+fn end_follow_up(shared: &Shared) {
+    shared.emit(AgentEvent::TurnEnded { ok: true, duration_ms: None });
+    shared.emit(AgentEvent::Status { state: SessionState::Idle });
 }
 
 /// A request from the agent. Every one is answered, now or once the user
@@ -993,11 +1167,40 @@ fn request(shared: &Shared, method: &str, rpc_id: &Value, params: &Value) {
         // chat has it already from the updates.
         "cursor/task" => shared.rpc.respond(rpc_id, json!({})),
 
-        // Questions as forms (ACP elicitation) aren't shown yet: declined, so
-        // the agent carries on without an answer.
-        m if m.contains("elicitation") => {
-            eprintln!("harness: {} asked a question the app can't show yet ({m})", shared.label);
-            shared.rpc.respond(rpc_id, json!({ "action": "decline" }));
+        // Questions as a form (ACP elicitation), shown like Claude Code's. A
+        // form the card can't show (no choices) is declined, so the agent
+        // carries on without an answer.
+        "elicitation/create" => {
+            let fields = form_fields(&params["requestedSchema"]);
+            if params["mode"] != "form" || fields.is_empty() {
+                shared.rpc.respond(rpc_id, json!({ "action": "decline" }));
+                return;
+            }
+            let shown: Vec<Value> = fields
+                .iter()
+                .map(|f| {
+                    json!({
+                        "question": f.text,
+                        "header": "",
+                        "multiSelect": f.multi,
+                        "options": f.options.iter().map(|(_, label)| json!({ "label": label, "description": "" })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            let tool_id = params["toolCallId"].as_str().map(str::to_owned);
+            let request_id = wait(shared, Waiting::Form { rpc_id: rpc_id.clone(), fields });
+            shared.emit(AgentEvent::ApprovalRequest {
+                request_id,
+                approval: ApprovalKind::Question,
+                tool_name: "AskUserQuestion".to_string(),
+                title: params["message"].as_str().unwrap_or("Questions").to_string(),
+                input: json!({ "questions": shown }),
+                tool_id,
+                always_label: None,
+            });
+            shared.emit(AgentEvent::Status {
+                state: SessionState::WaitingApproval,
+            });
         }
 
         // The app offers no file system or terminal of its own.
@@ -1485,6 +1688,17 @@ not your original:\n\n{plan}"
                     }
                 }
             }
+            Waiting::Form { rpc_id, fields } => {
+                let reply = if allow {
+                    json!({ "action": "accept", "content": form_content(fields, &answers.clone().unwrap_or_default()) })
+                } else {
+                    if let Some(message) = message.clone() {
+                        notes.push(format!("The user skipped your questions. What they said: {message}"));
+                    }
+                    json!({ "action": "decline" })
+                };
+                rpc.respond(rpc_id, reply);
+            }
             Waiting::Question { rpc_id, questions } => {
                 if allow {
                     let answers = answers.unwrap_or_default();
@@ -1693,6 +1907,75 @@ mod tests {
             dialect,
         });
         ((shared, rx, seen), items_rx)
+    }
+
+    #[test]
+    fn talk_after_a_turn_is_a_follow_up_ended_by_its_usage_update() {
+        let ((shared, _rx, seen), _items) = rig_for(&crate::agent::antigravity::DIALECT);
+        shared.state.lock().unwrap().session_id = Some("s".into());
+        upd(&shared, r#"{"sessionUpdate":"usage_update","used":10,"size":100}"#);
+        assert!(matches!(take(&seen)[..], [AgentEvent::ContextUsage { .. }]), "no follow-up from usage alone");
+        upd(&shared, r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"The subagent read it."}}"#);
+        let events = take(&seen);
+        assert_eq!(events[0], AgentEvent::Status { state: SessionState::Working });
+        assert!(matches!(&events[1], AgentEvent::TextDelta { .. }));
+        upd(&shared, r#"{"sessionUpdate":"usage_update","used":12,"size":100}"#);
+        let events = take(&seen);
+        assert!(matches!(&events[1], AgentEvent::AssistantBlock { block: Block::Text { text }, .. } if text == "The subagent read it."));
+        assert_eq!(events[2], AgentEvent::TurnEnded { ok: true, duration_ms: None });
+        assert_eq!(events[3], AgentEvent::Status { state: SessionState::Idle });
+
+        // Inside a turn the same updates are the turn's own.
+        shared.state.lock().unwrap().in_turn = true;
+        upd(&shared, r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"x"}}"#);
+        upd(&shared, r#"{"sessionUpdate":"usage_update","used":13,"size":100}"#);
+        assert!(!take(&seen).iter().any(|e| matches!(e, AgentEvent::TurnEnded { .. } | AgentEvent::Status { .. })));
+    }
+
+    #[test]
+    fn a_question_form_is_shown_as_questions_and_answered_as_a_form() {
+        let ((shared, mut rx, seen), _items) = rig_for(&crate::agent::antigravity::DIALECT);
+        // As agy 1.5.11 sent it (trimmed).
+        line(&shared, r#"{"jsonrpc":"2.0","method":"elicitation/create","id":"3","params":{"sessionId":"s","toolCallId":"call_9","mode":"form","message":"The agent has 2 questions.","requestedSchema":{"type":"object","properties":{
+            "q1":{"type":"string","title":"Purpose?","oneOf":[{"const":"1","title":"Sandbox"},{"const":"2","title":"Demo"}]},
+            "q1_other":{"type":"string","title":"Other"},
+            "q2":{"type":"array","title":"Sections?","items":{"anyOf":[{"const":"a","title":"Usage"},{"const":"b","title":"Files"}]}},
+            "q2_other":{"type":"string","title":"Other"}}}}}"#);
+        let events = take(&seen);
+        let AgentEvent::ApprovalRequest { request_id, approval: ApprovalKind::Question, input, tool_id, .. } = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(tool_id.as_deref(), Some("call_9"));
+        assert_eq!(input["questions"][0]["question"], "Purpose?");
+        assert_eq!(input["questions"][0]["options"][1]["label"], "Demo");
+        assert_eq!(input["questions"][1]["multiSelect"], true);
+        let process = AcpProcess { shared: shared.clone() };
+        let answers = BTreeMap::from([
+            ("Purpose?".to_string(), "A scratch folder".to_string()),
+            ("Sections?".to_string(), "Usage, Files".to_string()),
+        ]);
+        process.answer_approval(request_id, Decision::Allow, None, Some(answers), None).unwrap();
+        let reply = &written(&mut rx)[0];
+        assert_eq!(reply["id"], "3");
+        assert_eq!(
+            reply["result"],
+            json!({ "action": "accept", "content": { "q1_other": "A scratch folder", "q2": ["a", "b"] } })
+        );
+
+        // Skipped: declined, and what the user said reaches the agent.
+        take(&seen);
+        line(&shared, r#"{"jsonrpc":"2.0","method":"elicitation/create","id":"4","params":{"sessionId":"s","mode":"form","message":"Q","requestedSchema":{"type":"object","properties":{"q1":{"type":"string","title":"Purpose?","oneOf":[{"const":"1","title":"Sandbox"}]}}}}}"#);
+        let request_id = match &take(&seen)[0] {
+            AgentEvent::ApprovalRequest { request_id, .. } => request_id.clone(),
+            other => panic!("{other:?}"),
+        };
+        process.answer_approval(&request_id, Decision::Deny, Some("Just pick".into()), None, None).unwrap();
+        assert_eq!(written(&mut rx)[0]["result"], json!({ "action": "decline" }));
+        assert_eq!(shared.state.lock().unwrap().notes, vec!["The user skipped your questions. What they said: Just pick".to_string()]);
+
+        // A form with no choices can't be shown: declined at once.
+        line(&shared, r#"{"jsonrpc":"2.0","method":"elicitation/create","id":"5","params":{"sessionId":"s","mode":"form","message":"Name?","requestedSchema":{"type":"object","properties":{"name":{"type":"string"}}}}}"#);
+        assert_eq!(written(&mut rx)[0]["result"], json!({ "action": "decline" }));
     }
 
     #[test]

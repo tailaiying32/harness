@@ -33,6 +33,7 @@ pub static DIALECT: Dialect = Dialect {
     intro: Intro::SystemPrompt,
     session_meta,
     pick_default_model: false,
+    forms: true,
 };
 
 impl AgentAdapter for AntigravityAdapter {
@@ -102,8 +103,25 @@ impl AgentAdapter for AntigravityAdapter {
         Err("Antigravity writes its own titles".to_string())
     }
 
+    /// ACP's own sign-in: Antigravity opens the browser and answers once
+    /// the user has signed in with Google. (`agy acp --login` instead wants
+    /// a code pasted back into a terminal.)
     fn sign_in(&self, binary: &Path) -> Result<(), String> {
-        acp_sync::sign_in(binary, &["acp", "--login"], LABEL, SIGN_IN_TIMEOUT)
+        let folder = std::env::temp_dir();
+        let mut rpc = SyncRpc::start(binary, &["acp"], LABEL, &folder)?;
+        let deadline = Instant::now() + SIGN_IN_TIMEOUT;
+        rpc.call(
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
+                "clientInfo": { "name": "harness", "version": env!("CARGO_PKG_VERSION") },
+            }),
+            deadline,
+        )?;
+        rpc.call("authenticate", json!({ "methodId": "oauth-personal" }), deadline)
+            .map(|_| ())
+            .map_err(|e| if e.contains("took too long") { "Sign-in took too long".to_string() } else { e })
     }
 
     fn forget_session(&self, _agent_session_id: &str) {}
@@ -199,6 +217,34 @@ fn name_and_input(tool: &Tool, own: &[String]) -> (String, Value) {
         return (full, input);
     }
     let name = tool.name.as_str();
+    match name {
+        // Its questions; the answer comes from the form it sends with them.
+        "ask_question" => {
+            let questions: Vec<Value> = raw["questions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|q| {
+                    json!({
+                        "question": q["question"],
+                        "header": "",
+                        "multiSelect": q["is_multi_select"] == true,
+                        "options": q["options"].as_array().into_iter().flatten()
+                            .map(|o| json!({ "label": o, "description": "" })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            return named("AskUserQuestion", json!({ "questions": questions }));
+        }
+        // A subagent, worded like Claude Code's. Its own steps aren't sent.
+        "invoke_subagent" => {
+            return named(
+                "Agent",
+                json!({ "description": raw["Role"], "prompt": raw["Prompt"], "subagent_type": raw["TypeName"] }),
+            );
+        }
+        _ => {}
+    }
     match (name, tool.kind.as_str()) {
         ("run_command", _) | (_, "execute") => named("Bash", json!({ "command": first(raw, &["CommandLine", "Command"]) })),
         (_, "read") => named("Read", json!({ "file_path": path })),
@@ -263,6 +309,20 @@ mod tests {
         for (line, name, input) in cases {
             assert_eq!(name_and_input(&tool(line), &own), (name.to_string(), input), "{line}");
         }
+        let ask = r#"{"name":"ask_question","kind":"other","rawInput":{"questions":[{"is_multi_select":false,"options":["A","B"],"question":"Which?"}]}}"#;
+        assert_eq!(
+            name_and_input(&tool(ask), &own),
+            (
+                "AskUserQuestion".to_string(),
+                json!({ "questions": [{ "question": "Which?", "header": "", "multiSelect": false,
+                    "options": [{ "label": "A", "description": "" }, { "label": "B", "description": "" }] }] })
+            )
+        );
+        let sub = r#"{"name":"invoke_subagent","kind":"other","rawInput":{"Prompt":"Read hello.txt","Role":"File Reader","TypeName":"research"}}"#;
+        assert_eq!(
+            name_and_input(&tool(sub), &own),
+            ("Agent".to_string(), json!({ "description": "File Reader", "prompt": "Read hello.txt", "subagent_type": "research" }))
+        );
         // Someone else's MCP server keeps its own name.
         let other = MCP.replace("mcp_harness_worktree_ask", "mcp_github_list_issues");
         assert_eq!(name_and_input(&tool(&other), &own).0, "mcp__github_list_issues");

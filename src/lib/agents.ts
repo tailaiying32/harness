@@ -15,7 +15,7 @@ export const AGENTS: AgentId[] = [CLAUDE, CODEX, ANTIGRAVITY, CURSOR];
 export const AGENT_INFO: Record<AgentId, { label: string; login: string }> = {
   "claude-code": { label: "Claude Code", login: "claude auth login" },
   codex: { label: "Codex", login: "codex login" },
-  antigravity: { label: "Antigravity", login: "agy acp --login" },
+  antigravity: { label: "Antigravity", login: "agy" },
   cursor: { label: "Cursor", login: "agent login" },
 };
 
