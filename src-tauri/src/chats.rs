@@ -808,7 +808,7 @@ mod tests {
         let old_place = |path: &str| path.replace(&path_of_dir(&dir), "/gone/notes/abc");
         let was = vec![user("write", "u1"), tool("o1", "Write", json!({ "file_path": "/gone/notes/abc/report.md" })), result("o1", false)];
         let now = |path: &str| path.replace("/gone/notes/abc", &path_of_dir(&dir));
-        assert_eq!(old_place(&path(&report)), "/gone/notes/abc/report.md");
+        assert_eq!(std::path::Path::new(&old_place(&path(&report))), std::path::Path::new("/gone/notes/abc/report.md"));
         assert_eq!(read_doc(&was, "report.md", &now).unwrap(), "# report.md\n\nthe findings");
         std::fs::remove_file(&report).unwrap();
         assert!(read_doc(&events, "report.md", &same).unwrap_err().starts_with("That doc is no longer at"));

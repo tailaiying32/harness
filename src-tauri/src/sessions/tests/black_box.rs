@@ -122,6 +122,15 @@ async fn settle() {
     tokio::time::sleep(Duration::from_millis(250)).await;
 }
 
+/// Waits up to 5 s for background work to reach `done`. A fixed wait was too
+/// short with many tests at once, where every git start is slow (Windows).
+async fn until(done: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !done() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 /// The agent runs a shell command and it prints `output`.
 fn bash(rig: &Rig, id: &str, command: &str, output: serde_json::Value, is_error: bool) {
     rig.agent_says(AgentEvent::AssistantBlock {
@@ -394,7 +403,7 @@ async fn r3_new_pull_request_during_a_slow_refresh_keeps_both() {
     *gh.slow.lock().unwrap() = Some(1);
     rig.manager.0.pr_checked.lock().unwrap().clear();
     rig.turn_ends();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    until(|| gh.waiting.load(Ordering::SeqCst)).await;
     assert!(gh.waiting.load(Ordering::SeqCst), "a refresh of pull request 1 is waiting on GitHub");
 
     // Meanwhile the next turn opens pull request 2.
@@ -664,6 +673,7 @@ async fn b10_restart_keeps_the_list_and_the_mark() {
         gh.set(1, "merged");
         end_turn(&rig).await;
         close(&rig).await;
+        until(|| states(&rig) == ["merged", "open"]).await;
         assert_eq!(states(&rig), ["merged", "open"]);
         prs(&rig)
     };

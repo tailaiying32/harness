@@ -493,7 +493,12 @@ fn only_reveal(path: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        ["exe", "bat", "cmd", "com", "msi", "ps1", "vbs", "js", "lnk", "scr"].contains(&extension(path).as_str())
+        // Everything Windows runs on a double-click, not only programs.
+        [
+            "exe", "bat", "cmd", "com", "msi", "msp", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "lnk",
+            "scr", "pif", "cpl", "msc", "jar", "reg", "appref-ms", "application", "url", "inf", "scf",
+        ]
+        .contains(&extension(path).as_str())
     }
 }
 

@@ -465,8 +465,26 @@ fn running(pid: u32) -> bool {
     sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// Whether a process with this id is running: it opens, and hasn't exited.
+#[cfg(windows)]
+fn running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: plain calls; the handle is checked and closed.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        ok && code == STILL_ACTIVE as u32
+    }
+}
+
 /// Not checked elsewhere: an earlier list is taken to be a dead one's.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn running(_: u32) -> bool {
     false
 }
@@ -831,12 +849,23 @@ mod tests {
     async fn a_start_leaves_a_running_harnesss_copies_alone() {
         let rig = rig(None);
         // A Harness that has quit (an older build's shared list, and one that
-        // ended), and one still running (pid 1 always is).
+        // ended), and one still running (pid 1 always is on Unix; Windows has
+        // none, so a process that waits).
+        let quick = if cfg!(windows) { ["cmd", "/c", "exit"] } else { ["sh", "-c", "true"] };
         let ended = {
-            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let mut child = std::process::Command::new(quick[0]).args(&quick[1..]).spawn().unwrap();
             child.wait().unwrap();
             child.id()
         };
+        #[cfg(windows)]
+        let mut waiting = std::process::Command::new("cmd")
+            .args(["/c", "ping -n 30 127.0.0.1 >nul"])
+            .spawn()
+            .unwrap();
+        #[cfg(windows)]
+        let alive = waiting.id();
+        #[cfg(not(windows))]
+        let alive = 1;
         let list = |name: String, ids: &[&str]| {
             let file = rig.dir.join(name);
             std::fs::write(&file, serde_json::to_string(ids).unwrap()).unwrap();
@@ -844,7 +873,7 @@ mod tests {
         };
         let old = list("side_copies.json".into(), &["old-1"]);
         let dead = list(format!("side_copies-{ended}.json"), &["dead-1"]);
-        let live = list("side_copies-1.json".into(), &["live-1"]);
+        let live = list(format!("side_copies-{alive}.json"), &["live-1"]);
 
         let fake = Arc::new(Fake::default());
         let store = Arc::new(Store::open(&rig.dir).unwrap());
@@ -854,6 +883,8 @@ mod tests {
         assert_eq!(gone, vec!["dead-1".to_string(), "old-1".to_string()]);
         assert!(!old.exists() && !dead.exists());
         assert!(live.exists());
+        #[cfg(windows)]
+        let _ = waiting.kill();
     }
 
     #[tokio::test]
