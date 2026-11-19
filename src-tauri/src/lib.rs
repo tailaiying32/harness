@@ -26,6 +26,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{Manager, RunEvent, State};
 
 use agent::claude_code::ClaudeCodeAdapter;
+use agent::antigravity::AntigravityAdapter;
 use agent::codex::CodexAdapter;
 use agent::cursor::CursorAdapter;
 use agent::{Agents, AppTools};
@@ -238,6 +239,7 @@ async fn check_setup(state: State<'_, AppState>) -> Result<SetupInfo, String> {
     state.agents.set_binary(agent::CLAUDE, info.binary.as_ref().map(PathBuf::from));
     state.agents.set_binary(agent::CURSOR, info.cursor.as_ref().map(PathBuf::from));
     state.agents.set_binary(agent::CODEX, info.codex.as_ref().map(PathBuf::from));
+    state.agents.set_binary(agent::ANTIGRAVITY, info.antigravity.as_ref().map(PathBuf::from));
     Ok(info)
 }
 
@@ -1108,6 +1110,7 @@ pub fn run() {
             agents.add(agent::CLAUDE, claude.clone(), None);
             agents.add(agent::CURSOR, Arc::new(CursorAdapter), None);
             agents.add(agent::CODEX, Arc::new(CodexAdapter), None);
+            agents.add(agent::ANTIGRAVITY, Arc::new(AntigravityAdapter), None);
             let home = Home::resolve(&dir);
             // The command agents run to open a terminal tab; rewritten if changed.
             if let Err(e) = home.write_tab_command() {

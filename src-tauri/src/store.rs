@@ -45,7 +45,7 @@ pub struct SessionRow {
     pub prs: Vec<PrInfo>,
     /// When the chat was moved to the trash (ms); None when it isn't there.
     pub trashed_at: Option<i64>,
-    /// The agent the chat runs on ("claude-code", "cursor"). Set when the
+    /// The agent the chat runs on (one of `agent::ALL`). Set when the
     /// chat is made and never changed.
     pub agent: String,
     /// Where the project's folder used to be, oldest first, when it was moved

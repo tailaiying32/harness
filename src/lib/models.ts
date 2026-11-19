@@ -2,10 +2,10 @@
 // agents themselves (see `list_models` in the core), so names and versions
 // are always current: only the newest of each family. Claude Code's list has
 // no "Default" and the recommended one first; Cursor's starts with Auto;
-// Codex's starts with its default. The
+// Codex's and Antigravity's start with their default. The
 // last lists are kept so the picker is right from the first paint next time.
 
-import { CLAUDE, CODEX, CURSOR, type AgentId, type ModelInfo } from "./ipc";
+import { AGENTS, ANTIGRAVITY, CLAUDE, CODEX, CURSOR, type AgentId, type ModelInfo } from "./ipc";
 
 /** Each agent's models, in the order they are shown. */
 export type AgentModels = Record<AgentId, ModelInfo[]>;
@@ -14,6 +14,7 @@ const KEYS: Record<AgentId, string> = {
   "claude-code": "harness.models",
   cursor: "harness.models.cursor",
   codex: "harness.models.codex",
+  antigravity: "harness.models.antigravity",
 };
 
 /** Shown only until Claude Code has answered once on this machine. */
@@ -37,12 +38,12 @@ function loadOne(agent: AgentId): ModelInfo[] {
   } catch {
     // Fall through to the built-in list.
   }
-  // Cursor's and Codex's lists are only shown once they have answered.
+  // The other agents' lists are only shown once they have answered.
   return agent === CLAUDE ? fallbackModels : [];
 }
 
 export function loadCachedModels(): AgentModels {
-  return { "claude-code": loadOne(CLAUDE), cursor: loadOne(CURSOR), codex: loadOne(CODEX) };
+  return Object.fromEntries(AGENTS.map((agent) => [agent, loadOne(agent)])) as AgentModels;
 }
 
 /**
@@ -52,8 +53,10 @@ export function loadCachedModels(): AgentModels {
  */
 export function startingModel(saved: string, agent: AgentId, models: AgentModels): string {
   if (agent === CURSOR) return saved || "default";
-  // Codex lists its default first.
-  if (agent === CODEX) return saved && saved !== "default" ? saved : (models[CODEX][0]?.value ?? "default");
+  // Codex and Antigravity list their default first.
+  if (agent === CODEX || agent === ANTIGRAVITY) {
+    return saved && saved !== "default" ? saved : (models[agent][0]?.value ?? "default");
+  }
   return !saved || saved === "default" ? (models[CLAUDE][0]?.value ?? "default") : saved;
 }
 
@@ -85,14 +88,26 @@ export const agentModes: Record<AgentId, { id: string; label: string }[]> = {
     { id: "read-only", label: "read only" },
     { id: "full-access", label: "full access" },
   ],
+  // Antigravity's own, named as Claude Code's are.
+  antigravity: [
+    { id: "default", label: "ask before edits" },
+    { id: "accept-edits", label: "auto-accept edits" },
+    { id: "plan", label: "plan" },
+    { id: "auto", label: "auto" },
+  ],
 };
+
+/** The same mode under another agent's name for it. */
+const SAME_MODE: Record<string, string> = { acceptEdits: "accept-edits", "accept-edits": "acceptEdits" };
 
 /** The mode a chat moving to `agent` (before its first message) takes: plan stays plan. */
 export function modeFor(agent: AgentId, mode: string, saved: string): string {
   if (agentModes[agent].some((m) => m.id === mode)) return mode;
+  const same = SAME_MODE[mode];
+  if (same && agentModes[agent].some((m) => m.id === same)) return same;
   if (mode === "plan") return "plan";
   if (agent === CURSOR) return "agent";
-  if (agent === CODEX) return "default";
+  if (agent === CODEX || agent === ANTIGRAVITY) return "default";
   return saved;
 }
 
@@ -103,7 +118,7 @@ export function modeFor(agent: AgentId, mode: string, saved: string): string {
  */
 export function defaultMode(agent: AgentId, saved: string): string {
   if (agent === CURSOR) return "agent";
-  if (agent === CODEX) return "default";
+  if (agent === CODEX || agent === ANTIGRAVITY) return "default";
   return saved && saved !== "plan" && agentModes[CLAUDE].some((m) => m.id === saved) ? saved : "default";
 }
 

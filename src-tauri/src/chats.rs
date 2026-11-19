@@ -243,12 +243,7 @@ fn one_line(text: &str, max: usize) -> String {
 }
 
 fn agent_name(agent: &str) -> &str {
-    match agent {
-        "claude-code" => "Claude Code",
-        "cursor" => "Cursor",
-        "codex" => "Codex",
-        other => other,
-    }
+    if crate::agent::ALL.contains(&agent) { crate::agent::label(agent) } else { agent }
 }
 
 /// A chat's pull requests in a few words, like "PR #42 merged". None without any.
