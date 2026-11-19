@@ -2470,8 +2470,11 @@ built in Default mode; the context meter; titles; resume after a restart
 (history and instructions kept); the worktree card through
 `mcp__harness_worktree__ask`; a write to the chat's notes; a question card
 answered; a subagent whose result came after the turn and was kept. A Cursor
-run (command, plan approved and built) still passed. **Not tested live**: the
-sign-in card through to a signed-in agy, and "Keep planning" (unit-tested).
+run (command, plan approved and built) still passed. ACP `authenticate` on a
+signed-out data folder returned in seconds once the browser finished, with no
+code to paste, and that folder then opened sessions. **Not tested live**: the
+sign-in card's button itself (it runs that same call), and "Keep planning"
+(unit-tested).
 
 ### Codex over app-server (built 2026-11-18, codex-cli 0.169.1)
 
