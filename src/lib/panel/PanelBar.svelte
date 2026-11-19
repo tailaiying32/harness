@@ -322,6 +322,7 @@
     <span class="spacer" data-tauri-drag-region></span>
     {@render corner()}
   {:else}
+    <DocsMenu {chat} />
     <!-- Many tabs scroll sideways. A doc dragged from the docs menu onto them opens. -->
     <div class="tabs" data-doc-tabs>
       <!-- The chat's notes: always first. Closed, the docs menu brings it back. -->
@@ -364,7 +365,6 @@
       {/each}
     </div>
     <span class="spacer" data-tauri-drag-region></span>
-    <DocsMenu {chat} />
     {@render corner()}
   {/if}
 </div>
