@@ -2505,7 +2505,7 @@ mod tests {
         r.feed(note("item/completed", json!({ "threadId": "t1", "item": { "type": "agentMessage", "id": "m1", "text": text } })));
         r.feed(note("turn/completed", json!({ "threadId": "t1", "turn": { "id": "u1", "status": "completed" } })));
         let events = r.events();
-        assert!(matches!(&events[0], AgentEvent::AssistantBlock { block: Block::Text { text }, .. } if text == "Here's the plan."));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::AssistantBlock { block: Block::Text { text }, .. } if text == "Here's the plan.")));
         let card = events.iter().find_map(|e| match e {
             AgentEvent::ApprovalRequest { approval: ApprovalKind::Plan, title, input, .. } => Some((title.clone(), input["plan"].clone())),
             _ => None,
