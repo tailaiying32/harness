@@ -5,7 +5,6 @@
   // line. Clicking a view opens the panel on it; clicking the one on show hides
   // the panel. Over the open panel: that view's own row (see PanelBar), so the
   // panel has none of its own. Empty space drags the window.
-  import { CLAUDE } from "./ipc";
   import PanelIcon from "./PanelIcon.svelte";
   import PanelBar from "./panel/PanelBar.svelte";
   import RenameField from "./RenameField.svelte";
@@ -30,7 +29,6 @@
     if (save && id) await app.rename(id, text);
   }
 
-  // Side chats copy a Claude Code conversation, so Cursor chats have none.
   const views = $derived(
     (
       [
@@ -41,7 +39,7 @@
         { view: "terminal", name: "terminal" },
         { view: "browser", name: "browser" },
       ] as { view: PanelView; name: string }[]
-    ).filter((v) => v.view !== "side" || chat.agent === CLAUDE),
+    ),
   );
 
   function pick(view: PanelView) {

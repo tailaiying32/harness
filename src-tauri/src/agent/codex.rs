@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::acp::terminate;
 use super::claude_code::{BATCH_PROMPT, TITLE_INPUT_CHARS, TITLE_PROMPT, batch_input, clean_title};
 use super::rpc::{Out, Rpc, RpcError};
-use super::{AgentAdapter, EventSink, ImagePayload, RunningAgent, SpawnOptions, mcp_http};
+use super::{AgentAdapter, EventSink, ImagePayload, RunningAgent, SideCopy, SpawnOptions, mcp_http, plain_id};
 use crate::events::{AgentEvent, ApprovalKind, BackgroundTask, Block, CommandInfo, Decision, ModelInfo, SessionState};
 
 pub struct CodexAdapter;
@@ -50,6 +50,11 @@ const BATCH_WINDOW: Duration = Duration::from_millis(30);
 /// access), plus its plan mode.
 pub const MODES: [&str; 4] = ["default", "plan", "read-only", "full-access"];
 const DEFAULT_MODE: &str = "default";
+/// A side chat's own mode, never offered: the read-only sandbox with no
+/// approvals asked, so anything more is refused.
+const SIDE_MODE: &str = "side";
+/// How long deleting a side chat's thread may take.
+const FORGET_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// What `initialize` says about the app. `experimentalApi` turns on plan mode
 /// (`collaborationMode`) and questions (`item/tool/requestUserInput`).
@@ -177,9 +182,6 @@ struct CodexProcess {
 
 impl AgentAdapter for CodexAdapter {
     fn spawn(&self, opts: SpawnOptions, sink: EventSink) -> Result<Box<dyn RunningAgent>, String> {
-        if opts.side.is_some() {
-            return Err("Side chats work with Claude Code only".to_string());
-        }
         spawn(opts, sink)
     }
 
@@ -243,7 +245,60 @@ impl AgentAdapter for CodexAdapter {
         }
     }
 
-    fn forget_session(&self, _agent_session_id: &str) {}
+    /// Through Codex itself (`thread/delete`), which also drops the thread
+    /// from its own lists. Codex's program isn't known yet when side chats
+    /// left by a crash are deleted at startup, so it is looked for here, off
+    /// the caller's thread.
+    fn forget_session(&self, agent_session_id: &str) {
+        if !plain_id(agent_session_id) {
+            return;
+        }
+        let id = agent_session_id.to_string();
+        std::thread::spawn(move || {
+            let Some(binary) = crate::locate::find_codex() else { return };
+            let deadline = Instant::now() + FORGET_TIMEOUT;
+            let deleted = SyncRpc::start(&binary).and_then(|mut rpc| {
+                rpc.handshake(deadline)?;
+                rpc.call("thread/delete", json!({ "threadId": id }), deadline)
+            });
+            if let Err(e) = deleted {
+                eprintln!("harness: couldn't delete Codex thread {id}: {e}");
+            }
+        });
+    }
+
+    fn has_session(&self, agent_session_id: &str) -> bool {
+        plain_id(agent_session_id) && sessions_folder().is_some_and(|folder| has_rollout(&folder, agent_session_id))
+    }
+
+    fn side_copy(&self) -> SideCopy {
+        SideCopy::Fork
+    }
+}
+
+/// Where Codex saves threads: `<CODEX_HOME>/sessions/<year>/<month>/<day>/`,
+/// one `rollout-<time>-<thread id>.jsonl` each. `CODEX_HOME` replaces `~/.codex`.
+fn sessions_folder() -> Option<PathBuf> {
+    let home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| crate::home::user_home().map(|home| home.join(".codex")))?;
+    Some(home.join("sessions"))
+}
+
+/// Whether a thread's saved file is anywhere under `folder`.
+fn has_rollout(folder: &Path, id: &str) -> bool {
+    let suffix = format!("-{id}.jsonl");
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            has_rollout(&path, id)
+        } else {
+            entry.file_name().to_string_lossy().ends_with(&suffix)
+        }
+    })
 }
 
 /// `model/list`'s visible models, Codex's default first.
@@ -445,13 +500,19 @@ impl Drop for SyncRpc {
 /// memory and the user's preferences. Sent each time like Claude Code's
 /// system prompt, so it outlasts compaction.
 fn instructions(opts: &SpawnOptions) -> Option<String> {
-    let mut lines: Vec<String> = opts.tools.iter().map(|t| t.instruction.to_string()).collect();
+    let side = opts.side.is_some();
+    let mut lines: Vec<String> = Vec::new();
+    // A side chat reads and answers: told so, and given no way to write notes or memory.
+    if side {
+        lines.push(super::SIDE_INSTRUCTION.to_string());
+    }
+    lines.extend(opts.tools.iter().map(|t| t.instruction.to_string()));
     if let Some(notes) = &opts.notes {
-        lines.push(super::notes_instruction(notes, opts.project_docs.as_deref(), true));
+        lines.push(super::notes_instruction(notes, opts.project_docs.as_deref(), !side));
     }
     // Codex's own memory isn't shared with the app's other agents, so it is
     // told about the project's.
-    if let Some(memory) = &opts.memory {
+    if let Some(memory) = opts.memory.as_ref().filter(|_| !side) {
         lines.push(super::memory_instruction(memory));
     }
     if let Some(preferences) = &opts.preferences {
@@ -482,6 +543,7 @@ fn writable_roots(opts: &SpawnOptions) -> Vec<String> {
 /// A mode's approval policy and sandbox, as `turn/start` takes them.
 fn mode_policy(mode: &str, roots: &[String]) -> (&'static str, Value) {
     match mode {
+        SIDE_MODE => ("never", json!({ "type": "readOnly", "networkAccess": false })),
         "read-only" => ("on-request", json!({ "type": "readOnly", "networkAccess": false })),
         "full-access" => ("never", json!({ "type": "dangerFullAccess" })),
         _ => (
@@ -500,6 +562,7 @@ fn mode_policy(mode: &str, roots: &[String]) -> (&'static str, Value) {
 /// The same, as `thread/start` and `thread/resume` take them.
 fn mode_sandbox(mode: &str) -> (&'static str, &'static str) {
     match mode {
+        SIDE_MODE => ("never", "read-only"),
         "read-only" => ("on-request", "read-only"),
         "full-access" => ("never", "danger-full-access"),
         _ => ("on-request", "workspace-write"),
@@ -538,7 +601,11 @@ fn spawn(opts: SpawnOptions, sink: EventSink) -> Result<Box<dyn RunningAgent>, S
     };
     let servers: Vec<(String, String)> = endpoint.iter().flat_map(|e| e.urls.iter().cloned()).collect();
 
-    let mode = opts.mode.clone().filter(|m| MODES.contains(&m.as_str())).unwrap_or_else(|| DEFAULT_MODE.to_string());
+    let mode = if opts.side.is_some() {
+        SIDE_MODE.to_string()
+    } else {
+        opts.mode.clone().filter(|m| MODES.contains(&m.as_str())).unwrap_or_else(|| DEFAULT_MODE.to_string())
+    };
     let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
     let (items_tx, items_rx) = mpsc::unbounded_channel::<Item>();
     let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
@@ -644,8 +711,16 @@ fn spawn(opts: SpawnOptions, sink: EventSink) -> Result<Box<dyn RunningAgent>, S
 }
 
 /// Config for a thread: the app's tool servers, which never ask before a
-/// call (as with Claude Code), and the sandbox's extra folders.
-fn thread_config(servers: &[(String, String)], roots: &[String]) -> Value {
+/// call (as with Claude Code), and the sandbox's extra folders. A side chat's
+/// list replaces the user's own tool servers, so only the app's load.
+fn thread_config(servers: &[(String, String)], roots: &[String], side: bool) -> Value {
+    if side {
+        let servers: serde_json::Map<String, Value> = servers
+            .iter()
+            .map(|(name, url)| (name.clone(), json!({ "url": url, "default_tools_approval_mode": "approve" })))
+            .collect();
+        return json!({ "mcp_servers": servers });
+    }
     let mut config = serde_json::Map::new();
     for (name, url) in servers {
         config.insert(format!("mcp_servers.{name}.url"), json!(url));
@@ -693,7 +768,7 @@ async fn drive(shared: Arc<Shared>, opts: SpawnOptions, servers: Vec<(String, St
         "cwd": cwd,
         "approvalPolicy": approval,
         "sandbox": sandbox,
-        "config": thread_config(&servers, &roots),
+        "config": thread_config(&servers, &roots, opts.side.is_some()),
     });
     if let Some(model) = &model {
         params["model"] = json!(model);
@@ -702,9 +777,25 @@ async fn drive(shared: Arc<Shared>, opts: SpawnOptions, servers: Vec<(String, St
         params["developerInstructions"] = json!(text);
     }
 
-    // Pick up the earlier thread if there is one; else a new one.
+    // A side chat's first start forks the chat's thread; later ones resume
+    // the fork. Either failing ends it: a new thread would know nothing.
+    let side = opts.side.clone();
     let mut started = None;
-    if let Some(resume) = &opts.resume_id {
+    if let Some(side) = &side {
+        let (method, id) = match &side.fork_from {
+            Some(from) => ("thread/fork", Some(from)),
+            None => ("thread/resume", opts.resume_id.as_ref()),
+        };
+        if let Some(id) = id {
+            let mut side_params = params.clone();
+            side_params["threadId"] = json!(id);
+            side_params["excludeTurns"] = json!(true);
+            match shared.rpc.call(method, side_params).await {
+                Ok(reply) => started = Some(reply),
+                Err(e) => return fail(format!("Codex couldn't copy the chat into this side chat: {}", e.message)),
+            }
+        }
+    } else if let Some(resume) = &opts.resume_id {
         let mut resume_params = params.clone();
         resume_params["threadId"] = json!(resume);
         resume_params["excludeTurns"] = json!(true);
@@ -2201,8 +2292,34 @@ mod tests {
         assert_eq!(mode_policy("plan", &roots).1["type"], "workspaceWrite");
         assert_eq!(mode_policy("read-only", &roots), ("on-request", json!({ "type": "readOnly", "networkAccess": false })));
         assert_eq!(mode_policy("full-access", &roots), ("never", json!({ "type": "dangerFullAccess" })));
-        let config = thread_config(&[("harness_chats".into(), "http://x/mcp".into())], &roots);
+        let config = thread_config(&[("harness_chats".into(), "http://x/mcp".into())], &roots, false);
         assert_eq!(config["mcp_servers.harness_chats.default_tools_approval_mode"], "approve");
         assert!(is_compact(&[text_input(" /compact ")]));
+    }
+
+    #[test]
+    fn a_side_chat_reads_only_and_loads_only_the_apps_tools() {
+        assert_eq!(mode_sandbox(SIDE_MODE), ("never", "read-only"));
+        let (approval, sandbox) = mode_policy(SIDE_MODE, &["/notes".into()]);
+        assert_eq!((approval, sandbox["type"].as_str()), ("never", Some("readOnly")));
+        let config = thread_config(&[("harness_chats".into(), "http://x/mcp".into())], &["/notes".into()], true);
+        assert_eq!(
+            config,
+            json!({ "mcp_servers": { "harness_chats": { "url": "http://x/mcp", "default_tools_approval_mode": "approve" } } })
+        );
+        // No tools: none of the user's either.
+        assert_eq!(thread_config(&[], &[], true), json!({ "mcp_servers": {} }));
+    }
+
+    #[test]
+    fn a_threads_saved_file_is_found_by_its_id_in_any_day_folder() {
+        let folder = std::env::temp_dir().join(format!("harness-codex-rollouts-{}", uuid::Uuid::new_v4()));
+        let day = folder.join("2026/11/19");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("rollout-2026-11-19T10-44-09-01a1f47a-c80f.jsonl"), "").unwrap();
+        assert!(has_rollout(&folder, "01a1f47a-c80f"));
+        assert!(!has_rollout(&folder, "c80f-01a1f47a"));
+        assert!(!has_rollout(&folder.join("missing"), "01a1f47a-c80f"));
+        let _ = std::fs::remove_dir_all(folder);
     }
 }
