@@ -42,6 +42,8 @@
     if (!current || !slot) return;
     const made = await terminals.xterm(current.id);
     if (gone || tab?.id !== current.id) return;
+    // Not laid out (the panel is hidden): no size to tell the shell yet.
+    if (!made.fit.proposeDimensions()) return;
     made.fit.fit();
     const { cols, rows } = made.term;
     terminals.size = { cols, rows };
@@ -61,6 +63,11 @@
       if (made.host.parentElement !== into) into.replaceChildren(made.host);
       void fit();
     });
+  });
+
+  // The theme or text size changed: the same panel now holds a different number of columns.
+  $effect(() => {
+    if (terminals.restyled) void fit();
   });
 
   // An action that should put the keys in the terminal (the icon, a tab, +, Cmd+T).

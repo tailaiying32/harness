@@ -40,6 +40,8 @@ class Terminals {
   wantsKeys = $state(false);
   /** The last size a tab was fitted to, for starting new shells close to it. */
   size = { ...START };
+  /** Counts changes of theme or text size, so the view fits its tab again (and tells the shell). */
+  restyled = $state(0);
 
   private made = new Map<string, Made>();
   private making = new Map<string, Promise<Made>>();
@@ -55,10 +57,8 @@ class Terminals {
       window.addEventListener(LOOK_CHANGED, () => {
         if (this.made.size === 0) return;
         void this.load().then((lib) => {
-          for (const made of this.made.values()) {
-            lib.restyle(made, currentTheme());
-            made.fit.fit();
-          }
+          for (const made of this.made.values()) lib.restyle(made, currentTheme());
+          this.restyled++;
         });
       });
     }
@@ -178,23 +178,31 @@ class Terminals {
     return this.lib;
   }
 
-  /** A tab's xterm, made the first time it is asked for and fed the tab's output from then on. */
+  /**
+   * A tab's xterm, made the first time it is asked for and fed the tab's
+   * output from then on. Ready once the output kept so far is drawn: fitting
+   * it sooner would change its size under that drawing.
+   */
   async xterm(id: string): Promise<Made> {
-    const made = this.made.get(id);
-    if (made) return made;
-    let making = this.making.get(id);
-    if (!making) {
-      making = (async () => {
-        const lib = await this.load();
-        const made = lib.makeTerminal(currentTheme(), (data) => void terminalWrite(id, data).catch(() => {}), (e) => this.keys(e));
-        this.made.set(id, made);
-        await terminalAttach(id, (bytes) => made.term.write(bytes));
-        return made;
-      })();
-      this.making.set(id, making);
-      const done = () => void this.making.delete(id);
-      making.then(done, done);
-    }
+    const going = this.making.get(id);
+    if (going) return going;
+    const ready = this.made.get(id);
+    if (ready) return ready;
+    const making = (async () => {
+      const lib = await this.load();
+      const made = lib.makeTerminal(currentTheme(), (data) => void terminalWrite(id, data).catch(() => {}), (e) => this.keys(e));
+      this.made.set(id, made);
+      // New output waits its turn behind the kept output.
+      let early: Uint8Array[] | null = [];
+      const kept = await terminalAttach(id, (bytes) => (early ? early.push(bytes) : made.term.write(bytes)));
+      await lib.replay(made.term, kept);
+      for (const bytes of early) made.term.write(bytes);
+      early = null;
+      return made;
+    })();
+    this.making.set(id, making);
+    const done = () => void this.making.delete(id);
+    making.then(done, done);
     return making;
   }
 

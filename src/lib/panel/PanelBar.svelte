@@ -192,7 +192,8 @@
                 tab.id,
                 () => termTabs.map((t) => t.id),
                 (id, to) => terminals.move(project, id, to),
-              )}>{tab.title}</button
+              )}
+            >{#if tab.done}<span class="done" title="Finished since you last looked">●</span>{/if}{tab.title}</button
           >
           <button class="shut" title="Close this tab" onclick={(e) => shut(e, tab.id)}>×</button>
         </span>
@@ -403,6 +404,12 @@
   .tab.on button:first-child,
   .tab.held button:first-child {
     color: var(--bright);
+  }
+  /* A command finished in a tab off screen: the sidebar's blue "finished since you last looked". */
+  .done {
+    display: inline-block;
+    width: 2ch;
+    color: var(--blue);
   }
   /* A tab's close mark shows on the tab in front, or under the pointer. */
   .shut {
