@@ -7,6 +7,12 @@
 //! channel of its own. The core keeps the last stretch of each tab's raw output,
 //! for the agent's `read` tool and for bringing tabs back after a quit.
 //!
+//! Output only reads right at the width it was drawn at: a progress display
+//! that steps back up over its own lines lands on the wrong ones when those
+//! lines wrap. So the kept output carries a size mark (see `size_mark`) each
+//! time the shell's size changes, and the window draws each stretch at its
+//! own size before fitting the tab to the panel.
+//!
 //! Rules:
 //! - The user closes tabs. As a safety net, a tab unused for a day (no typing,
 //!   not on screen, not read by the agent) is closed; it keeps its output and a
@@ -94,6 +100,8 @@ pub struct TabInfo {
     pub running: Option<String>,
     /// Its shell has ended; typing starts a new one.
     pub closed: bool,
+    /// A command finished in it since it was last on screen.
+    pub done: bool,
     /// The worktree folder it was opened in, if any.
     pub worktree: Option<String>,
 }
@@ -119,6 +127,9 @@ struct Tab {
     /// The command line running in it besides the shell, and that job's group.
     running: Option<String>,
     fg: Option<i32>,
+    /// A command finished in it while it was off screen, and it hasn't been
+    /// on screen since.
+    done: bool,
     /// The last of its raw output.
     tail: Vec<u8>,
     /// A full-screen program (vim, less) has the screen.
@@ -130,6 +141,10 @@ struct Tab {
     /// The window's sink for its output.
     channel: Option<Channel<InvokeResponseBody>>,
     size: PtySize,
+    /// The size the end of `tail` was drawn at: its last size mark.
+    drawn: Option<PtySize>,
+    /// The running shell has printed something (its prompt, at first).
+    spoke: bool,
     /// The window has given this tab its size.
     sized: bool,
     /// Output came since the last save.
@@ -148,6 +163,7 @@ impl Tab {
             label,
             running: None,
             fg: None,
+            done: false,
             tail: Vec::new(),
             alt_screen: false,
             used: Instant::now(),
@@ -155,6 +171,8 @@ impl Tab {
             run: 0,
             channel: None,
             size: DEFAULT_SIZE,
+            drawn: None,
+            spoke: false,
             sized: false,
             dirty: false,
             born: 0,
@@ -167,7 +185,12 @@ impl Tab {
         self.tail.extend_from_slice(bytes);
         if self.tail.len() > TAIL_MAX {
             let cut = trim_point(&self.tail, self.tail.len() - TAIL_MAX);
+            // What is left keeps the size it was drawn at.
+            let mark = last_size_mark(&self.tail[..cut]).map(|m| m.to_vec());
             self.tail.drain(..cut);
+            if let Some(mark) = mark {
+                self.tail.splice(0..0, mark);
+            }
         }
         self.dirty = true;
         if let Some(channel) = &self.channel {
@@ -175,6 +198,23 @@ impl Tab {
                 self.channel = None;
             }
         }
+    }
+
+    /// The shell draws at `size` from here on: noted in the kept output, for
+    /// drawing it again later. Not sent to the window, which knows its size.
+    fn mark(&mut self, size: PtySize) {
+        if self.drawn == Some(size) {
+            return;
+        }
+        self.drawn = Some(size);
+        self.tail.extend_from_slice(&size_mark(size));
+        self.dirty = true;
+    }
+
+    /// Writes a line of the app's own under the output.
+    fn line(&mut self, text: &str) {
+        let bytes = line_bytes(text, self.alt_screen);
+        self.push(&bytes);
     }
 
     fn base_title(&self) -> String {
@@ -268,8 +308,10 @@ impl Terminals {
             let folder = PathBuf::from(&row.folder);
             let folder = if folder.is_dir() { folder } else { project };
             let mut tab = Tab::new(&row.project, folder, worktree, row.label);
+            tab.drawn = last_size_mark(&row.output).and_then(mark_size);
+            tab.alt_screen = alt_screen_after(false, &row.output);
             tab.tail = row.output;
-            tab.push(&line_bytes(&format!("restored {}", local_time(row.saved_at))));
+            tab.line(&format!("restored {}", local_time(row.saved_at)));
             tab.dirty = false;
             state.add(row.id, tab);
         }
@@ -371,7 +413,7 @@ impl Terminals {
         }
         let tab = self.start_or_drop(project, &id)?;
         let deadline = Instant::now() + PROMPT_WAIT;
-        while Instant::now() < deadline && lock(&self.0.state).tabs.get(&tab.id).is_some_and(|t| t.tail.is_empty()) {
+        while Instant::now() < deadline && lock(&self.0.state).tabs.get(&tab.id).is_some_and(|t| !t.spoke) {
             std::thread::sleep(Duration::from_millis(30));
         }
         // A prompt is often drawn in pieces; let it finish.
@@ -403,6 +445,10 @@ impl Terminals {
             end_shell(live, None, KILL_GRACE);
             return Ok(());
         }
+        // The window may have sized the tab while the shell was starting.
+        let size = if tab.size == size || live.master.resize(tab.size).is_err() { size } else { tab.size };
+        tab.mark(size);
+        tab.spoke = false;
         tab.folder = folder;
         tab.run += 1;
         tab.live = Some(live);
@@ -421,17 +467,14 @@ impl Terminals {
         Ok(())
     }
 
-    /// The window's sink for a tab's output: gets everything kept so far, then
-    /// what comes next.
-    pub fn attach(&self, id: &str, channel: Channel<InvokeResponseBody>) -> Result<(), String> {
+    /// The window's sink for a tab's output. Returns everything kept so far,
+    /// size marks included; what comes next goes to `channel`.
+    pub fn attach(&self, id: &str, channel: Channel<InvokeResponseBody>) -> Result<Vec<u8>, String> {
         let mut state = lock(&self.0.state);
         let tab = state.tabs.get_mut(id).ok_or("That terminal tab is gone")?;
-        if !tab.tail.is_empty() {
-            let _ = channel.send(InvokeResponseBody::Raw(tab.tail.clone()));
-        }
         tab.channel = Some(channel);
         tab.used = Instant::now();
-        Ok(())
+        Ok(tab.tail.clone())
     }
 
     /// What the user typed. Starts a fresh shell first in a closed tab.
@@ -461,19 +504,31 @@ impl Terminals {
         let new = tab.size;
         if let Some(live) = &tab.live {
             live.master.resize(new).map_err(|e| e.to_string())?;
+            tab.mark(new);
         }
         state.panel_size = Some(new);
         Ok(())
     }
 
-    /// Which tab is on screen, if any. A tab on screen counts as used.
+    /// Which tab is on screen, if any. A tab on screen counts as used, and
+    /// what finished in it as seen.
     pub fn place(&self, id: Option<String>, visible: bool) {
-        let mut state = lock(&self.0.state);
-        let shown = id.filter(|_| visible);
-        if let Some(tab) = shown.as_ref().and_then(|id| state.tabs.get_mut(id)) {
-            tab.used = Instant::now();
+        let seen = {
+            let mut state = lock(&self.0.state);
+            let shown = id.filter(|_| visible);
+            let mut seen = None;
+            if let Some(tab) = shown.as_ref().and_then(|id| state.tabs.get_mut(id)) {
+                tab.used = Instant::now();
+                if std::mem::take(&mut tab.done) {
+                    seen = Some(tab.project.clone());
+                }
+            }
+            state.shown = shown;
+            seen
+        };
+        if let Some(project) = seen {
+            self.emit(&project);
         }
-        state.shown = shown;
     }
 
     /// What runs in a tab besides its shell, checked now: for asking before
@@ -537,7 +592,7 @@ impl Terminals {
             tab.run += 1;
             let fg = tab.fg.take();
             tab.running = None;
-            tab.push(&line_bytes(&text));
+            tab.line(&text);
             (tab.project.clone(), live, fg)
         };
         if let Some(live) = live {
@@ -649,11 +704,14 @@ impl Terminals {
         let mut projects = Vec::new();
         {
             let mut state = lock(&self.0.state);
+            let shown = state.shown.clone();
             for (id, fg, line) in looked {
                 if let Some(tab) = state.tabs.get_mut(&id) {
                     tab.fg = fg;
                     let running = fg.map(|_| line.unwrap_or_else(|| "a command".to_string()));
                     if running != tab.running {
+                        // A command ending off screen is marked until the tab is looked at.
+                        tab.done = running.is_none() && shown.as_deref() != Some(id.as_str());
                         tab.running = running;
                         if !projects.contains(&tab.project) {
                             projects.push(tab.project.clone());
@@ -707,6 +765,8 @@ impl Terminals {
                 tab.dirty = false;
                 let position = positions.entry(tab.project.clone()).or_insert(0);
                 let start = if tab.tail.len() > SAVE_MAX { trim_point(&tab.tail, tab.tail.len() - SAVE_MAX) } else { 0 };
+                let mut output = last_size_mark(&tab.tail[..start]).map(|m| m.to_vec()).unwrap_or_default();
+                output.extend_from_slice(&tab.tail[start..]);
                 rows.push(SavedTerminal {
                     id: id.clone(),
                     project: tab.project.clone(),
@@ -714,7 +774,7 @@ impl Terminals {
                     worktree: tab.worktree.as_ref().map(|w| w.to_string_lossy().into_owned()),
                     label: tab.label.clone(),
                     position: *position,
-                    output: tab.tail[start..].to_vec(),
+                    output,
                     saved_at: now,
                 });
                 *position += 1;
@@ -853,6 +913,7 @@ fn infos(state: &State, project: &str) -> Vec<TabInfo> {
                 title,
                 running: tab.running.clone(),
                 closed: tab.live.is_none(),
+                done: tab.done,
                 worktree: tab.worktree.as_ref().map(|w| w.to_string_lossy().into_owned()),
             }
         })
@@ -897,12 +958,49 @@ fn idle_words(idle: Duration) -> String {
     }
 }
 
-/// A line the app writes into a tab: leaves any full-screen program's screen,
-/// resets colours, and draws a short ── text ──, dimmed. Short, not across the
-/// tab: kept output is shown again later at whatever width the panel has then,
-/// and a line wider than that wraps and spills onto what follows.
-fn line_bytes(text: &str) -> Vec<u8> {
-    format!("\x1b[?1049l\x1b[0m\x1b[?25h\r\n\x1b[2m── {text} ──\x1b[0m\r\n").into_bytes()
+/// A line the app writes into a tab: leaves a full-screen program's screen if
+/// one has it (`alt_screen`), resets colours, and draws a short ── text ──,
+/// dimmed. Short, not across the tab, so it fits a panel of any width.
+///
+/// Leaving the full-screen screen also puts the cursor back where it was
+/// saved. With no such screen to leave, that is the top of the window, and
+/// the line would be written over the output there: so only when one is up.
+fn line_bytes(text: &str, alt_screen: bool) -> Vec<u8> {
+    let leave = if alt_screen { "\x1b[?1049l" } else { "" };
+    format!("{leave}\x1b[0m\x1b[?25h\r\n\x1b[2m── {text} ──\x1b[0m\r\n").into_bytes()
+}
+
+/// How a size mark starts: an escape sequence of the app's own, which a
+/// terminal that doesn't know it skips.
+const SIZE_MARK: &[u8] = b"\x1b]7717;";
+
+/// The mark in kept output that says the shell draws at `size` from there on.
+fn size_mark(size: PtySize) -> Vec<u8> {
+    let mut mark = SIZE_MARK.to_vec();
+    mark.extend_from_slice(format!("{}x{}\x07", size.cols, size.rows).as_bytes());
+    mark
+}
+
+/// The last size mark in `bytes`, whole.
+fn last_size_mark(bytes: &[u8]) -> Option<&[u8]> {
+    let mut end = bytes.len();
+    while let Some(at) = bytes[..end].windows(SIZE_MARK.len()).rposition(|w| w == SIZE_MARK) {
+        let rest = &bytes[at..];
+        if let Some(len) = rest.iter().take(SIZE_MARK.len() + 12).position(|b| *b == 0x07) {
+            if mark_size(&rest[..=len]).is_some() {
+                return Some(&rest[..=len]);
+            }
+        }
+        end = at;
+    }
+    None
+}
+
+/// The size a mark names.
+fn mark_size(mark: &[u8]) -> Option<PtySize> {
+    let text = std::str::from_utf8(mark.strip_prefix(SIZE_MARK)?.strip_suffix(b"\x07")?).ok()?;
+    let (cols, rows) = text.split_once('x')?;
+    Some(size(cols.parse().ok()?, rows.parse().ok()?))
 }
 
 /// Where to cut kept output so at least `at` bytes go: just after the next
@@ -1193,10 +1291,12 @@ fn read_loop(weak: Weak<Inner>, id: String, run: u64, mut reader: Box<dyn Read +
                 if let Some(live) = tab.live.as_mut() {
                     let _ = live.writer.write_all(b"\x1b[1;1R").and_then(|_| live.writer.flush());
                 }
+                tab.spoke = true;
                 tab.push(&rest);
                 continue;
             }
         }
+        tab.spoke = true;
         tab.push(&buf[..n]);
     }
     shell_ended(&weak, &id, run);
@@ -1341,8 +1441,11 @@ mod tests {
         assert_eq!(command_name("-zsh"), "zsh");
         assert_eq!(idle_words(Duration::from_secs(86_400)), "a day");
         assert_eq!(idle_words(Duration::from_secs(5)), "5 s");
-        let line = String::from_utf8(line_bytes("closed")).unwrap();
+        let line = String::from_utf8(line_bytes("closed", false)).unwrap();
         assert!(line.contains("── closed ──"));
+        // Only a full-screen program's screen is left: otherwise the cursor would jump.
+        assert!(!line.contains("1049"));
+        assert!(String::from_utf8(line_bytes("closed", true)).unwrap().starts_with("\x1b[?1049l"));
         assert!(alt_screen_after(false, b"x\x1b[?1049hvim"));
         assert!(!alt_screen_after(true, b"\x1b[?1049h..\x1b[?1049l"));
     }
@@ -1379,6 +1482,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
         assert_eq!(t.running(id), None);
+        // It ended off screen: marked until the tab is on screen.
+        assert!(t.tabs(&folder())[0].done);
+        t.place(Some(id.to_string()), true);
+        assert!(!t.tabs(&folder())[0].done);
+        t.place(None, false);
     }
 
     #[test]
@@ -1477,6 +1585,22 @@ mod tests {
     }
 
     #[test]
+    fn kept_output_keeps_its_size_when_its_start_is_cut() {
+        let mut tab = Tab::new("p", PathBuf::from("."), None, "p".into());
+        tab.mark(size(130, 40));
+        tab.push(&vec![b'a'; TAIL_MAX]);
+        tab.push(b"more\n");
+        assert!(tab.tail.starts_with(&size_mark(size(130, 40))));
+        // The same size again adds nothing; a new one is noted at the end.
+        let before = tab.tail.len();
+        tab.mark(size(130, 40));
+        assert_eq!(tab.tail.len(), before);
+        tab.mark(size(77, 61));
+        assert_eq!(last_size_mark(&tab.tail).and_then(mark_size), Some(size(77, 61)));
+        assert_eq!(last_size_mark(b"\x1b]7717;junk\x07 and \x1b]7717;9"), None);
+    }
+
+    #[test]
     fn tabs_come_back_after_a_quit_closed_with_their_output() {
         let store = Arc::new(Store::in_memory());
         let project = folder();
@@ -1498,6 +1622,10 @@ mod tests {
         let text = again.text(&tabs[0].id, 50).unwrap();
         assert!(text.contains("kept"));
         assert!(text.contains("restored"));
+        // The output says what size it was drawn at, and the agent never sees that.
+        let raw = lock(&again.0.state).tabs[&tabs[0].id].tail.clone();
+        assert_eq!(last_size_mark(&raw).and_then(mark_size), Some(size(52, 30)));
+        assert!(!text.contains("7717"));
         // The panel's size comes back too: the agent's first tab starts at it.
         let tab = again.run_for_agent(&project, None, SIZE, &|_| {}).unwrap();
         assert!(wait_for(&again, &tab.id, "30 52"));

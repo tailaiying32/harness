@@ -343,6 +343,8 @@ export type CommandInfo = {
   /** What it takes after the name, if the agent says. */
   hint: string | null;
   aliases: string[];
+  /** A skill picked with `$` (Codex's way), not a `/` command. */
+  skill?: boolean;
 };
 
 /** The slash commands an agent takes in a folder, as it reports them. A second or a few. */
@@ -495,6 +497,8 @@ export type TerminalTab = {
   running: string | null;
   /** Its shell has ended; typing starts a new one. */
   closed: boolean;
+  /** A command finished in it since it was last on screen. */
+  done: boolean;
   /** The chat worktree folder it was opened in, if any. */
   worktree: string | null;
 };
@@ -513,15 +517,20 @@ export const terminalTabs = (project: string) => invoke<TerminalTab[]>("terminal
 /** Opens a tab in the project's main folder, or in a chat's worktree folder (named `label`). */
 export const terminalNew = (project: string, worktree: string | null, label: string | null, cols: number, rows: number) =>
   invoke<TerminalTab>("terminal_new", { project, worktree, label, cols, rows });
-/** Sends the tab's output to `onData`: everything kept so far, then what comes. */
-export async function terminalAttach(tab: string, onData: (data: Uint8Array) => void): Promise<void> {
+/**
+ * Returns the tab's output kept so far (raw, with its size marks; see
+ * `replay`), and sends what comes next to `onData`. Some of that can arrive
+ * before the answer does.
+ */
+export async function terminalAttach(tab: string, onData: (data: Uint8Array) => void): Promise<Uint8Array> {
   const channel = new Channel<ArrayBuffer | number[] | string>();
   channel.onmessage = (message) => {
     if (message instanceof ArrayBuffer) onData(new Uint8Array(message));
     else if (Array.isArray(message)) onData(Uint8Array.from(message));
     else onData(new TextEncoder().encode(String(message)));
   };
-  await invoke("terminal_attach", { tab, onData: channel });
+  const kept = await invoke<ArrayBuffer | number[]>("terminal_attach", { tab, onData: channel });
+  return kept instanceof ArrayBuffer ? new Uint8Array(kept) : Uint8Array.from(kept);
 }
 export const terminalWrite = (tab: string, data: string) => invoke<void>("terminal_write", { tab, data });
 export const terminalResize = (tab: string, cols: number, rows: number) =>

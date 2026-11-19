@@ -605,10 +605,74 @@ only reported after a reply from a model it applies to. Settings → Usage
 shows a heading per agent ("Claude Code") with "all models" and "fable"
 lines, each "64% · resets Mon 4:37 PM", "unknown" before any reading, and
 "0%" once its reset time has passed (until the next reading; use on other
-devices since the reset isn't known). Cursor's usage (Auto and picked models are
-counted apart) is on Cursor's servers but not sent over ACP or printed by
-any command; reaching it would mean using the user's Cursor login, so it is
-left out.
+devices since the reset isn't known).
+
+Usage audit (2026-11-19, CLI 2.1.326, codex 0.169.1, agy 1.5.11, agent
+2026.11.19):
+- **Claude Code**: a `get_usage` control request (`skip_behaviors: true`)
+  answers in about 0.3 s with no model call, before any message:
+  `rate_limits.{five_hour, seven_day, seven_day_opus, seven_day_sonnet}`
+  (null when the plan has none; `utilization` a percent, `resets_at` ISO)
+  and `model_scoped[]` (`display_name` "Fable"). The app asks at start and
+  after each turn (main chats) and names readings as `rate_limit_event`
+  does, a single `model_scoped` entry being `seven_day_overage_included`.
+  `rate_limit_event` can carry only `five_hour`, `seven_day` and
+  `seven_day_overage_included` in `unifiedWindows`. Settings shows "5h",
+  "opus", "sonnet" when read, "all models" and "fable" always, and any other
+  window by its name. Extra usage and spend are not shown.
+- **Codex**: `account/rateLimits/read` also has `rateLimitsByLimitId`, one
+  snapshot per metered limit (`limitId`, `limitName`). All are read; a
+  bucket other than `codex` is named first ("Spark 5h"), so the sparse
+  `account/rateLimits/updated` for one bucket can't overwrite another.
+  Credits are not shown.
+- **Antigravity**: `agy -p /usage`; see "Antigravity over ACP".
+- **Cursor**: the interactive TUI has `/usage` (Included, Auto, API percent
+  used, monthly reset), from Cursor's `DashboardService/GetCurrentPeriodUsage`,
+  but print mode (`-p "/usage"` goes to the model) and ACP don't. Reaching it
+  means driving the TUI in a pty (fragile, and starting the TUI updates the
+  CLI) or calling Cursor's service with the user's login, so it is left out.
+
+Commands in each agent's own syntax (2026-11-19). The menus follow how
+each agent's own screen takes them; Harness's own commands sit beside them
+where the names don't clash:
+- **Harness's**: `/model` (model menu), `/clear` or `/new` (a new chat in
+  the same folder, as Cmd+N), `/btw` (a side chat), and its skills, in every
+  agent's `/` menu. Claude Code's own `/clear` stays hidden.
+- **Codex**: its app-server takes `/` and `$` as plain text; its own screen
+  turns them into calls, so the app does too (`Builtin` in `codex.rs`):
+  `/compact` → `thread/compact/start`; `/review [text]` → `review/start`
+  (uncommitted changes, or `custom` instructions; the review comes back as
+  an ordinary `agentMessage`); `/goal <goal>` → `thread/goal/set` (Codex
+  starts its own turn at once, so `turn/started` now also says "working"),
+  `/goal` alone, `clear`, `pause`, `resume` → `thread/goal/get|clear|set`
+  answered in the chat; `/init` → Codex's own `/init` prompt (copied from
+  codex-cli 0.169.1); `/mcp` → `mcpServerStatus/list`, answered in the
+  chat. Skills come from `skills/list` (enabled only) and are picked with
+  `$` in the message box; a `$name` in a message goes with it as a
+  `{type: "skill", name, path}` input, as Codex's own screen sends it.
+- **Antigravity**: built-ins aren't run over ACP (they reach the model), but
+  print mode runs them without a model call: `usage` (`quota`), `credits`,
+  `skills`, `agents`, `plugin`, `hooks`, `permissions`, `config`
+  (`settings`), `changelog` (`agy -p /help`, agy 1.5.12). These are in the
+  menu, and a message that is one of them alone runs `agy -p "<text>"` in
+  the project; its tab-split lines show as a list (`print_commands` in the
+  ACP `Dialect`). `/compact` over ACP works but says nothing; a
+  "compacted" line now follows it (`compacts`).
+- **Cursor**: ACP runs none of its built-ins except `/copy-request-id`.
+- **Screen-only commands** (`SCREEN_ONLY` in `commands.svelte.ts`): an
+  agent's own commands that only work in its own terminal screen (Codex
+  `/status`, `/diff`, ...; Antigravity `/context`, `/rewind`, ...; Cursor
+  `/summarize`, `/compact`, `/usage`, ...) are caught when sent, and the chat
+  says so ("/diff only works in Codex's own terminal screen"), with what to
+  use instead where there is something. One the agent lists itself (a skill
+  or custom command of that name) is sent as usual. Claude Code turns these
+  down itself, for free, so it has none.
+- **Tested live**: Antigravity `/usage` and `/credits` (about 1.5 s each, no
+  model call); Codex `/mcp` and `/goal` alone. `review/start` and
+  `thread/goal/set` were tried on Codex's app-server directly (a review of
+  a one-line bug came back as its answer; a goal started its own turn and
+  ended `complete`). **Not tested live**: the `$` menu, `/clear`, and the
+  screen-only notes (type-checked only).
 
 `AgentAdapter` trait (one implementation in v1, `ClaudeCodeAdapter`):
 
@@ -2504,6 +2568,16 @@ probes showed:
   code (redirect to `antigravity.google/oauth-callback`), so it can't run
   without a terminal. ACP `authenticate {methodId: "oauth-personal"}` opens
   the browser itself.
+- **Usage limits** (probed 2026-11-19): not sent over ACP, and `/usage`
+  sent as an ACP prompt goes to the model. `agy -p /usage` (alias `/quota`)
+  prints them in about 2 s, with no model call and no saved conversation:
+  one tab-split line per limit, group, name, percent left, reset (UTC), e.g.
+  `Gemini Models\tFive Hour Limit Remaining\t96%\t2026-11-19T20:03:27Z`.
+  Seen: Gemini 5h and week, Claude and GPT 5h and week, Gemini 4 Argon week.
+  The app runs it when an Antigravity chat starts and after each turn (one
+  read at a time) and sends a `UsageUpdate` per line, named "gemini 5h",
+  "claude and gpt week", "gemini 4 argon week". Settings → Usage lists them
+  under "Antigravity".
 
 **As built (2026-11-18, branch `harness/antigravity-agent-3ca873`):**
 `acp.rs` takes a `Dialect` per agent: tool naming, own-tool detection,

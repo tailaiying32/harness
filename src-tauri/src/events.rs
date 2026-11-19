@@ -479,6 +479,9 @@ pub struct CommandInfo {
     pub hint: Option<String>,
     /// Other names that run it.
     pub aliases: Vec<String>,
+    /// A skill picked with `$` (Codex's way), not a `/` command.
+    #[serde(default)]
+    pub skill: bool,
 }
 
 /// What the window receives: an event plus the chat it belongs to.

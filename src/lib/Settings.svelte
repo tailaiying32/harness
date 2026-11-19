@@ -5,7 +5,7 @@
   import BarIcon from "./BarIcon.svelte";
   import Preferences from "./Preferences.svelte";
   import { refreshSkills } from "./commands.svelte";
-  import { CLAUDE, CODEX, importSkill, listSkills, pickFile, pickFolder, removeSkill, type ModelInfo, type SkillInfo } from "./ipc";
+  import { ANTIGRAVITY, CLAUDE, CODEX, agentLabel, importSkill, listSkills, pickFile, pickFolder, removeSkill, type AgentId, type ModelInfo, type SkillInfo } from "./ipc";
   import type { AppState, Limit } from "./state/app.svelte";
   import {
     appearances,
@@ -95,20 +95,37 @@
     savePrefs({ size: value });
   }
 
-  // Claude Code's limits, by the names it reports them under (CLI 2.1.322):
+  // Claude Code's limits, by the names it reports them under (CLI 2.1.326):
   // "seven_day" covers all models and "seven_day_overage_included" is Fable's
-  // own, matched against `/usage`. Each agent gets its own heading.
-  const claudeLimits = $derived(
-    [
-      { name: "all models", window: "seven_day" },
-      { name: "fable", window: "seven_day_overage_included" },
-    ].map(({ name, window }) => ({ name, text: limitText(app.limits[CLAUDE]?.[window]) })),
-  );
+  // own, matched against `/usage`; "five_hour", "seven_day_opus" and
+  // "seven_day_sonnet" show when the plan has them, and any other by its own
+  // name. "all models" and "fable" always show. Each agent gets its own heading.
+  const CLAUDE_WINDOWS: [string, string][] = [
+    ["five_hour", "5h"],
+    ["seven_day", "all models"],
+    ["seven_day_opus", "opus"],
+    ["seven_day_sonnet", "sonnet"],
+    ["seven_day_overage_included", "fable"],
+  ];
+  const ALWAYS = new Set(["seven_day", "seven_day_overage_included"]);
+  const claudeLimits = $derived.by(() => {
+    const read = app.limits[CLAUDE] ?? {};
+    const known = CLAUDE_WINDOWS.filter(([window]) => ALWAYS.has(window) || read[window]);
+    const others = Object.keys(read)
+      .filter((window) => !CLAUDE_WINDOWS.some(([w]) => w === window))
+      .map((window): [string, string] => [window, window.replaceAll("_", " ")]);
+    return [...known, ...others].map(([window, name]) => ({ name, text: limitText(read[window]) }));
+  });
 
-  // Codex's limits, named for how long each window runs ("5h", "week"),
-  // as many as its plan has.
-  const codexLimits = $derived(
-    Object.entries(app.limits[CODEX] ?? {}).map(([name, limit]) => ({ name, text: limitText(limit) })),
+  // Codex's and Antigravity's limits, as many as the plan has, by the names
+  // the app gives them: Codex's by window ("5h", "week"), Antigravity's by
+  // model group and window ("gemini 5h", "claude and gpt week").
+  const agentLimits = (agent: AgentId) =>
+    Object.entries(app.limits[agent] ?? {}).map(([name, limit]) => ({ name, text: limitText(limit) }));
+  const otherLimits = $derived(
+    [CODEX, ANTIGRAVITY]
+      .filter((agent) => app.agents.includes(agent))
+      .map((agent) => ({ agent, label: agentLabel(agent), limits: agentLimits(agent) })),
   );
 
   /** "64% · resets Sun 4:59 PM"; unknown before any reading. Once the limit has
@@ -359,9 +376,9 @@
           <span class="left">{limit.text}</span>
         </div>
       {/each}
-      {#if app.agents.includes(CODEX)}
-        <div class="sub">Codex</div>
-        {#each codexLimits as limit (limit.name)}
+      {#each otherLimits as { agent, label, limits } (agent)}
+        <div class="sub">{label}</div>
+        {#each limits as limit (limit.name)}
           <div class="row">
             <span class="name">{limit.name}</span>
             <span class="left">{limit.text}</span>
@@ -369,7 +386,7 @@
         {:else}
           <div class="row"><span class="name">all models</span><span class="left">unknown</span></div>
         {/each}
-      {/if}
+      {/each}
     </section>
 
     <section>

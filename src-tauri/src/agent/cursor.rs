@@ -29,6 +29,8 @@ pub static DIALECT: Dialect = Dialect {
     session_meta: |_| Value::Null,
     pick_default_model: true,
     forms: false,
+    print_commands: &[],
+    compacts: false,
 };
 
 /// How a plan reaches the app's approve card: Cursor's own plan request,
@@ -312,12 +314,14 @@ mod tests {
                     description: "Keep a PR merge-ready. (builtin skill)".into(),
                     hint: None,
                     aliases: vec![],
+                    skill: false,
                 },
                 CommandInfo {
                     name: "shell".into(),
                     description: "Runs the rest as a shell command.".into(),
                     hint: Some("command".into()),
                     aliases: vec![],
+                    skill: false,
                 },
             ]
         );

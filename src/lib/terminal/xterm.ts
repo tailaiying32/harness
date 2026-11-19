@@ -106,6 +106,42 @@ export function makeTerminal(theme: Theme, onData: (data: string) => void, keys:
   return { term, fit, host };
 }
 
+// A size mark in kept output: ESC ] 7717 ; <cols> x <rows> BEL. The core puts
+// one in each time the shell's size changes (see terminal.rs).
+const MARK = [0x1b, 0x5d, 0x37, 0x37, 0x31, 0x37, 0x3b];
+const MARK_END = 0x07;
+
+/** The next whole size mark at or after `from`. */
+function nextMark(bytes: Uint8Array, from: number): { start: number; end: number; cols: number; rows: number } | null {
+  for (let at = from; (at = bytes.indexOf(MARK[0], at)) >= 0; at++) {
+    if (!MARK.every((b, i) => bytes[at + i] === b)) continue;
+    const body = at + MARK.length;
+    const stop = bytes.indexOf(MARK_END, body);
+    if (stop < 0 || stop - body > 12) continue;
+    const size = /^(\d+)x(\d+)$/.exec(String.fromCharCode(...bytes.subarray(body, stop)));
+    if (size) return { start: at, end: stop + 1, cols: Number(size[1]), rows: Number(size[2]) };
+  }
+  return null;
+}
+
+/**
+ * Draws a tab's kept output, each stretch at the size the shell had when it
+ * wrote it. Output only reads right at that size: a progress display that
+ * steps back up over its own lines lands on the wrong ones when they wrap.
+ * The terminal is left at the last size; fitting it to the panel afterwards
+ * rewraps the finished screen, as resizing any terminal does.
+ */
+export async function replay(term: Terminal, kept: Uint8Array): Promise<void> {
+  const write = (part: Uint8Array) => (part.length ? new Promise<void>((done) => term.write(part, done)) : null);
+  let at = 0;
+  for (let mark = nextMark(kept, at); mark; mark = nextMark(kept, at)) {
+    await write(kept.subarray(at, mark.start));
+    if (mark.cols >= 2 && mark.rows >= 1) term.resize(mark.cols, mark.rows);
+    at = mark.end;
+  }
+  await write(kept.subarray(at));
+}
+
 /** Takes the theme and text size on show. */
 export function restyle(made: Made, theme: Theme): void {
   const { fontFamily, fontSize } = look();

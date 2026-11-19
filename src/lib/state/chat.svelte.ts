@@ -1321,6 +1321,11 @@ export class Chat {
     return this.draft.trim() !== "" || this.draftImages.length > 0 || this.draftFiles.length > 0;
   }
 
+  /** A line from the app in the chat; nothing is sent. */
+  note(text: string): void {
+    this.push({ type: "note", text });
+  }
+
   private push<T extends Item>(item: NewItem): T {
     this.items.push({ ...item, id: this.nextId++ } as Item);
     if (item.type === "text") this.pruneChatComments();

@@ -16,7 +16,7 @@
   import CommentDock from "./CommentDock.svelte";
   import { chatInOrder } from "./comments";
   import SuggestMenu from "./SuggestMenu.svelte";
-  import { commandsFor, fetchCommands, findCommand, matchCommands, type Command } from "../commands.svelte";
+  import { commandsFor, fetchCommands, findCommand, matchCommands, screenOnly, skillsFor, type Command } from "../commands.svelte";
 
   let {
     chat,
@@ -29,6 +29,7 @@
     focus = 0,
     drops = true,
     onModel,
+    onNew,
   }: {
     chat: Chat;
     /** The project's other chats, newest first, to pick one with @. */
@@ -42,6 +43,8 @@
     /** The agents found on this machine, Claude Code first. */
     agents: AgentId[];
     focus?: number;
+    /** Starts a new chat in this one's folder: Harness's `/clear`. */
+    onNew?: () => void;
     /** Whether dropped files land here now; not while something is drawn over the chat. */
     drops?: boolean;
     /** A model was picked, to be remembered for new chats. */
@@ -84,9 +87,8 @@
   const modes = $derived(agentModes[chat.agent]);
   const modeLabel = $derived(modes.find((m) => m.id === chat.mode)?.label ?? chat.mode);
 
-  function nextMode() {
-    const index = modes.findIndex((m) => m.id === chat.mode);
-    const mode: Mode = modes[(index + 1) % modes.length].id;
+  function pickMode(mode: Mode) {
+    open = null;
     void chat.changeMode(mode);
     // New chats start in the last mode picked. Plan is for one task, so it
     // isn't kept; Cursor's modes aren't either (Claude Code's are the saved kind).
@@ -140,11 +142,12 @@
     efforts.includes(chat.effortChoice) ? chat.effortChoice : (picked?.default_effort ?? null),
   );
 
-  // The line under the box has two menus, one open at a time: the chat's
-  // pull requests, and the model.
-  let open = $state<"prs" | "model" | null>(null);
+  // The line under the box has three menus, one open at a time: the chat's
+  // pull requests, the model, and the mode.
+  type Menu = "prs" | "model" | "mode";
+  let open = $state<Menu | null>(null);
   let menus = $state<Record<string, HTMLElement | undefined>>({});
-  const toggle = (which: "prs" | "model") => (open = open === which ? null : which);
+  const toggle = (which: Menu) => (open = open === which ? null : which);
 
   // Any click outside the open menu, or Escape, closes it.
   $effect(() => {
@@ -427,11 +430,16 @@
   // click opens the chat, and the agent is sent the chat's ID to read it by.
   //
   // Typing / at the very start of the message lists the commands this chat's
-  // agent takes here, with Harness's skills and `/model`. A picked command is
-  // typed in as plain text. A command not in the list is still sent as typed.
+  // agent takes here, with Harness's skills, `/model` and `/clear`. A picked
+  // command is typed in as plain text. A command not in the list is still
+  // sent as typed, unless it only works in the agent's own screen.
+  //
+  // Typing $ at the start of a word lists the agent's skills, for an agent
+  // that picks them that way (Codex). A picked one is typed in as `$name`;
+  // the agent's side sends it as that skill.
 
-  /** The @ or / being typed: where it and the cursor are, and the row the keys are on. */
-  let suggest = $state<{ kind: "chat" | "command"; at: number; end: number; row: number } | null>(null);
+  /** The @, / or $ being typed: where it and the cursor are, and the row the keys are on. */
+  let suggest = $state<{ kind: "chat" | "command" | "skill"; at: number; end: number; row: number } | null>(null);
   /** An @ or / whose list was closed with Escape: it stays closed. */
   let dismissed = -1;
 
@@ -442,6 +450,7 @@
     if (ready) fetchCommands(chat.agent, chat.root);
   });
   const commands = $derived(commandsFor(chat.agent, chat.root));
+  const skills = $derived(skillsFor(chat.agent, chat.root));
 
   const typedWord = $derived(suggest ? chat.draft.slice(suggest.at + 1, suggest.end) : "");
   const mentioned = $derived.by(() => {
@@ -449,11 +458,13 @@
     const typed = typedWord.toLowerCase();
     return chats.filter((c) => c.title.toLowerCase().includes(typed)).slice(0, 8);
   });
-  const commanded = $derived<Command[]>(suggest?.kind === "command" ? matchCommands(commands, typedWord) : []);
+  const commanded = $derived<Command[]>(
+    suggest?.kind === "command" ? matchCommands(commands, typedWord) : suggest?.kind === "skill" ? matchCommands(skills, typedWord) : [],
+  );
   const suggestRows = $derived(
     suggest?.kind === "chat"
       ? mentioned.map((c) => ({ key: c.id, label: c.title }))
-      : commanded.map((c) => ({ key: c.name, label: `/${c.name}`, detail: c.description })),
+      : commanded.map((c) => ({ key: c.name, label: `${suggest?.kind === "skill" ? "$" : "/"}${c.name}`, detail: c.description })),
   );
 
   /** Looks for an @ or a / being typed just before the cursor. */
@@ -464,14 +475,15 @@
     // start, so an address like me@example.com isn't one.
     const command = before.match(/^\/([^\s/]*)$/);
     const mention = command || !chats.length ? null : before.match(/(?:^|\s)@((?:\S[^\n@[\]]{0,39})?)$/);
-    const typed = command ?? mention;
+    const skill = command || mention || !skills.length ? null : before.match(/(?:^|\s)\$([^\s$]*)$/);
+    const typed = command ?? mention ?? skill;
     if (!typed) {
       suggest = null;
       dismissed = -1;
       return;
     }
-    const kind = command ? "command" : "chat";
-    if (command && ready) fetchCommands(chat.agent, chat.root);
+    const kind = command ? "command" : skill ? "skill" : "chat";
+    if ((command || skill) && ready) fetchCommands(chat.agent, chat.root);
     const start = at - typed[1].length - 1;
     if (start === dismissed) suggest = null;
     else if (suggest?.at !== start || suggest.end !== at || suggest.kind !== kind) suggest = { kind, at: start, end: at, row: 0 };
@@ -494,6 +506,13 @@
     }
     const picked = commandPicked;
     if (!picked) return;
+    if (kind === "skill") {
+      const word = chat.draft.slice(at).match(/^\S*/)?.[0] ?? "";
+      const insert = `$${picked.name} `;
+      const to = at + word.length + (chat.draft[at + word.length] === " " ? 1 : 0);
+      await apply({ from: at, to, insert, selStart: at + insert.length, selEnd: at + insert.length });
+      return;
+    }
     if (picked.harness === "model") {
       // Take out what was typed (up to the end of the word) and open the menu.
       const word = chat.draft.slice(at).match(/^\S*\s?/)?.[0] ?? "";
@@ -537,6 +556,24 @@
       await tick();
       grow();
       open = "model";
+      return;
+    }
+    // `/clear` (or `/new`) is Harness's own: a new chat in this folder.
+    if (/^\/(clear|new)$/.test(text.trim())) {
+      chat.draft = "";
+      await tick();
+      grow();
+      onNew?.();
+      return;
+    }
+    // One of the agent's own commands that only works in its own screen:
+    // said so here, instead of the model getting it as words.
+    const screen = screenOnly(chat.agent, chat.root, text);
+    if (screen) {
+      chat.draft = "";
+      await tick();
+      grow();
+      chat.note(screen);
       return;
     }
     // Comments on the latest answer go with the message, or alone. A command
@@ -735,7 +772,23 @@
           </div>
         {/if}
       </span>
-      <button onclick={nextMode} title="Switch mode">{modeLabel}</button>
+      <span class="picker" bind:this={menus.mode}>
+        <button onclick={() => toggle("mode")} title="Mode" aria-haspopup="menu" aria-expanded={open === "mode"}>
+          {modeLabel}
+        </button>
+        {#if open === "mode"}
+          <div class="menu" role="menu">
+            {#each modes as m (m.id)}
+              <button
+                role="menuitemradio"
+                aria-checked={m.id === chat.mode}
+                class:on={m.id === chat.mode}
+                onclick={() => pickMode(m.id)}>{m.label}</button
+              >
+            {/each}
+          </div>
+        {/if}
+      </span>
     </div>
   </div>
 </div>

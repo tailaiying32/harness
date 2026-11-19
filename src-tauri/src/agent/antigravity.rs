@@ -3,14 +3,17 @@
 //! "Antigravity over ACP".
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::acp::{self, AcpConfig, Dialect, Intro, Tool};
+use super::acp::{self, AcpConfig, Dialect, Intro, PrintCommand, Tool};
 use super::acp_sync::{self, SyncRpc, effort_levels, model_option};
 use super::{AgentAdapter, EventSink, RunningAgent, SideCopy, SpawnOptions, copy_database, copy_folder, plain_id};
-use crate::events::{CommandInfo, ModelInfo};
+use crate::events::{AgentEvent, CommandInfo, ModelInfo};
 
 pub struct AntigravityAdapter;
 
@@ -21,6 +24,8 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(60);
 const COMMANDS_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long signing in may wait for the user in the browser.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long reading the usage limits may take (about 2 s on agy 1.5.11).
+const USAGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How a plan reaches the app's approve card: Antigravity's own plan
 /// artifact, marked for feedback, in any mode (it can't enter plan mode
@@ -44,7 +49,24 @@ pub static DIALECT: Dialect = Dialect {
     session_meta,
     pick_default_model: false,
     forms: true,
+    print_commands: PRINT_COMMANDS,
+    compacts: true,
 };
+
+/// Antigravity's own commands that run in print mode (`agy -p /help`, agy
+/// 1.5.12) but not over ACP, where they reach the model. `/model` and
+/// `/effort` are left to the app's model menu.
+static PRINT_COMMANDS: &[PrintCommand] = &[
+    PrintCommand { name: "usage", aliases: &["quota"], description: "View model quota usage" },
+    PrintCommand { name: "credits", aliases: &[], description: "Show remaining G1 credits and purchase link" },
+    PrintCommand { name: "skills", aliases: &[], description: "List available skills" },
+    PrintCommand { name: "agents", aliases: &[], description: "List available custom agents" },
+    PrintCommand { name: "plugin", aliases: &[], description: "List plugins" },
+    PrintCommand { name: "hooks", aliases: &[], description: "List hook configurations for tool events" },
+    PrintCommand { name: "permissions", aliases: &[], description: "List tool permissions" },
+    PrintCommand { name: "config", aliases: &["settings"], description: "Show settings" },
+    PrintCommand { name: "changelog", aliases: &[], description: "Show release notes and changes" },
+];
 
 impl AgentAdapter for AntigravityAdapter {
     fn spawn(&self, opts: SpawnOptions, sink: EventSink) -> Result<Box<dyn RunningAgent>, String> {
@@ -71,6 +93,20 @@ impl AgentAdapter for AntigravityAdapter {
             dialect: &DIALECT,
             side,
         };
+        if side {
+            return acp::spawn(opts.binary.clone(), config, opts, sink);
+        }
+        // Usage limits aren't sent over ACP: read them now and after each
+        // turn (main chats only; a side chat's readings aren't used).
+        let usage = UsageReader::new(opts.binary.clone(), sink.clone());
+        usage.read();
+        let sink: EventSink = Arc::new(move |event| {
+            let ended = matches!(event, AgentEvent::TurnEnded { .. });
+            sink(event);
+            if ended {
+                usage.read();
+            }
+        });
         acp::spawn(opts.binary.clone(), config, opts, sink)
     }
 
@@ -110,8 +146,17 @@ impl AgentAdapter for AntigravityAdapter {
         Ok(models)
     }
 
+    /// What ACP lists, and the commands the app runs in print mode.
     fn list_commands(&self, binary: &Path, folder: &Path) -> Result<Vec<CommandInfo>, String> {
-        acp_sync::list_commands(binary, &["acp"], LABEL, json!({}), folder, COMMANDS_TIMEOUT)
+        let mut commands = acp_sync::list_commands(binary, &["acp"], LABEL, json!({}), folder, COMMANDS_TIMEOUT)?;
+        commands.extend(PRINT_COMMANDS.iter().map(|c| CommandInfo {
+            name: c.name.to_string(),
+            description: c.description.to_string(),
+            hint: None,
+            aliases: c.aliases.iter().map(|a| a.to_string()).collect(),
+            skill: false,
+        }));
+        Ok(commands)
     }
 
     /// Antigravity names each conversation itself (`session_info_update`).
@@ -253,6 +298,117 @@ fn models_from(options: &Value) -> Vec<ModelInfo> {
             })
         })
         .collect()
+}
+
+/// Reads a chat's usage limits with `agy -p /usage`, which prints them
+/// without asking the model or saving a conversation. One read at a time.
+struct UsageReader {
+    binary: PathBuf,
+    sink: EventSink,
+    busy: Arc<AtomicBool>,
+}
+
+impl UsageReader {
+    fn new(binary: PathBuf, sink: EventSink) -> Self {
+        UsageReader { binary, sink, busy: Arc::default() }
+    }
+
+    /// Starts a read in the background; skipped while one is running.
+    fn read(&self) {
+        if self.busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (binary, sink, busy) = (self.binary.clone(), self.sink.clone(), self.busy.clone());
+        std::thread::spawn(move || {
+            if let Some(text) = run_usage(&binary) {
+                for event in usage_events(&text) {
+                    sink(event);
+                }
+            }
+            busy.store(false, Ordering::SeqCst);
+        });
+    }
+}
+
+/// What `agy -p /usage` prints, or None if it failed or took too long.
+fn run_usage(binary: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut cmd = Command::new(binary);
+    cmd.args(["-p", "/usage"])
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        let _ = tx.send(text);
+    });
+    let text = rx.recv_timeout(USAGE_TIMEOUT).ok();
+    if text.is_none() {
+        let _ = child.kill();
+    }
+    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+    text.filter(|_| ok)
+}
+
+/// The limits in `/usage`'s table, as the app's usage readings. Each line is
+/// group, limit, percent left, reset time (UTC), split by tabs:
+/// `Gemini Models\tFive Hour Limit Remaining\t96%\t2026-11-19T20:03:27Z`.
+/// Named "gemini 5h", "claude and gpt week", "gemini 4 argon week"; each
+/// group's shorter window first.
+fn usage_events(text: &str) -> Vec<AgentEvent> {
+    let mut groups: Vec<String> = Vec::new();
+    let mut readings: Vec<(usize, u8, AgentEvent)> = Vec::new();
+    for line in text.lines() {
+        let cols: Vec<&str> = line.split('\t').map(str::trim).collect();
+        let [group, limit, left, resets] = cols[..] else { continue };
+        let Some(left) = left.strip_suffix('%').and_then(|n| n.trim().parse::<f64>().ok()) else { continue };
+        let group = group.to_lowercase();
+        let group = group.strip_suffix(" models").unwrap_or(&group).to_string();
+        let (period, rank) = period(&limit.to_lowercase());
+        let index = groups.iter().position(|g| *g == group).unwrap_or_else(|| {
+            groups.push(group.clone());
+            groups.len() - 1
+        });
+        let resets_at = chrono::DateTime::parse_from_rfc3339(resets).ok().and_then(|t| u64::try_from(t.timestamp()).ok());
+        readings.push((
+            index,
+            rank,
+            AgentEvent::UsageUpdate {
+                window: Some(format!("{group} {period}")),
+                utilization: (1.0 - left / 100.0).clamp(0.0, 1.0),
+                resets_at,
+            },
+        ));
+    }
+    readings.sort_by_key(|(group, rank, _)| (*group, *rank));
+    readings.into_iter().map(|(_, _, event)| event).collect()
+}
+
+/// A limit's window from its name ("Five Hour Limit Remaining" is "5h"),
+/// with a rank that puts shorter windows first.
+fn period(limit: &str) -> (String, u8) {
+    if limit.contains("five hour") {
+        ("5h".to_string(), 0)
+    } else if limit.contains("daily") || limit.contains("day") {
+        ("day".to_string(), 1)
+    } else if limit.contains("week") {
+        ("week".to_string(), 2)
+    } else if limit.contains("month") {
+        ("month".to_string(), 3)
+    } else {
+        let name = limit.replace("limit", "").replace("remaining", "");
+        (name.split_whitespace().collect::<Vec<_>>().join(" "), 4)
+    }
 }
 
 /// The app's instructions, added to Antigravity's system prompt.
@@ -479,6 +635,37 @@ mod tests {
     fn instructions_go_in_the_system_prompt() {
         assert_eq!(session_meta(Some("Be brief.")), json!({ "antigravity": { "systemPrompt": { "append": "Be brief." } } }));
         assert_eq!(session_meta(None), Value::Null);
+    }
+
+    #[test]
+    fn usage_table_becomes_readings() {
+        // As printed by `agy -p /usage` on agy 1.5.11.
+        let text = "Gemini Models\tWeekly Limit Remaining\t97%\t2026-11-25T22:40:16Z\n\
+            Gemini Models\tFive Hour Limit Remaining\t96%\t2026-11-19T20:03:27Z\n\
+            Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-11-26T15:35:06Z\n\
+            Claude and GPT models\tFive Hour Limit Remaining\t100%\t2026-11-19T20:35:06Z\n\
+            Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t100%\t2026-11-26T15:35:06Z\n\
+            not a limit\n";
+        let got: Vec<(String, f64, Option<u64>)> = usage_events(text)
+            .into_iter()
+            .map(|e| match e {
+                AgentEvent::UsageUpdate { window, utilization, resets_at } => {
+                    (window.unwrap(), (utilization * 100.0).round(), resets_at)
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("gemini 5h".to_string(), 4.0, Some(1795118607)),
+                ("gemini week".to_string(), 3.0, Some(1795646416)),
+                ("claude and gpt 5h".to_string(), 0.0, Some(1795120506)),
+                ("claude and gpt week".to_string(), 0.0, Some(1795707306)),
+                ("gemini 4 argon week".to_string(), 0.0, Some(1795707306)),
+            ]
+        );
+        assert!(usage_events("").is_empty());
     }
 
     #[test]

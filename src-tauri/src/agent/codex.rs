@@ -150,6 +150,9 @@ struct State {
     stopped: bool,
     /// The running turn is a /compact.
     compacting: bool,
+    /// Codex's skills in the project, name to `SKILL.md` path: a `$name` in a
+    /// message is sent as that skill (as Codex's own screen does).
+    skills: HashMap<String, String>,
     closing: bool,
 }
 
@@ -192,13 +195,17 @@ impl AgentAdapter for CodexAdapter {
         Ok(parse_models(&rpc.call("model/list", json!({}), deadline)?))
     }
 
-    fn list_commands(&self, _binary: &Path, _folder: &Path) -> Result<Vec<CommandInfo>, String> {
-        Ok(vec![CommandInfo {
-            name: "compact".to_string(),
-            description: "Summarize the conversation to free up context".to_string(),
-            hint: None,
-            aliases: Vec::new(),
-        }])
+    /// Codex's own commands the app runs (see `Builtin`), and its skills,
+    /// picked with `$` as in Codex's own screen.
+    fn list_commands(&self, binary: &Path, folder: &Path) -> Result<Vec<CommandInfo>, String> {
+        let mut commands = builtin_commands();
+        let mut rpc = SyncRpc::start(binary)?;
+        let deadline = Instant::now() + LIST_TIMEOUT;
+        rpc.handshake(deadline)?;
+        if let Ok(reply) = rpc.call("skills/list", json!({ "cwds": [folder] }), deadline) {
+            commands.extend(skill_commands(&reply));
+        }
+        Ok(commands)
     }
 
     fn make_title(&self, binary: &Path, first_message: &str) -> Result<String, String> {
@@ -763,7 +770,7 @@ async fn drive(shared: Arc<Shared>, opts: SpawnOptions, servers: Vec<(String, St
     }
     // Usage so far; updates follow as turns run.
     if let Ok(limits) = shared.rpc.call("account/rateLimits/read", json!({})).await {
-        for event in usage_events(&limits["rateLimits"]) {
+        for event in all_usage_events(&limits) {
             shared.emit(event);
         }
     }
@@ -851,6 +858,9 @@ async fn drive(shared: Arc<Shared>, opts: SpawnOptions, servers: Vec<(String, St
         model,
         mode: Some(mode),
     });
+    if let Ok(reply) = shared.rpc.call("skills/list", json!({ "cwds": [cwd] })).await {
+        shared.state.lock().unwrap().skills = skill_paths(&reply);
+    }
 
     while let Some(first) = items.recv().await {
         let mut batch = vec![first];
@@ -900,6 +910,18 @@ async fn next_turn(shared: &Arc<Shared>, thread_id: &str) {
         input.extend(parts.iter().cloned());
     }
     let ids: Vec<String> = messages.iter().map(|(id, _)| id.clone()).collect();
+    // A built-in command alone, as Codex's own screen runs it.
+    let command = match (turn.is_none() && notes.is_empty(), messages.as_slice()) {
+        (true, [(_, parts)]) => builtin(parts),
+        _ => None,
+    };
+    if let Some(command) = command {
+        match run_builtin(shared, thread_id, &ids, command).await {
+            Some(prompt) => input = vec![text_input(&prompt)],
+            None => return,
+        }
+    }
+    add_skills(&mut input, &shared.state.lock().unwrap().skills);
 
     // Mid-turn: Codex reads it while it works. If it can't take it now, it
     // waits for the turn to end.
@@ -927,25 +949,9 @@ async fn next_turn(shared: &Arc<Shared>, thread_id: &str) {
         return;
     }
 
-    // `/compact` alone asks Codex to compact the thread.
-    let compact = notes.is_empty() && messages.len() == 1 && is_compact(&messages[0].1);
-    if compact {
-        shared.state.lock().unwrap().compacting = true;
-        seen(shared, ids);
-        working(shared);
-        if let Err(e) = shared.rpc.call("thread/compact/start", json!({ "threadId": thread_id })).await {
-            shared.state.lock().unwrap().compacting = false;
-            failed_start(shared, e);
-        }
-        return;
-    }
-
     let params = {
         let mut state = shared.state.lock().unwrap();
-        state.errored = false;
-        state.stopped = false;
-        state.plan = None;
-        state.turn_started.get_or_insert_with(Instant::now);
+        begin_turn(&mut state);
         let (approval, sandbox) = mode_policy(&state.mode, &state.writable_roots);
         let collaboration = if state.mode == "plan" { "plan" } else { "default" };
         let mut params = json!({
@@ -986,8 +992,294 @@ fn text_input(text: &str) -> Value {
     json!({ "type": "text", "text": text, "text_elements": [] })
 }
 
-fn is_compact(input: &[Value]) -> bool {
-    input.len() == 1 && input[0]["type"] == "text" && input[0]["text"].as_str().map(str::trim) == Some("/compact")
+/// A new turn the user sees: nothing from the last one carries over.
+fn begin_turn(state: &mut State) {
+    state.errored = false;
+    state.stopped = false;
+    state.plan = None;
+    state.turn_started.get_or_insert_with(Instant::now);
+}
+
+/// The skills in a `skills/list` answer that are on.
+fn enabled_skills(reply: &Value) -> impl Iterator<Item = &Value> {
+    reply["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|entry| entry["skills"].as_array().into_iter().flatten())
+        .filter(|skill| skill["enabled"] != false)
+}
+
+/// Skill name to `SKILL.md` path.
+fn skill_paths(reply: &Value) -> HashMap<String, String> {
+    enabled_skills(reply)
+        .filter_map(|skill| Some((skill["name"].as_str()?.to_string(), skill["path"].as_str()?.to_string())))
+        .collect()
+}
+
+/// The skills for the `$` menu.
+fn skill_commands(reply: &Value) -> Vec<CommandInfo> {
+    let mut seen = HashSet::new();
+    enabled_skills(reply)
+        .filter_map(|skill| {
+            let name = skill["name"].as_str()?.to_string();
+            let description = skill["interface"]["shortDescription"]
+                .as_str()
+                .or(skill["shortDescription"].as_str())
+                .or(skill["description"].as_str())
+                .unwrap_or_default()
+                .to_string();
+            seen.insert(name.clone()).then_some(CommandInfo { name, description, hint: None, aliases: Vec::new(), skill: true })
+        })
+        .collect()
+}
+
+/// Each skill a message names with `$name` goes with it as a skill input,
+/// once, as Codex's own screen sends a skill picked with `$`.
+fn add_skills(input: &mut Vec<Value>, skills: &HashMap<String, String>) {
+    let mut named: Vec<String> = Vec::new();
+    for part in input.iter().filter(|p| p["type"] == "text") {
+        let text = part["text"].as_str().unwrap_or_default();
+        for (at, _) in text.match_indices('$') {
+            // Only a `$` that starts a word.
+            if text[..at].chars().next_back().is_some_and(|c| !c.is_whitespace() && c != '(') {
+                continue;
+            }
+            let name: String = text[at + 1..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+                .collect();
+            let name = name.trim_end_matches(['.', ':']).to_string();
+            if skills.contains_key(&name) && !named.contains(&name) {
+                named.push(name);
+            }
+        }
+    }
+    for name in named {
+        let path = skills[&name].clone();
+        input.push(json!({ "type": "skill", "name": name, "path": path }));
+    }
+}
+
+/// Codex's own commands the app runs, as Codex's own screen does: its
+/// app-server takes `/` as plain text.
+#[derive(Debug, PartialEq)]
+enum Builtin {
+    /// `thread/compact/start`.
+    Compact,
+    /// `review/start`: the uncommitted changes, or what the words ask for.
+    Review(Option<String>),
+    /// `thread/goal/*`: set one (Codex starts on it at once), show it, or
+    /// `clear`, `pause`, `resume`.
+    Goal(String),
+    /// The prompt Codex's own `/init` sends: write an AGENTS.md.
+    Init,
+    /// `mcpServerStatus/list`: the MCP servers and how each is.
+    Mcp,
+}
+
+/// Codex's commands the app runs, for the `/` menu.
+fn builtin_commands() -> Vec<CommandInfo> {
+    let command = |name: &str, description: &str, hint: Option<&str>| CommandInfo {
+        name: name.to_string(),
+        description: description.to_string(),
+        hint: hint.map(str::to_owned),
+        aliases: Vec::new(),
+        skill: false,
+    };
+    vec![
+        command("compact", "Summarize the conversation to free up context", None),
+        command("review", "Review the uncommitted changes, or what you ask for", Some("[what to review]")),
+        command("goal", "Work until a goal is met; alone, show the goal", Some("[<goal>|clear|pause|resume]")),
+        command("init", "Write an AGENTS.md with instructions for Codex", None),
+        command("mcp", "List the MCP servers and their state", None),
+    ]
+}
+
+/// The built-in a message is, if it is one alone: `/name` and what follows.
+fn builtin(input: &[Value]) -> Option<Builtin> {
+    let [part] = input else { return None };
+    let text = part["text"].as_str()?.trim();
+    let rest = text.strip_prefix('/')?;
+    let (name, arg) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let arg = arg.trim().to_string();
+    Some(match name {
+        "compact" if arg.is_empty() => Builtin::Compact,
+        "review" => Builtin::Review(Some(arg).filter(|a| !a.is_empty())),
+        "goal" => Builtin::Goal(arg),
+        "init" if arg.is_empty() => Builtin::Init,
+        "mcp" if arg.is_empty() => Builtin::Mcp,
+        _ => return None,
+    })
+}
+
+/// Codex's own `/init` prompt (codex-cli 0.169.1).
+const INIT_PROMPT: &str = "Generate a file named AGENTS.md that serves as a contributor guide for this repository.
+Before writing, check whether AGENTS.md already exists in the current working directory. If it does, do not overwrite or modify it.
+Your goal is to produce a clear, concise, and well-structured document with descriptive headings and actionable explanations for each section.
+Follow the outline below, but adapt as needed: add sections if relevant, and omit those that do not apply to this project.
+
+Document Requirements
+
+- Title the document \"Repository Guidelines\".
+- Use Markdown headings (#, ##, etc.) for structure.
+- Keep the document concise. 200-400 words is optimal.
+- Keep explanations short, direct, and specific to this repository.
+- Provide examples where helpful (commands, directory paths, naming patterns).
+- Maintain a professional, instructional tone.
+
+Recommended Sections
+
+Project Structure & Module Organization
+
+- Outline the project structure, including where the source code, tests, and assets are located.
+
+Build, Test, and Development Commands
+
+- List key commands for building, testing, and running locally (e.g., npm test, make build).
+- Briefly explain what each command does.
+
+Coding Style & Naming Conventions
+
+- Specify indentation rules, language-specific style preferences, and naming patterns.
+- Include any formatting or linting tools used.
+
+Testing Guidelines
+
+- Identify testing frameworks and coverage requirements.
+- State test naming conventions and how to run tests.
+
+Commit & Pull Request Guidelines
+
+- Summarize commit message conventions found in the project’s Git history.
+- Outline pull request requirements (descriptions, linked issues, screenshots, etc.).
+
+(Optional) Add other sections if relevant, such as Security & Configuration Tips, Architecture Overview, or Agent-Specific Instructions.";
+
+/// Runs a built-in. A prompt back means it goes on as an ordinary turn with
+/// that text; None means it is handled.
+async fn run_builtin(shared: &Arc<Shared>, thread_id: &str, ids: &[String], command: Builtin) -> Option<String> {
+    let thread = json!({ "threadId": thread_id });
+    let call = |method: &'static str, params: Value| shared.rpc.call(method, params);
+    if command == Builtin::Init {
+        return Some(INIT_PROMPT.to_string());
+    }
+    seen(shared, ids.to_vec());
+    working(shared);
+    begin_turn(&mut shared.state.lock().unwrap());
+    let done = match command {
+        Builtin::Init => Ok(()),
+        Builtin::Compact => {
+            shared.state.lock().unwrap().compacting = true;
+            let result = call("thread/compact/start", thread).await;
+            if result.is_err() {
+                shared.state.lock().unwrap().compacting = false;
+            }
+            result.map(|_| ())
+        }
+        Builtin::Review(asked) => {
+            let target = match asked {
+                Some(instructions) => json!({ "type": "custom", "instructions": instructions }),
+                None => json!({ "type": "uncommittedChanges" }),
+            };
+            call("review/start", json!({ "threadId": thread_id, "target": target }))
+                .await
+                .map(|reply| started_turn(shared, &reply))
+        }
+        Builtin::Goal(arg) => {
+            let status = |status: &str| json!({ "threadId": thread_id, "status": status, "origin": "user" });
+            let (method, params) = match arg.as_str() {
+                "" => ("thread/goal/get", thread),
+                "clear" => ("thread/goal/clear", json!({ "threadId": thread_id, "origin": "user" })),
+                "pause" => ("thread/goal/set", status("paused")),
+                "resume" => ("thread/goal/set", status("active")),
+                objective => (
+                    "thread/goal/set",
+                    json!({ "threadId": thread_id, "objective": objective, "status": "active", "origin": "user" }),
+                ),
+            };
+            call(method, params).await.map(|reply| {
+                // A goal set going: Codex starts its own turn on it.
+                if !(method == "thread/goal/set" && reply["goal"]["status"] == "active") {
+                    reply_with(shared, ids, &goal_text(method, &reply["goal"]));
+                }
+            })
+        }
+        Builtin::Mcp => call("mcpServerStatus/list", json!({ "threadId": thread_id, "detail": "toolsAndAuthOnly" }))
+            .await
+            .map(|reply| reply_with(shared, ids, &mcp_text(&reply))),
+    };
+    if let Err(e) = done {
+        failed_start(shared, e);
+    }
+    None
+}
+
+/// The turn a request started, as `turn/start` gives it.
+fn started_turn(shared: &Shared, reply: &Value) {
+    if let Some(id) = reply["turn"]["id"].as_str() {
+        let mut state = shared.state.lock().unwrap();
+        if !state.done.contains(&format!("turn:{id}")) {
+            state.turn_id = Some(id.to_string());
+        }
+    }
+}
+
+/// Answers a command without the model: the words as Codex's reply, and the turn ends.
+fn reply_with(shared: &Shared, ids: &[String], text: &str) {
+    let id = ids.first().map(String::as_str).unwrap_or("command");
+    shared.emit(AgentEvent::AssistantBlock {
+        message_id: format!("{id}-reply"),
+        block: Block::Text { text: text.to_string() },
+        parent_tool_id: None,
+    });
+    finish_turn(shared, true);
+}
+
+/// What `/goal` says: the goal and how it stands, or that there is none.
+fn goal_text(method: &str, goal: &Value) -> String {
+    if method == "thread/goal/clear" {
+        return "Goal cleared.".to_string();
+    }
+    let Some(objective) = goal["objective"].as_str() else {
+        return "No goal set. `/goal <goal>` sets one, and Codex works until it is met.".to_string();
+    };
+    let status = match goal["status"].as_str().unwrap_or_default() {
+        "active" => "working on it",
+        "usageLimited" => "stopped at the usage limit",
+        "budgetLimited" => "stopped at its token budget",
+        "complete" => "met",
+        other => other,
+    };
+    format!("Goal ({status}): {objective}")
+}
+
+/// What `/mcp` says: each server and its state.
+fn mcp_text(reply: &Value) -> String {
+    let servers: Vec<String> = reply["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|server| {
+            let name = server["name"].as_str()?;
+            let state = match server["runtimeStatus"].as_str() {
+                Some("authenticationRequired") => "needs sign-in",
+                Some("disabled") => "off",
+                Some("notStarted") | None => "not started",
+                Some(other) => other,
+            };
+            Some(match server["tools"].as_object().map_or(0, |t| t.len()) {
+                0 => format!("- **{name}**: {state}"),
+                1 => format!("- **{name}**: {state}, 1 tool"),
+                n => format!("- **{name}**: {state}, {n} tools"),
+            })
+        })
+        .collect();
+    if servers.is_empty() {
+        "No MCP servers.".to_string()
+    } else {
+        format!("MCP servers:\n\n{}", servers.join("\n"))
+    }
 }
 
 fn seen(shared: &Shared, ids: Vec<String>) {
@@ -1396,16 +1688,37 @@ fn item_results(item: &Value) -> Vec<(String, String, bool)> {
     }
 }
 
-/// Codex's rate-limit windows as the app's usage readings, named for how
-/// long each one runs ("5h", "week", "month").
+/// Every limit bucket in an `account/rateLimits/read` answer:
+/// `rateLimitsByLimitId` (one per metered limit, e.g. `codex`), or the older
+/// single `rateLimits` when that is missing.
+fn all_usage_events(reply: &Value) -> Vec<AgentEvent> {
+    match reply["rateLimitsByLimitId"].as_object().filter(|b| !b.is_empty()) {
+        Some(buckets) => buckets.values().flat_map(usage_events).collect(),
+        None => usage_events(&reply["rateLimits"]),
+    }
+}
+
+/// One limit bucket's windows as the app's usage readings, named for how
+/// long each one runs ("5h", "week", "month"). A bucket other than the main
+/// `codex` one (a model's own, on some plans) puts its name first
+/// ("gpt-5.5 week"), so an update to one never overwrites another. Updates
+/// are sparse: a window that is missing keeps its last reading.
 fn usage_events(limits: &Value) -> Vec<AgentEvent> {
+    let bucket = match limits["limitId"].as_str() {
+        None | Some("codex") => None,
+        Some(id) => Some(limits["limitName"].as_str().filter(|n| !n.is_empty()).unwrap_or(id)),
+    };
     ["primary", "secondary"]
         .iter()
         .filter_map(|key| {
             let window = &limits[key];
             let used = window["usedPercent"].as_f64()?;
+            let length = window_name(window["windowDurationMins"].as_u64());
             Some(AgentEvent::UsageUpdate {
-                window: Some(window_name(window["windowDurationMins"].as_u64())),
+                window: Some(match bucket {
+                    Some(name) => format!("{name} {length}"),
+                    None => length,
+                }),
                 utilization: (used / 100.0).clamp(0.0, 1.0),
                 resets_at: window["resetsAt"].as_u64(),
             })
@@ -1647,6 +1960,9 @@ fn notification(shared: &Shared, method: &str, params: &Value) -> Vec<AgentEvent
             if let Some(id) = params["turn"]["id"].as_str() {
                 state.turn_id = Some(id.to_string());
             }
+            // Also a turn Codex starts itself, as for a goal.
+            state.turn_started.get_or_insert_with(Instant::now);
+            out.push(AgentEvent::Status { state: SessionState::Working });
         }
         "turn/completed" => {
             let turn = &params["turn"];
@@ -2152,6 +2468,7 @@ mod tests {
         let mut r = rig();
         r.shared.state.lock().unwrap().mode = "plan".into();
         r.feed(note("turn/started", json!({ "threadId": "t1", "turn": { "id": "u1" } })));
+        assert_eq!(r.events(), vec![AgentEvent::Status { state: SessionState::Working }]);
         r.feed(note("item/completed", json!({ "threadId": "t1", "item": { "type": "plan", "id": "u1-plan", "text": "# Add hello.py\n\nSteps" } })));
         r.feed(note("turn/completed", json!({ "threadId": "t1", "turn": { "id": "u1", "status": "completed" } })));
         let events = r.events();
@@ -2332,6 +2649,27 @@ mod tests {
     }
 
     #[test]
+    fn every_limit_bucket_is_read_and_kept_apart() {
+        let reply = json!({
+            "rateLimits": { "limitId": "codex", "primary": { "usedPercent": 9, "windowDurationMins": 43200, "resetsAt": 1 } },
+            "rateLimitsByLimitId": {
+                "codex": { "limitId": "codex", "primary": { "usedPercent": 9, "windowDurationMins": 43200, "resetsAt": 1 }, "secondary": null },
+                "codex_spark": { "limitId": "codex_spark", "limitName": "Spark", "primary": { "usedPercent": 50, "windowDurationMins": 300, "resetsAt": 2 } },
+            },
+        });
+        assert_eq!(
+            all_usage_events(&reply),
+            vec![
+                AgentEvent::UsageUpdate { window: Some("month".into()), utilization: 0.09, resets_at: Some(1) },
+                AgentEvent::UsageUpdate { window: Some("Spark 5h".into()), utilization: 0.5, resets_at: Some(2) },
+            ]
+        );
+        // An older answer has only the single bucket.
+        let old = json!({ "rateLimits": { "primary": { "usedPercent": 9, "windowDurationMins": 300, "resetsAt": 1 } } });
+        assert_eq!(all_usage_events(&old), vec![AgentEvent::UsageUpdate { window: Some("5h".into()), utilization: 0.09, resets_at: Some(1) }]);
+    }
+
+    #[test]
     fn a_to_do_list_reads_like_claude_codes() {
         let r = rig();
         r.feed(note("turn/plan/updated", json!({ "threadId": "t1", "turnId": "u1", "plan": [
@@ -2379,7 +2717,55 @@ mod tests {
         assert_eq!(mode_policy("full-access", &roots), ("never", json!({ "type": "dangerFullAccess" })));
         let config = thread_config(&[("harness_chats".into(), "http://x/mcp".into())], &roots, false);
         assert_eq!(config["mcp_servers.harness_chats.default_tools_approval_mode"], "approve");
-        assert!(is_compact(&[text_input(" /compact ")]));
+    }
+
+    #[test]
+    fn built_in_commands_are_known_by_name() {
+        assert_eq!(builtin(&[text_input(" /compact ")]), Some(Builtin::Compact));
+        assert_eq!(builtin(&[text_input("/review")]), Some(Builtin::Review(None)));
+        assert_eq!(builtin(&[text_input("/review the auth change")]), Some(Builtin::Review(Some("the auth change".into()))));
+        assert_eq!(builtin(&[text_input("/goal ship it")]), Some(Builtin::Goal("ship it".into())));
+        assert_eq!(builtin(&[text_input("/init")]), Some(Builtin::Init));
+        assert_eq!(builtin(&[text_input("/mcp")]), Some(Builtin::Mcp));
+        // Not one of them, more than the command, or with a picture: an ordinary message.
+        assert_eq!(builtin(&[text_input("/status")]), None);
+        assert_eq!(builtin(&[text_input("/compact now")]), None);
+        assert_eq!(builtin(&[text_input("review /compact")]), None);
+        assert_eq!(builtin(&[json!({ "type": "image", "url": "x" }), text_input("/compact")]), None);
+    }
+
+    #[test]
+    fn a_named_skill_goes_with_the_message() {
+        let reply = json!({ "data": [{ "cwd": "/p", "skills": [
+            { "name": "imagegen", "description": "Make images", "path": "/s/imagegen/SKILL.md", "enabled": true },
+            { "name": "pdf:pdf", "description": "PDFs", "interface": { "shortDescription": "Read PDFs" }, "path": "/s/pdf/SKILL.md", "enabled": true },
+            { "name": "off", "description": "Off", "path": "/s/off/SKILL.md", "enabled": false },
+        ]}]});
+        let menu = skill_commands(&reply);
+        assert_eq!(menu.iter().map(|c| (c.name.as_str(), c.description.as_str(), c.skill)).collect::<Vec<_>>(), [
+            ("imagegen", "Make images", true),
+            ("pdf:pdf", "Read PDFs", true),
+        ]);
+        let skills = skill_paths(&reply);
+        let mut input = vec![text_input("Use $imagegen, then $pdf:pdf. Not a$imagegen, $off or $1. Again $imagegen")];
+        add_skills(&mut input, &skills);
+        assert_eq!(&input[1..], [
+            json!({ "type": "skill", "name": "imagegen", "path": "/s/imagegen/SKILL.md" }),
+            json!({ "type": "skill", "name": "pdf:pdf", "path": "/s/pdf/SKILL.md" }),
+        ]);
+    }
+
+    #[test]
+    fn goal_and_mcp_answers_read_plainly() {
+        assert_eq!(goal_text("thread/goal/get", &Value::Null), "No goal set. `/goal <goal>` sets one, and Codex works until it is met.");
+        assert_eq!(goal_text("thread/goal/set", &json!({ "objective": "Ship", "status": "paused" })), "Goal (paused): Ship");
+        assert_eq!(goal_text("thread/goal/clear", &Value::Null), "Goal cleared.");
+        let reply = json!({ "data": [
+            { "name": "harness_chats", "runtimeStatus": "connected", "tools": { "a": {}, "b": {} } },
+            { "name": "linear", "runtimeStatus": "authenticationRequired" },
+        ]});
+        assert_eq!(mcp_text(&reply), "MCP servers:\n\n- **harness_chats**: connected, 2 tools\n- **linear**: needs sign-in");
+        assert_eq!(mcp_text(&json!({ "data": [] })), "No MCP servers.");
     }
 
     #[test]
