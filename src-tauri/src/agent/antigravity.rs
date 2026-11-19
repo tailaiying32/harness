@@ -22,6 +22,15 @@ const COMMANDS_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long signing in may wait for the user in the browser.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How a plan reaches the app's approve card: Antigravity's own plan
+/// artifact, marked for feedback, in any mode (it can't enter plan mode
+/// itself). Asked for a plan, it sometimes wrote one and sometimes put it in
+/// the chat (tested on agy 1.5.12).
+const PLAN_INSTRUCTION: &str = "When you present a plan for the user to approve before building, \
+write it as your implementation plan artifact with RequestFeedback set, then end your turn. Don't \
+write the plan only in the chat: the app shows that artifact with approve buttons and tells you when \
+to build.";
+
 /// How Antigravity's ACP differs: its own tool names and capitalized inputs,
 /// a system prompt the app can add to, and plans written as files.
 pub static DIALECT: Dialect = Dialect {
@@ -30,6 +39,7 @@ pub static DIALECT: Dialect = Dialect {
     is_plan,
     clean_output,
     build_mode: "default",
+    plan_instruction: PLAN_INSTRUCTION,
     intro: Intro::SystemPrompt,
     session_meta,
     pick_default_model: false,

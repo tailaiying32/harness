@@ -1383,10 +1383,13 @@ export class Chat {
           const live = this.items.find(
             (i): i is TextItem => i.type === "text" && i.streaming && i.messageId === event.message_id,
           );
-          if (live) {
+          if (live && !block.text.trim()) {
+            // Nothing left to show (Codex's plan block was cut out for the card).
+            this.items.splice(this.items.indexOf(live), 1);
+          } else if (live) {
             live.text = block.text;
             live.streaming = false;
-          } else {
+          } else if (block.text.trim()) {
             this.push({ type: "text", messageId: event.message_id, text: block.text, streaming: false });
           }
         } else if (block.type === "thinking") {

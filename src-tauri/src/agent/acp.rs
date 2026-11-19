@@ -80,6 +80,9 @@ pub struct Dialect {
     pub clean_output: fn(String) -> String,
     /// The mode to switch to once a plan is approved.
     pub build_mode: &'static str,
+    /// How the agent is told to present a plan, so it reaches the app's
+    /// approve card instead of only the chat. Not for side chats.
+    pub plan_instruction: &'static str,
     pub intro: Intro,
     /// `_meta` for `session/new` and `session/load`, given the instructions
     /// (when they go in the system prompt).
@@ -660,7 +663,7 @@ async fn drive(
     let cwd = opts.project_path.to_string_lossy().into_owned();
     // Told again on every start when it goes in the system prompt, which a
     // loaded session doesn't keep.
-    let told = instructions(&opts);
+    let told = instructions(&opts, dialect.plan_instruction);
     let meta = (dialect.session_meta)(told.as_deref().filter(|_| dialect.intro == Intro::SystemPrompt));
     let with_meta = |mut params: Value| {
         if meta.as_object().is_some_and(|m| !m.is_empty()) {
@@ -809,7 +812,11 @@ async fn drive(
             let intro = intro.take();
             let build = std::mem::take(&mut shared.state.lock().unwrap().build_after_turn);
             let to = dialect.build_mode;
-            let leave_plan = build && shared.state.lock().unwrap().config.modes.iter().any(|m| m == to);
+            // Only from plan mode: a plan made in Auto is built in Auto.
+            let leave_plan = build && {
+                let state = shared.state.lock().unwrap();
+                state.mode.as_deref() == Some("plan") && state.config.modes.iter().any(|m| m == to)
+            };
             if leave_plan
                 && shared
                     .rpc
@@ -947,12 +954,14 @@ fn sign_in_needed(shared: &Shared, e: RpcError) {
 /// What a new conversation is told: the app's tools, the chat's notes, the
 /// project's memory and the user's preferences. Where it goes is the
 /// dialect's `intro`.
-fn instructions(opts: &SpawnOptions) -> Option<String> {
+fn instructions(opts: &SpawnOptions, plan: &str) -> Option<String> {
     let side = opts.side.is_some();
     let mut lines: Vec<String> = Vec::new();
     // A side chat reads and answers: told so, and given no way to write notes or memory.
     if side {
         lines.push(super::SIDE_INSTRUCTION.to_string());
+    } else {
+        lines.push(plan.to_string());
     }
     lines.extend(opts.tools.iter().map(|t| t.instruction.to_string()));
     if let Some(notes) = &opts.notes {
@@ -1440,6 +1449,12 @@ fn update(state: &mut State, d: &Dialect, own: &[String], u: &Value) -> Vec<Agen
             let Some(tool_id) = u["toolCallId"].as_str() else {
                 return out;
             };
+            // A plan the agent went on past (outside plan mode, it may build
+            // in the same turn) is no longer waiting for the user.
+            let planning = state.mode.as_deref() == Some("plan");
+            if kind == "tool_call" && !planning && state.written_plan.as_ref().is_some_and(|(id, ..)| id != tool_id) {
+                state.written_plan = None;
+            }
             let served = state.served.clone();
             let tool = state.tools.entry(tool_id.to_string()).or_default();
             if let Some(title) = u["title"].as_str() {
@@ -1460,10 +1475,20 @@ fn update(state: &mut State, d: &Dialect, own: &[String], u: &Value) -> Vec<Agen
                 None => {}
             }
             let finished = matches!(status, "completed" | "failed");
-            // A plan written as a file, offered for approval once the turn
-            // ends. Only in plan mode: other files the agent writes there
-            // for itself (a task list) are not plans.
-            if finished && status == "completed" && state.mode.as_deref() == Some("plan") && (d.is_plan)(tool) {
+            // The agent switched its own mode (Cursor's SwitchMode, which
+            // sends no `current_mode_update`).
+            if status == "completed" {
+                if let Some(to) = tool.raw_input["targetModeId"].as_str().filter(|m| state.config.modes.iter().any(|x| x == m)) {
+                    if state.mode.as_deref() != Some(to) {
+                        state.mode = Some(to.to_string());
+                        out.push(AgentEvent::ModeChanged { mode: to.to_string() });
+                    }
+                }
+            }
+            // A plan written as a file and marked for the user's feedback,
+            // offered for approval once the turn ends, in any mode: an agent
+            // that can't enter plan mode itself (Antigravity) still marks it.
+            if finished && status == "completed" && (d.is_plan)(tool) {
                 let (_, input) = (d.name_tool)(tool, own);
                 let plan = input["plan"].as_str().unwrap_or_default().to_string();
                 let path = input["planFilePath"].as_str().unwrap_or_default().to_string();
@@ -1892,7 +1917,7 @@ mod tests {
             preferences: None,
             env: Vec::new(),
         };
-        let told = instructions(&opts).unwrap();
+        let told = instructions(&opts, "").unwrap();
         assert!(told.contains("That folder, /data/notes/chat-1, is this chat's own"));
         assert!(told.contains("\"put it in the docs\" means write it here"));
         assert!(told.contains("write it into the project's docs folder, /home/projects/-work/docs,"));
@@ -1920,7 +1945,7 @@ mod tests {
             preferences: None,
             env: Vec::new(),
         };
-        let told = instructions(&opts(Some(dir.clone()))).unwrap();
+        let told = instructions(&opts(Some(dir.clone())), "").unwrap();
         assert!(told.contains(&format!("This project has a shared memory in {}", dir.display())));
         assert!(told.contains("frontmatter (`name`, `description`, and `metadata.type`"));
         // The index as it is now, cut where Claude Code cuts its own.
@@ -1930,13 +1955,13 @@ mod tests {
         let mut with_preferences = opts(None);
         with_preferences.preferences =
             Some(crate::home::Preferences { path: "/home/preferences.md".into(), text: "- Be brief.".into() });
-        let told = instructions(&with_preferences).unwrap();
+        let told = instructions(&with_preferences, "").unwrap();
         assert!(told.contains("standing instructions, kept in /home/preferences.md") && told.ends_with("- Be brief."));
 
         // No index yet: said so. No memory folder: nothing about memory.
         std::fs::remove_file(dir.join("MEMORY.md")).unwrap();
-        assert!(instructions(&opts(Some(dir.clone()))).unwrap().ends_with("The index now:\n(empty)"));
-        assert!(instructions(&opts(None)).is_none());
+        assert!(instructions(&opts(Some(dir.clone())), "").unwrap().ends_with("The index now:\n(empty)"));
+        assert!(instructions(&opts(None), "").is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2045,20 +2070,46 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_switching_its_own_mode_switches_the_chat() {
+        // Cursor's SwitchMode, as Cursor CLI 2026.11.19 sends it: no `current_mode_update` follows.
+        let ((shared, _rx, seen), _items) = rig_for(&crate::agent::cursor::DIALECT);
+        {
+            let mut state = shared.state.lock().unwrap();
+            state.config.modes = vec!["agent".into(), "plan".into(), "ask".into()];
+            state.mode = Some("agent".into());
+        }
+        upd(&shared, r#"{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Switch Mode: unknown","kind":"switch_mode","status":"pending","rawInput":{}}"#);
+        upd(&shared, r#"{"sessionUpdate":"tool_call_update","toolCallId":"t1","title":"Switch Mode: plan","rawInput":{"targetModeId":"plan","explanation":"Plan first."}}"#);
+        assert_eq!(shared.state.lock().unwrap().mode.as_deref(), Some("agent"), "not until it's done");
+        take(&seen);
+        upd(&shared, r#"{"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed"}"#);
+        assert_eq!(shared.state.lock().unwrap().mode.as_deref(), Some("plan"));
+        assert!(take(&seen).iter().any(|e| matches!(e, AgentEvent::ModeChanged { mode } if mode == "plan")));
+
+        // A mode the session doesn't have is ignored.
+        upd(&shared, r#"{"sessionUpdate":"tool_call","toolCallId":"t2","status":"completed","rawInput":{"targetModeId":"debug"}}"#);
+        assert_eq!(shared.state.lock().unwrap().mode.as_deref(), Some("plan"));
+    }
+
+    #[test]
     fn a_plan_written_as_a_file_is_offered_once_the_turn_ends() {
         let ((shared, mut rx, seen), mut items) = rig_for(&crate::agent::antigravity::DIALECT);
         let plan = r##"{"sessionUpdate":"tool_call","toolCallId":"call_5","name":"write_file","status":"in_progress","kind":"edit","title":"File plan.md","rawInput":{"ArtifactMetadata":{"RequestFeedback":true},"Content":"# Plan","Path":"/brain/s/plan.md"}}"##;
         let done = plan.replace("in_progress", "completed");
-        // Outside plan mode it is only a file.
+        // Outside plan mode it is a plan too, until the agent goes on past it.
         upd(&shared, plan);
         upd(&shared, &done);
-        assert!(shared.state.lock().unwrap().written_plan.is_none());
+        assert!(shared.state.lock().unwrap().written_plan.as_ref().is_some_and(|(id, ..)| id == "call_5"));
         let events = take(&seen);
         assert!(matches!(&events[0], AgentEvent::AssistantBlock { block: Block::ToolCall { name, .. }, .. } if name == "ExitPlanMode"));
+        upd(&shared, r#"{"sessionUpdate":"tool_call","toolCallId":"call_9","name":"run_command","status":"in_progress","kind":"execute","title":"ls","rawInput":{"CommandLine":"ls"}}"#);
+        assert!(shared.state.lock().unwrap().written_plan.is_none(), "built on: no card");
 
+        // In plan mode a file written after the plan doesn't drop it.
         upd(&shared, r#"{"sessionUpdate":"current_mode_update","currentModeId":"plan"}"#);
         upd(&shared, &plan.replace("call_5", "call_6"));
         upd(&shared, &done.replace("call_5", "call_6"));
+        upd(&shared, r#"{"sessionUpdate":"tool_call","toolCallId":"call_8","name":"write_file","status":"in_progress","kind":"edit","title":"File task.md","rawInput":{"Content":"- [ ] one","Path":"/brain/s/task.md"}}"#);
         let (tool_id, text, path) = shared.state.lock().unwrap().written_plan.take().unwrap();
         assert_eq!((tool_id.as_str(), text.as_str(), path.as_str()), ("call_6", "# Plan", "/brain/s/plan.md"));
         take(&seen);
@@ -2474,7 +2525,7 @@ mod tests {
             preferences: None,
             env: Vec::new(),
         };
-        let told = instructions(&opts).unwrap();
+        let told = instructions(&opts, "").unwrap();
         assert!(told.contains(crate::agent::SIDE_INSTRUCTION));
         assert_eq!(told, told.replace(&crate::agent::notes_instruction(&dir.join("notes.md"), None, true), ""));
         assert!(told.contains(&crate::agent::notes_instruction(&dir.join("notes.md"), None, false)));
