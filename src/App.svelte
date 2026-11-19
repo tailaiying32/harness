@@ -16,9 +16,9 @@
   import {
     type ModelInfo,
     type AgentId,
+    AGENTS,
     CLAUDE,
-    CODEX,
-    CURSOR,
+    inOrder,
     autotest,
     autotestReport,
     autotestWait,
@@ -193,9 +193,8 @@
   let cursorPick = $state<CursorPick | null>(loadCursorPick());
   const cursorShown = $derived(cursorPick?.shown ?? ["default"]);
   const menuModels = $derived<AgentModels>({
-    "claude-code": models["claude-code"],
+    ...models,
     cursor: models.cursor.filter((m) => cursorShown.includes(m.value)),
-    codex: models.codex,
   });
 
   onMount(async () => {
@@ -208,7 +207,7 @@
     // A first chat starts where the last one was, or at home.
     app.current.projectPath = app.projects[0]?.path ?? app.home;
     setup = await checkSetup();
-    app.agents = setup.agents;
+    app.agents = inOrder(setup.agents);
     // A saved pick of an agent that isn't installed falls back to Claude Code.
     if (!setup.agents.includes(app.defaultAgent) && setup.agents.length) {
       app.defaultAgent = setup.agents[0];
@@ -232,9 +231,9 @@
     }
   }
 
-  /** A self-test model name: "cursor:<model>", "codex:<model>", "claude:<model>" or a plain Claude one. */
+  /** A self-test model name: "<agent>:<model>" ("cursor:", "codex:", "antigravity:", "claude:") or a plain Claude one. */
   function testModel(name: string): [AgentId, string] {
-    for (const agent of [CURSOR, CODEX] as AgentId[]) {
+    for (const agent of AGENTS.filter((a) => a !== CLAUDE)) {
       if (name.startsWith(`${agent}:`)) return [agent, name.slice(agent.length + 1)];
     }
     return [CLAUDE, name.replace(/^claude:/, "")];
@@ -309,7 +308,8 @@
       applySize(size);
     }
     // "cursor:<model>" picks one of Cursor's models, "codex:<model>" one of
-    // Codex's; any other name is Claude Code's. Marked as picked, so the
+    // Codex's, "antigravity:<model>" one of Antigravity's; any other name is
+    // Claude Code's. Marked as picked, so the
     // project's last pick doesn't replace it.
     if (test.model) {
       const [agent, model] = testModel(test.model);
@@ -347,7 +347,7 @@
 
     for (const message of test.messages) {
       // Lines starting with `@` steer the test instead of being sent:
-      //   @model <name> (cursor:<name> for Cursor's, codex:<name> for Codex's, claude:<name> to switch back), @mode <mode>
+      //   @model <name> (cursor:<name> for Cursor's, codex:<name> for Codex's, antigravity:<name> for Antigravity's, claude:<name> to switch back), @mode <mode>
       //   @answer <allow|always_allow|deny|none>  how approvals are answered from here on
       //   @worktree <worktree|here|none>  how the worktree card is answered
       //   @newchats <start|no|none>  how the new-chats card is answered
@@ -409,7 +409,7 @@
         current.addTestChatComment(quote, text);
       }
       if (directive === "sendchat") await current.sendWithComments(value);
-      if (directive === "model" && /^(cursor|codex|claude):/.test(value)) {
+      if (directive === "model" && /^(cursor|codex|antigravity|claude):/.test(value)) {
         const [agent, model] = testModel(value);
         current.setAgent(agent, loadPrefs().mode);
         await current.changeModel(model);
@@ -642,7 +642,7 @@
     <!-- Each chat gets its own view, so scroll position and open folds don't leak between chats. -->
     {#key chat.sessionId}
       <ChatView {chat} problem={setup?.problem ?? null} />
-      <Composer {chat} chats={otherChats} ready={!!setup?.agents.length} agents={setup?.agents ?? []} home={app.home} models={menuModels} allModels={models} focus={app.focusBox} drops={!showSettings && !chat.viewing} onModel={(agent, model) => app.rememberModel(chat, agent, model)} />
+      <Composer {chat} chats={otherChats} ready={!!setup?.agents.length} agents={app.agents} home={app.home} models={menuModels} allModels={models} focus={app.focusBox} drops={!showSettings && !chat.viewing} onModel={(agent, model) => app.rememberModel(chat, agent, model)} />
     {/key}
   </main>
   {#if panelOpen}

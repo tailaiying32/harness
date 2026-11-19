@@ -4,6 +4,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
+import type { AgentId } from "./agents";
 
 export type SessionState = "starting" | "working" | "waiting_approval" | "idle" | "exited";
 
@@ -18,17 +19,13 @@ export type Decision = "allow" | "always_allow" | "deny";
 /**
  * A chat's mode, as its agent names it. Claude Code: "default",
  * "acceptEdits", "plan", "auto" (it decides by itself which actions are safe
- * to run without asking). Cursor: "agent", "plan", "ask".
+ * to run without asking). Cursor: "agent", "plan", "ask". Codex: "default",
+ * "plan", "read-only", "full-access". Antigravity: "default",
+ * "accept-edits", "plan", "auto".
  */
 export type Mode = string;
 
-/** The agents a chat can run on. Mirrors `agent::CLAUDE`, `agent::CURSOR` and `agent::CODEX`. */
-export type AgentId = "claude-code" | "cursor" | "codex";
-export const CLAUDE: AgentId = "claude-code";
-export const CURSOR: AgentId = "cursor";
-export const CODEX: AgentId = "codex";
-export const AGENTS: AgentId[] = [CLAUDE, CURSOR, CODEX];
-export const agentLabel = (agent: string) => (agent === CURSOR ? "Cursor" : agent === CODEX ? "Codex" : "Claude Code");
+export { AGENTS, AGENT_INFO, ANTIGRAVITY, CLAUDE, CODEX, CURSOR, agentLabel, inOrder, isAgent, type AgentId } from "./agents";
 
 /** A tab key from the Mac menu (or the keyboard elsewhere): Cmd+T, Cmd+W, Cmd+Shift+[ and ]. */
 export type TabAction = "new" | "close" | "prev" | "next";
@@ -148,7 +145,9 @@ export type SetupInfo = {
   cursor: string | null;
   /** Codex's program. */
   codex: string | null;
-  /** The agents found, Claude Code first. */
+  /** Antigravity's program (`agy`). */
+  antigravity: string | null;
+  /** The agents found, in `AGENTS`'s order. */
   agents: AgentId[];
   problem: string | null;
 };

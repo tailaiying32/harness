@@ -2,19 +2,33 @@
 //! driven over ACP (`agent acp`; see `acp.rs`). Tested on Cursor CLI
 //! 2026.11.13; what it sends is in PLAN.md, "Cursor over ACP".
 
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::acp::{self, AcpConfig};
+use super::acp::{self, AcpConfig, Dialect, Intro, Tool};
+use super::acp_sync::{self, SyncRpc, effort_levels, model_option};
+#[cfg(test)]
+use super::acp_sync::parse_commands;
 use super::{AgentAdapter, EventSink, RunningAgent, SpawnOptions};
 use crate::events::{CommandInfo, ModelInfo};
 
 pub struct CursorAdapter;
+
+/// How Cursor's ACP differs: its own plan request and field names, and no
+/// system prompt (the app's instructions go in the first prompt).
+pub static DIALECT: Dialect = Dialect {
+    name_tool: name_and_input,
+    own_tool,
+    is_plan: |_| false,
+    clean_output: |text| text,
+    build_mode: "agent",
+    intro: Intro::FirstPrompt,
+    session_meta: |_| Value::Null,
+    pick_default_model: true,
+    forms: false,
+};
 
 /// Asks for plain model ids with names, and each model's effort levels as
 /// options of their own, instead of one id per combination.
@@ -40,6 +54,7 @@ impl AgentAdapter for CursorAdapter {
             label: "Cursor",
             args: vec!["acp".to_string()],
             client_meta: client_meta(),
+            dialect: &DIALECT,
         };
         acp::spawn(opts.binary.clone(), config, opts, sink)
     }
@@ -54,22 +69,9 @@ impl AgentAdapter for CursorAdapter {
     fn list_models(&self, binary: &Path, efforts_for: Option<&[String]>) -> Result<Vec<ModelInfo>, String> {
         let folder = std::env::temp_dir().join("harness-cursor-models");
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-        let mut rpc = SyncRpc::start(binary, &folder)?;
+        let mut rpc = SyncRpc::start(binary, &["acp"], "Cursor", &folder)?;
         let deadline = Instant::now() + LIST_TIMEOUT;
-        rpc.call(
-            "initialize",
-            json!({
-                "protocolVersion": 1,
-                "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false, "_meta": client_meta() },
-                "clientInfo": { "name": "harness", "version": env!("CARGO_PKG_VERSION") },
-            }),
-            deadline,
-        )?;
-        let session = rpc.call(
-            "session/new",
-            json!({ "cwd": folder.to_string_lossy(), "mcpServers": [] }),
-            deadline,
-        )?;
+        let session = rpc.open_session(client_meta(), &folder, deadline)?;
         let session_id = session["sessionId"].as_str().ok_or("Cursor started no conversation")?.to_string();
         let model_option = model_option(&session["configOptions"]).ok_or("Cursor listed no models")?;
         let current = model_option["currentValue"].as_str().map(str::to_owned);
@@ -122,32 +124,9 @@ impl AgentAdapter for CursorAdapter {
         Ok(models)
     }
 
-    /// Opens a conversation in the folder (nothing is sent, so nothing is
-    /// spent); Cursor sends its commands right after, as a session update.
+    /// Cursor sends its commands right after a conversation opens.
     fn list_commands(&self, binary: &Path, folder: &Path) -> Result<Vec<CommandInfo>, String> {
-        let folder = folder.to_path_buf();
-        let mut rpc = SyncRpc::start(binary, &folder)?;
-        let deadline = Instant::now() + COMMANDS_TIMEOUT;
-        rpc.call(
-            "initialize",
-            json!({
-                "protocolVersion": 1,
-                "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false, "_meta": client_meta() },
-                "clientInfo": { "name": "harness", "version": env!("CARGO_PKG_VERSION") },
-            }),
-            deadline,
-        )?;
-        rpc.call(
-            "session/new",
-            json!({ "cwd": folder.to_string_lossy(), "mcpServers": [] }),
-            deadline,
-        )?;
-        // It comes a moment after the reply; none in time means none to show.
-        let wait = deadline.min(Instant::now() + Duration::from_secs(10));
-        Ok(rpc
-            .notice(|v| v["params"]["update"]["sessionUpdate"] == "available_commands_update", wait)
-            .map(|v| parse_commands(&v["params"]["update"]))
-            .unwrap_or_default())
+        acp_sync::list_commands(binary, &["acp"], "Cursor", client_meta(), folder, COMMANDS_TIMEOUT)
     }
 
     /// Cursor names each conversation itself (`session_info_update`), which
@@ -157,180 +136,63 @@ impl AgentAdapter for CursorAdapter {
     }
 
     fn sign_in(&self, binary: &Path) -> Result<(), String> {
-        use std::io::Read;
-        let mut cmd = Command::new(binary);
-        cmd.arg("login")
-            .current_dir(std::env::temp_dir())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
-        let mut child = cmd.spawn().map_err(|e| format!("Could not start Cursor: {e}"))?;
-        let mut stderr = child.stderr.take().ok_or("Cursor has no stderr")?;
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = stderr.read_to_string(&mut text);
-            let _ = tx.send(text);
-        });
-        let Ok(detail) = rx.recv_timeout(SIGN_IN_TIMEOUT) else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("Sign-in took too long".to_string());
-        };
-        let status = child.wait().map_err(|e| e.to_string())?;
-        if status.success() {
-            Ok(())
-        } else {
-            let detail = detail.trim();
-            Err(if detail.is_empty() { "Sign-in failed".to_string() } else { detail.to_string() })
-        }
+        acp_sync::sign_in(binary, &["login"], "Cursor", SIGN_IN_TIMEOUT)
     }
 
     fn forget_session(&self, _agent_session_id: &str) {}
 }
 
-/// The `model` entry of a `configOptions` list.
-fn model_option(options: &Value) -> Option<&Value> {
-    options.as_array()?.iter().find(|o| o["category"] == "model")
+/// Whether a tool call is one of the app's own tools.
+fn own_tool(tool: &Tool, own: &[String]) -> bool {
+    let provider = tool.raw_input["providerIdentifier"].as_str();
+    own.iter()
+        .any(|server| provider == Some(server.as_str()) || tool.title.starts_with(&format!("{server}-")))
 }
 
-/// The current model's effort levels and its default, from a `configOptions`
-/// list: the option in the `thought_level` category (named `effort`,
-/// `reasoning_effort` or `reasoning`, depending on the model).
-fn effort_levels(options: &Value) -> Option<(Vec<String>, Option<String>)> {
-    let option = options.as_array()?.iter().find(|o| o["category"] == "thought_level")?;
-    let levels: Vec<String> = option["options"]
-        .as_array()?
-        .iter()
-        .filter_map(|o| o["value"].as_str().map(str::to_owned))
-        .collect();
-    (!levels.is_empty()).then(|| (levels, option["currentValue"].as_str().map(str::to_owned)))
-}
-
-/// The commands in an `available_commands_update`: `name`, `description`,
-/// and maybe `input.hint`.
-fn parse_commands(update: &Value) -> Vec<CommandInfo> {
-    update["availableCommands"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|c| {
-            let name = c["name"].as_str().filter(|n| !n.is_empty())?.to_string();
-            Some(CommandInfo {
-                name,
-                description: c["description"].as_str().unwrap_or_default().to_string(),
-                hint: c["input"]["hint"].as_str().filter(|h| !h.trim().is_empty()).map(str::to_owned),
-                aliases: Vec::new(),
-            })
-        })
-        .collect()
-}
-
-/// A blocking JSON-RPC client for short jobs (listing models and commands).
-struct SyncRpc {
-    child: Child,
-    stdin: ChildStdin,
-    lines: mpsc::Receiver<String>,
-    next: u64,
-    /// Notifications that came while waiting for a reply, oldest first.
-    notices: Vec<Value>,
-}
-
-impl SyncRpc {
-    fn start(binary: &Path, folder: &PathBuf) -> Result<Self, String> {
-        let mut cmd = Command::new(binary);
-        cmd.arg("acp")
-            .current_dir(folder)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
-        let mut child = cmd.spawn().map_err(|e| format!("Could not start Cursor: {e}"))?;
-        let stdin = child.stdin.take().ok_or("Cursor has no stdin")?;
-        let stdout = child.stdout.take().ok_or("Cursor has no stdout")?;
-        let (tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        Ok(Self { child, stdin, lines, next: 1, notices: Vec::new() })
+/// The app's name for a tool call and its input, in the shape the window
+/// words Claude Code's tools in (`tools.ts`): "Bash" with `command`, "Read"
+/// with `file_path`, and so on. Cursor's raw inputs were read live.
+pub(crate) fn name_and_input(tool: &Tool, _own: &[String]) -> (String, Value) {
+    let raw = &tool.raw_input;
+    let path = raw["path"].as_str().unwrap_or_default();
+    let named = |name: &str, input: Value| (name.to_string(), input);
+    if let Some(provider) = raw["providerIdentifier"].as_str() {
+        let tool_name = raw["toolName"].as_str().unwrap_or_default();
+        return named(&format!("mcp__{provider}__{tool_name}"), raw["args"].clone());
     }
-
-    fn call(&mut self, method: &str, params: Value, deadline: Instant) -> Result<Value, String> {
-        let id = self.next;
-        self.next += 1;
-        let line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string();
-        writeln!(self.stdin, "{line}").map_err(|e| e.to_string())?;
-        self.stdin.flush().map_err(|e| e.to_string())?;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            let line = self.lines.recv_timeout(left).map_err(|_| "Cursor took too long".to_string())?;
-            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-            // Its own requests get a refusal; notifications are kept for `notice`.
-            if v.get("method").is_some() {
-                self.take_message(v);
-                continue;
-            }
-            if v["id"].as_u64() != Some(id) {
-                continue;
-            }
-            if let Some(error) = v.get("error") {
-                let message = error["data"]["message"].as_str().or(error["message"].as_str()).unwrap_or("error");
-                return Err(message.to_string());
-            }
-            return Ok(v["result"].clone());
+    match raw["_toolName"].as_str() {
+        Some("createPlan") => return named("ExitPlanMode", json!({ "plan": raw["plan"] })),
+        Some("todoWrite") | Some("updateTodos") => return named("TodoWrite", raw.clone()),
+        // A subagent, worded and followed like Claude Code's.
+        Some("task") => {
+            return named(
+                "Agent",
+                json!({ "description": raw["description"], "prompt": raw["prompt"] }),
+            );
         }
+        _ => {}
     }
-}
-
-impl SyncRpc {
-    /// Refuses one of the agent's own requests, or keeps a notification.
-    fn take_message(&mut self, v: Value) {
-        if v.get("id").is_some() {
-            let reply = json!({ "jsonrpc": "2.0", "id": v["id"], "error": { "code": -32601, "message": "Not supported" } });
-            let _ = writeln!(self.stdin, "{reply}");
-        } else {
-            self.notices.push(v);
+    match tool.kind.as_str() {
+        "execute" => named("Bash", json!({ "command": raw["command"] })),
+        "read" => named("Read", json!({ "file_path": path })),
+        "edit" => named("Edit", json!({ "file_path": path })),
+        "delete" => named("Delete", json!({ "file_path": path })),
+        "move" => named("Move", json!({ "file_path": path })),
+        "search" if tool.title.starts_with("Find") => {
+            named("Glob", json!({ "pattern": raw["pattern"], "path": raw["path"] }))
         }
-    }
-
-    /// The first notification `wanted` accepts, whether it came already or
-    /// comes before `deadline`.
-    fn notice(&mut self, wanted: impl Fn(&Value) -> bool, deadline: Instant) -> Option<Value> {
-        if let Some(i) = self.notices.iter().position(&wanted) {
-            return Some(self.notices.remove(i));
-        }
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            let line = self.lines.recv_timeout(left).ok()?;
-            let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
-            if v.get("method").is_none() {
-                continue;
+        "search" => named("Grep", json!({ "pattern": raw["pattern"], "path": raw["path"] })),
+        "fetch" => {
+            if raw["url"].is_string() {
+                named("WebFetch", json!({ "url": raw["url"] }))
+            } else {
+                named("WebSearch", json!({ "query": raw["query"].as_str().unwrap_or(&tool.title) }))
             }
-            if v.get("id").is_none() && wanted(&v) {
-                return Some(v);
-            }
-            self.take_message(v);
         }
-    }
-}
-
-impl Drop for SyncRpc {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        _ => {
+            let title = tool.title.trim();
+            named(if title.is_empty() { "a tool" } else { title }, raw.clone())
+        }
     }
 }
 
