@@ -803,7 +803,7 @@ async fn m1_a_moved_project_is_pointed_at_and_everything_kept_for_it_follows() {
     assert!(!rig.manager.is_live("s1") && !rig.manager.is_live("s2"));
     // The worktree is linked to the repo where it is now.
     let saved = rig.store.chat_git("s1").unwrap().unwrap().worktree.unwrap();
-    assert_eq!(saved.repo_root, new.canonicalize().unwrap());
+    assert_eq!(saved.repo_root, crate::worktree::canonical(&new).unwrap());
     assert_eq!(saved.path, wt.path);
     git(&wt.path, &["status", "--short"]);
     // Its docs are under the new folder's name.

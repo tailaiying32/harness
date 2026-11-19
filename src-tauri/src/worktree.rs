@@ -139,12 +139,30 @@ fn saved_ref(chat_id: &str) -> String {
     format!("refs/harness/saved/{chat_id}")
 }
 
+/// `Path::canonicalize`, but without Windows' `\\?\` prefix. git can't take
+/// that form (it fails with "could not create leading directories"), and the
+/// paths are shown and compared as plain ones.
+pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    let full = path.canonicalize()?;
+    #[cfg(windows)]
+    {
+        let text = full.to_string_lossy();
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            return Ok(PathBuf::from(format!(r"\\{unc}")));
+        }
+        if let Some(plain) = text.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(plain));
+        }
+    }
+    Ok(full)
+}
+
 /// The repo a folder belongs to: its top folder and the folder's place inside
 /// it. None for a folder outside any repo.
 pub fn repo_of(folder: &Path) -> Option<(PathBuf, String)> {
     let top = git(folder, ["rev-parse", "--show-toplevel"]).ok()?;
-    let root = PathBuf::from(top).canonicalize().ok()?;
-    let folder = folder.canonicalize().ok()?;
+    let root = canonical(Path::new(&top)).ok()?;
+    let folder = canonical(folder).ok()?;
     let sub = folder.strip_prefix(&root).ok()?.to_string_lossy().into_owned();
     Some((root, sub))
 }
@@ -587,7 +605,7 @@ mod tests {
     impl CanonicalizeOrCreate for PathBuf {
         fn canonicalize_or_create(self) -> PathBuf {
             std::fs::create_dir_all(&self).unwrap();
-            self.canonicalize().unwrap()
+            canonical(&self).unwrap()
         }
     }
 

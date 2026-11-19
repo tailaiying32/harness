@@ -1961,7 +1961,7 @@ are there now, so use the new paths.)\n\ncarry on",
     fn scratch_repo() -> PathBuf {
         let root = std::env::temp_dir().join(format!("harness-repo-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&root).unwrap();
-        let root = root.canonicalize().unwrap();
+        let root = crate::worktree::canonical(&root).unwrap();
         let git = |args: &[&str]| {
             let ok = Command::new("git").arg("-C").arg(&root).args(args).output().unwrap().status.success();
             assert!(ok, "git {args:?}");
