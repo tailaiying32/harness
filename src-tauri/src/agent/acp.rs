@@ -82,6 +82,94 @@ pub struct Dialect {
     pub pick_default_model: bool,
     /// Offer to show question forms (ACP elicitation).
     pub forms: bool,
+    /// The agent's own commands that work only in its print mode
+    /// (`<binary> -p "/name ..."`), not over ACP, where they would go to the
+    /// model. The app runs them that way and shows what they print.
+    pub print_commands: &'static [PrintCommand],
+    /// Its `/compact` compacts the conversation (a "compacted" line follows).
+    pub compacts: bool,
+}
+
+/// One of an agent's print-mode commands (see `Dialect::print_commands`).
+pub struct PrintCommand {
+    pub name: &'static str,
+    pub aliases: &'static [&'static str],
+    pub description: &'static str,
+}
+
+impl Dialect {
+    /// The print-mode command a message is, if it is one alone.
+    fn print_command(&self, text: &str) -> bool {
+        let Some(rest) = text.trim().strip_prefix('/') else { return false };
+        let name = rest.split_whitespace().next().unwrap_or_default();
+        self.print_commands.iter().any(|c| c.name == name || c.aliases.contains(&name))
+    }
+}
+
+/// How long a print-mode command may take.
+const PRINT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Runs `<binary> -p "<text>"` in the project and returns what it printed, or
+/// why it failed.
+fn run_print(binary: &std::path::Path, folder: &std::path::Path, text: &str) -> Result<String, String> {
+    use std::io::Read;
+    let mut cmd = std::process::Command::new(binary);
+    cmd.args(["-p", text.trim()])
+        .current_dir(folder)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let (mut stdout, mut stderr) = (child.stdout.take().ok_or("no output")?, child.stderr.take().ok_or("no output")?);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut out, mut err) = (String::new(), String::new());
+        let _ = stdout.read_to_string(&mut out);
+        let _ = stderr.read_to_string(&mut err);
+        let _ = tx.send((out, err));
+    });
+    let Ok((out, err)) = rx.recv_timeout(PRINT_TIMEOUT) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("it took too long".to_string());
+    };
+    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+    match (ok, out.trim(), err.trim()) {
+        (true, out, _) => Ok(out.to_string()),
+        (false, _, err) if !err.is_empty() => Err(err.to_string()),
+        (false, out, _) => Err(if out.is_empty() { "it failed".to_string() } else { out.to_string() }),
+    }
+}
+
+/// What a print-mode command printed, for the chat. Its tab-split lines
+/// (`Gemini Models\tWeekly Limit Remaining\t97%\t...`) become a list, the
+/// first cell in bold; anything else is shown as it came.
+fn print_reply(out: &str) -> String {
+    let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return "Nothing to show.".to_string();
+    }
+    if !lines.iter().all(|l| l.contains('\t')) {
+        return format!("```\n{}\n```", out.trim_end());
+    }
+    lines
+        .iter()
+        .map(|line| {
+            let mut cells = line.split('\t').map(str::trim).filter(|c| !c.is_empty());
+            let first = cells.next().unwrap_or_default();
+            let rest: Vec<&str> = cells.collect();
+            match rest.is_empty() {
+                true => format!("- **{first}**"),
+                false => format!("- **{first}** · {}", rest.join(" · ")),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 /// What the chat's driver sends next.
 enum Item {
@@ -761,8 +849,20 @@ async fn drive(
             batch.push(item);
         }
         let closing = batch.iter().any(|i| matches!(i, Item::Close));
+        // One of the agent's print-mode commands, alone: run it that way.
+        if let [Item::User { text, images, id }] = batch.as_slice() {
+            if images.is_empty() && dialect.print_command(text) {
+                if shared.state.lock().unwrap().queued.remove(id) {
+                    run_print_command(&shared, &opts, text.clone(), id.clone()).await;
+                }
+                continue;
+            }
+        }
         let mut body: Vec<Value> = Vec::new();
         let mut seen = Vec::new();
+        // `/compact` alone, on an agent whose `/compact` compacts.
+        let compact = dialect.compacts
+            && matches!(batch.as_slice(), [Item::User { text, images, .. }] if images.is_empty() && text.trim() == "/compact");
         for item in batch {
             match item {
                 // An empty note only wakes the loop for notes saved during a turn.
@@ -873,6 +973,9 @@ async fn drive(
                 let _ = shared.items.send(Item::Note(String::new()));
             } else {
                 shared.state.lock().unwrap().notes.clear();
+                if compact && ok && !stopped {
+                    shared.emit(AgentEvent::Compacted { auto: false });
+                }
                 shared.emit(AgentEvent::TurnEnded {
                     ok,
                     duration_ms: Some(started.elapsed().as_millis() as u64),
@@ -888,6 +991,32 @@ async fn drive(
     }
     // Closing stdin makes the agent exit.
     let _ = shared.rpc.tx.send(Out::Close);
+}
+
+/// Runs a print-mode command and answers with what it printed, as a turn of
+/// its own.
+async fn run_print_command(shared: &Arc<Shared>, opts: &SpawnOptions, text: String, id: String) {
+    shared.emit(AgentEvent::MessageSeen { id: id.clone() });
+    shared.emit(AgentEvent::Status { state: SessionState::Working });
+    let started = Instant::now();
+    let (binary, folder) = (opts.binary.clone(), opts.project_path.clone());
+    let typed = text.clone();
+    let result = tokio::task::spawn_blocking(move || run_print(&binary, &folder, &typed))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    let ok = result.is_ok();
+    match result {
+        Ok(out) => shared.emit(AgentEvent::AssistantBlock {
+            message_id: format!("{id}-reply"),
+            block: Block::Text { text: print_reply(&out) },
+            parent_tool_id: None,
+        }),
+        Err(e) => shared.emit(AgentEvent::Error {
+            message: format!("{} couldn't run {}: {e}", shared.label, text.trim()),
+        }),
+    }
+    shared.emit(AgentEvent::TurnEnded { ok, duration_ms: Some(started.elapsed().as_millis() as u64) });
+    shared.emit(AgentEvent::Status { state: SessionState::Idle });
 }
 
 /// Asks the user to approve a plan the agent wrote as a file and then
@@ -1907,6 +2036,25 @@ mod tests {
             dialect,
         });
         ((shared, rx, seen), items_rx)
+    }
+
+    #[test]
+    fn print_mode_output_reads_as_a_list() {
+        let usage = "Gemini Models\tWeekly Limit Remaining\t97%\t2026-11-25T22:40:16Z\nRemaining credits\t0\n";
+        assert_eq!(
+            print_reply(usage),
+            "- **Gemini Models** · Weekly Limit Remaining · 97% · 2026-11-25T22:40:16Z\n- **Remaining credits** · 0"
+        );
+        assert_eq!(print_reply("  \n"), "Nothing to show.");
+        assert_eq!(print_reply("Version 1.5.12\n- fixes"), "```\nVersion 1.5.12\n- fixes\n```");
+        let dialect = Dialect {
+            print_commands: &[PrintCommand { name: "usage", aliases: &["quota"], description: "" }],
+            ..super::super::cursor::DIALECT
+        };
+        assert!(dialect.print_command("/usage"));
+        assert!(dialect.print_command(" /quota daily"));
+        assert!(!dialect.print_command("/usages"));
+        assert!(!dialect.print_command("what is /usage"));
     }
 
     #[test]

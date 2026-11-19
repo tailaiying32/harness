@@ -101,6 +101,7 @@ pub fn parse_commands(update: &Value) -> Vec<CommandInfo> {
                 description: c["description"].as_str().unwrap_or_default().to_string(),
                 hint: c["input"]["hint"].as_str().filter(|h| !h.trim().is_empty()).map(str::to_owned),
                 aliases: Vec::new(),
+                skill: false,
             })
         })
         .collect()

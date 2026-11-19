@@ -543,6 +543,7 @@
           trash: app.trash.map((s) => s.title),
           modelsOffered: Object.values(models).flatMap((list) => list.map((m) => m.name)),
           usage: current.usage,
+          limits: app.limits,
           panel: {
             open: current.panelOpen,
             tab: current.activeTab,
@@ -642,7 +643,7 @@
     <!-- Each chat gets its own view, so scroll position and open folds don't leak between chats. -->
     {#key chat.sessionId}
       <ChatView {chat} problem={setup?.problem ?? null} />
-      <Composer {chat} chats={otherChats} ready={!!setup?.agents.length} agents={app.agents} home={app.home} models={menuModels} allModels={models} focus={app.focusBox} drops={!showSettings && !chat.viewing} onModel={(agent, model) => app.rememberModel(chat, agent, model)} />
+      <Composer {chat} chats={otherChats} ready={!!setup?.agents.length} agents={app.agents} home={app.home} models={menuModels} allModels={models} focus={app.focusBox} drops={!showSettings && !chat.viewing} onModel={(agent, model) => app.rememberModel(chat, agent, model)} onNew={() => app.newChat()} />
     {/key}
   </main>
   {#if panelOpen}

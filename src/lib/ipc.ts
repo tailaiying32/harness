@@ -341,6 +341,8 @@ export type CommandInfo = {
   /** What it takes after the name, if the agent says. */
   hint: string | null;
   aliases: string[];
+  /** A skill picked with `$` (Codex's way), not a `/` command. */
+  skill?: boolean;
 };
 
 /** The slash commands an agent takes in a folder, as it reports them. A second or a few. */

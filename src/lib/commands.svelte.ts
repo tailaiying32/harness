@@ -4,10 +4,10 @@
 // app. The last lists are kept so the menu is full from the first `/` next
 // time; each is read again once per run.
 
-import { listCommands, listSkills, type AgentId, type CommandInfo, type SkillInfo } from "./ipc";
+import { agentLabel, listCommands, listSkills, type AgentId, type CommandInfo, type SkillInfo } from "./ipc";
 
-/** A command in the menu. `harness` marks the app's own: `/model`, `/btw`, or one of its skills. */
-export type Command = CommandInfo & { harness?: "model" | "btw" | "skill" };
+/** A command in the menu. `harness` marks the app's own: `/model`, `/btw`, `/clear`, or one of its skills. */
+export type Command = CommandInfo & { harness?: "model" | "btw" | "clear" | "skill" };
 
 /** Commands each agent lists that aren't offered. */
 const HIDDEN: Record<AgentId, Set<string>> = {
@@ -31,6 +31,93 @@ const HIDDEN: Record<AgentId, Set<string>> = {
   ]),
   codex: new Set(),
   antigravity: new Set(),
+};
+
+/**
+ * The agent's own commands that only work in its own terminal screen: over
+ * the app they would reach the model as words and spend a turn, so they are
+ * caught and the chat says so instead. A command the agent lists (a skill or
+ * custom command of that name) is never caught. Claude Code turns these
+ * down itself, for free. Each may name what to use instead.
+ */
+const SCREEN_ONLY: Record<AgentId, Record<string, string>> = {
+  "claude-code": {},
+  // Codex's own screen runs these (codex-cli 0.169.1); see `Builtin` in codex.rs for those the app runs.
+  codex: {
+    status: "Settings shows the usage limits.",
+    usage: "Settings shows the usage limits.",
+    skills: "Type $ to pick a skill.",
+    plan: "Pick Plan in the mode menu.",
+    permissions: "Pick a mode in the mode menu.",
+    approvals: "Pick a mode in the mode menu.",
+    rename: "Rename the chat in the sidebar.",
+    title: "Rename the chat in the sidebar.",
+    fast: "",
+    diff: "",
+    fork: "",
+    resume: "",
+    undo: "",
+    side: "",
+    ps: "",
+    stop: "",
+    copy: "",
+    memory: "",
+    hooks: "",
+    plugins: "",
+    apps: "",
+    agent: "",
+    recap: "",
+    theme: "",
+    statusline: "",
+    settings: "",
+    experimental: "",
+    feedback: "",
+    archive: "",
+    logout: "",
+  },
+  // Antigravity's own screen only: its print mode says so (agy 1.5.12).
+  antigravity: {
+    context: "The ring by the message box shows how full the context is.",
+    rename: "Rename the chat in the sidebar.",
+    diff: "",
+    mcp: "",
+    tasks: "",
+    rewind: "",
+    resume: "",
+    fork: "",
+    btw: "",
+    copy: "",
+    "add-dir": "",
+  },
+  // Cursor's own screen only: Cursor's ACP runs none of them (agent 2026.11.19).
+  cursor: {
+    summarize: "Cursor can't compact over ACP.",
+    compress: "Cursor can't compact over ACP.",
+    compact: "Cursor can't compact over ACP.",
+    usage: "",
+    context: "The ring by the message box shows how full the context is.",
+    ask: "Pick Ask in the mode menu.",
+    plan: "Pick Plan in the mode menu.",
+    rename: "Rename the chat in the sidebar.",
+    resume: "",
+    fork: "",
+    rewind: "",
+    mcp: "",
+    commit: "",
+    changes: "",
+    btw: "",
+    about: "",
+    "add-dir": "",
+  },
+};
+
+/** Harness's `/clear` (or `/new`): a new chat in the same folder, as Cmd+N. */
+const CLEAR: Command = {
+  name: "clear",
+  description: "Start a new chat in this folder",
+  hint: null,
+  aliases: ["new"],
+  harness: "clear",
 };
 
 const MODEL: Command = { name: "model", description: "Model and effort", hint: null, aliases: [], harness: "model" };
@@ -111,9 +198,9 @@ export function fetchCommands(agent: AgentId, folder: string): void {
     });
 }
 
-/** What the menu offers: Harness's own commands and skills, then the agent's, by name. */
+/** What the `/` menu offers: Harness's own commands and skills, then the agent's, by name. */
 export function commandsFor(agent: AgentId, folder: string): Command[] {
-  const own = agent === "claude-code" ? [MODEL, BTW] : [MODEL];
+  const own = agent === "claude-code" ? [MODEL, BTW, CLEAR] : [MODEL, CLEAR];
   const out: Command[] = [...own];
   const taken = new Set(own.map((c) => c.name));
   for (const skill of store.skills) {
@@ -123,11 +210,28 @@ export function commandsFor(agent: AgentId, folder: string): Command[] {
   }
   for (const command of store.lists[keyOf(agent, folder)] ?? []) {
     // A Harness skill of the same name is the one attached (see `Skills::expand`).
-    if (taken.has(command.name) || HIDDEN[agent].has(command.name) || command.name.startsWith("__")) continue;
+    if (command.skill || taken.has(command.name) || HIDDEN[agent].has(command.name) || command.name.startsWith("__")) continue;
     taken.add(command.name);
     out.push(command);
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** The agent's skills picked with `$` (Codex's), by name; none for the others. */
+export function skillsFor(agent: AgentId, folder: string): Command[] {
+  return (store.lists[keyOf(agent, folder)] ?? []).filter((c) => c.skill).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * What the chat says instead of sending a message that is one of the agent's
+ * screen-only commands (see `SCREEN_ONLY`), or null to send it.
+ */
+export function screenOnly(agent: AgentId, folder: string, text: string): string | null {
+  const name = text.trim().match(/^\/([^\s/]+)/)?.[1];
+  if (!name || !Object.hasOwn(SCREEN_ONLY[agent], name)) return null;
+  if (findCommand(commandsFor(agent, folder), name)) return null;
+  const instead = SCREEN_ONLY[agent][name];
+  return `/${name} only works in ${agentLabel(agent)}'s own terminal screen.${instead ? ` ${instead}` : ""}`;
 }
 
 /**
