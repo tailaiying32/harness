@@ -1073,7 +1073,7 @@ const promptFor = (tab: PreviewTab) =>
 function termInfo(project: string) {
   return termTabs
     .filter((t) => t.project === project)
-    .map((t) => ({ id: t.id, title: t.running ? t.running.split(" ")[0] : t.label, running: t.running, closed: t.closed, worktree: t.worktree }));
+    .map((t) => ({ id: t.id, title: t.running ? t.running.split(" ")[0] : t.label, running: t.running, closed: t.closed, done: false, worktree: t.worktree }));
 }
 function termSend(id: string, text: string) {
   termOutput.set(id, (termOutput.get(id) ?? "") + text);

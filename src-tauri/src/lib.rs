@@ -770,10 +770,15 @@ async fn terminal_new(
         .map_err(|e| e.to_string())?
 }
 
-/// Where a tab's output goes: everything kept so far, then what comes.
+/// Where a tab's output goes. Returns everything kept so far (raw, with its
+/// size marks); what comes next goes to `on_data`.
 #[tauri::command]
-fn terminal_attach(state: State<'_, AppState>, tab: String, on_data: Channel<InvokeResponseBody>) -> Result<(), String> {
-    state.terminals.attach(&tab, on_data)
+fn terminal_attach(
+    state: State<'_, AppState>,
+    tab: String,
+    on_data: Channel<InvokeResponseBody>,
+) -> Result<tauri::ipc::Response, String> {
+    state.terminals.attach(&tab, on_data).map(tauri::ipc::Response::new)
 }
 
 /// What the user typed in a tab. Starts a fresh shell in a closed one.
