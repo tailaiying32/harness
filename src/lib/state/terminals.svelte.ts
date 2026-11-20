@@ -17,6 +17,7 @@ import {
   type TerminalTab,
 } from "../ipc";
 import { currentTheme, LOOK_CHANGED } from "../themes";
+import type { Searcher } from "../find";
 import type { Made } from "../terminal/xterm";
 
 type Lib = typeof import("../terminal/xterm");
@@ -46,6 +47,7 @@ class Terminals {
   private made = new Map<string, Made>();
   private making = new Map<string, Promise<Made>>();
   private lib: Promise<Lib> | null = null;
+  private libMod: Lib | null = null;
   private loaded = new Set<string>();
   /** A tab an agent opened, to show once the core's list has it. */
   private revealing: Record<string, string> = {};
@@ -173,8 +175,17 @@ class Terminals {
     return !!document.activeElement?.closest(".terminal-host");
   }
 
+  /** Find (Cmd+F) in a tab's terminal buffer; null until its xterm is ready. */
+  searcher(id: string): Searcher | null {
+    const made = this.made.get(id);
+    return made && this.libMod ? this.libMod.terminalSearcher(made.term) : null;
+  }
+
   private load(): Promise<Lib> {
-    this.lib ??= import("../terminal/xterm");
+    this.lib ??= import("../terminal/xterm").then((mod) => {
+      this.libMod = mod;
+      return mod;
+    });
     return this.lib;
   }
 

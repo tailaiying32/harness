@@ -5,6 +5,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import { matchesIn, type Searcher } from "../find";
 import type { Theme } from "../themes";
 
 export type Made = { term: Terminal; fit: FitAddon; host: HTMLDivElement };
@@ -148,4 +149,102 @@ export function restyle(made: Made, theme: Theme): void {
   made.term.options.theme = xtermTheme(theme);
   if (made.term.options.fontFamily !== fontFamily) made.term.options.fontFamily = fontFamily;
   if (made.term.options.fontSize !== fontSize) made.term.options.fontSize = fontSize;
+}
+
+/**
+ * Find (Cmd+F) across a terminal's active buffer (scrollback + screen).
+ * Joins soft-wrapped lines before matching so matches across wraps are found,
+ * then maps the shown match back to exact cell columns for `term.select`.
+ */
+export function terminalSearcher(term: Terminal): Searcher {
+  type Match = { row: number; charOffset: number; charLen: number };
+  let matches: Match[] = [];
+
+  return {
+    search(query) {
+      matches = [];
+      const q = query.toLowerCase();
+      if (!q) {
+        term.clearSelection();
+        return 0;
+      }
+      const buf = term.buffer.active;
+      let y = 0;
+      while (y < buf.length) {
+        const segs: { row: number; start: number }[] = [];
+        let logical = "";
+        let row = y;
+        while (row < buf.length) {
+          const line = buf.getLine(row);
+          if (!line) break;
+          if (row > y && !line.isWrapped) break;
+          const continues = row + 1 < buf.length && !!buf.getLine(row + 1)?.isWrapped;
+          segs.push({ row, start: logical.length });
+          logical += line.translateToString(!continues);
+          row++;
+        }
+        const lower = logical.toLowerCase();
+        const same = lower.length === logical.length;
+        const needle = same ? q : query;
+        for (const pos of matchesIn(same ? lower : logical, needle)) {
+          let seg = segs[0];
+          for (let s = 1; s < segs.length && segs[s].start <= pos; s++) seg = segs[s];
+          matches.push({ row: seg.row, charOffset: pos - seg.start, charLen: needle.length });
+        }
+        y = Math.max(row, y + 1);
+      }
+      if (!matches.length) term.clearSelection();
+      return matches.length;
+    },
+    show(i) {
+      const m = matches[i];
+      if (!m) return;
+      const buf = term.buffer.active;
+      // Map UTF-16 offsets to terminal cell columns across any wrapped rows.
+      let startCol = 0;
+      let cellLen = 0;
+      let seen = 0;
+      let started = false;
+      const endChar = m.charOffset + m.charLen;
+      for (let r = m.row; r < buf.length && seen < endChar; r++) {
+        const line = buf.getLine(r);
+        if (!line || (r > m.row && !line.isWrapped)) break;
+        const cell = line.getCell(0);
+        for (let c = 0; c < line.length && seen < endChar; c++) {
+          const got = line.getCell(c, cell);
+          const width = got ? got.getWidth() : 1;
+          if (width === 0) continue;
+          const ch = got?.getChars() || " ";
+          const next = seen + ch.length;
+          if (!started && next > m.charOffset) {
+            started = true;
+            startCol = c;
+          }
+          if (started) cellLen += width;
+          seen = next;
+        }
+      }
+      term.scrollToLine(Math.max(0, m.row - Math.floor(term.rows / 2)));
+      term.select(startCol, m.row, Math.max(1, cellLen));
+    },
+    clear() {
+      matches = [];
+      term.clearSelection();
+    },
+    watch(changed) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const sub = term.onWriteParsed(() => {
+        clearTimeout(timer);
+        timer = setTimeout(changed, 200);
+      });
+      return () => {
+        clearTimeout(timer);
+        sub.dispose();
+      };
+    },
+    finish() {
+      term.focus();
+      return true;
+    },
+  };
 }

@@ -3,8 +3,10 @@
   // is remembered. Also home to things that aren't part of the work at hand,
   // like the trash.
   import BarIcon from "./BarIcon.svelte";
+  import FindBar from "./FindBar.svelte";
   import Preferences from "./Preferences.svelte";
   import { refreshSkills } from "./commands.svelte";
+  import { closeFind, domSearcher } from "./find";
   import { ANTIGRAVITY, CLAUDE, CODEX, agentLabel, importSkill, listSkills, pickFile, pickFolder, removeSkill, type AgentId, type ModelInfo, type SkillInfo } from "./ipc";
   import type { AppState, Limit } from "./state/app.svelte";
   import {
@@ -221,11 +223,20 @@
 
   /** A page within Settings, in place of the list; null for the list. */
   let page = $state<"preferences" | null>(null);
+  let shell = $state<HTMLElement>();
+  let scroller = $state<HTMLElement>();
+  let prefsView = $state<Preferences>();
 
-  /** Escape on a page goes back to the list, not out of Settings. Caught
-   *  before the app's own key handler, which closes Settings. */
+  /** Escape closes an open find box first; on a page it goes back to the list,
+   *  not out of Settings. Caught before the app's own key handler. */
   function pageKey(e: KeyboardEvent) {
-    if (e.key === "Escape" && page) {
+    if (e.key !== "Escape") return;
+    if (closeFind()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (page) {
       e.stopPropagation();
       page = null;
     }
@@ -241,7 +252,15 @@
 <svelte:window onkeydowncapture={pageKey} />
 
 <!-- It covers the title bar's strip, so its empty space moves the window. -->
-<div class="settings" data-tauri-drag-region>
+<div class="settings-shell" bind:this={shell}>
+  {#key page}
+    <FindBar
+      root={shell}
+      modal
+      searcher={() => (page === "preferences" ? (prefsView?.searcher() ?? null) : scroller ? domSearcher(scroller) : null)}
+    />
+  {/key}
+<div class="settings" bind:this={scroller} data-tauri-drag-region>
   <div class="inner">
     <div class="head">
       {#if page}
@@ -253,7 +272,7 @@
     </div>
 
     {#if page === "preferences"}
-      <Preferences />
+      <Preferences bind:this={prefsView} />
     {:else}
 
     <section>
@@ -433,14 +452,22 @@
     {/if}
   </div>
 </div>
+</div>
 
 <style>
-  .settings {
+  .settings-shell {
     position: absolute;
     inset: 0;
     /* Above the side panel's drag edge. */
     z-index: 2;
     background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    --find-right: max(var(--pad-x), calc((100% - var(--col)) / 2));
+  }
+  .settings {
+    flex: 1;
+    min-height: 0;
     /* Always on so the column doesn't jump when content grows past the fold. */
     overflow-y: scroll;
     padding: var(--pad-y) var(--pad-x);

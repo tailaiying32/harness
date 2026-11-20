@@ -5,6 +5,7 @@
   // the panel is made again for another chat. Opening the view on a project
   // with no tabs opens one; closing the last tab leaves the view.
   import { onDestroy, onMount } from "svelte";
+  import FindBar from "../FindBar.svelte";
   import { terminalPlace, terminalResize } from "../ipc";
   import type { Chat } from "../state/chat.svelte";
   import { terminals } from "../state/terminals.svelte";
@@ -13,6 +14,7 @@
 
   const project = $derived(chat.projectPath.trim());
   const tab = $derived(terminals.shown(project));
+  let view = $state<HTMLElement>();
   let slot = $state<HTMLElement>();
   /** The first look at the project's tabs is done (and a first tab opened if it had none). */
   let ready = $state(false);
@@ -105,12 +107,24 @@
   });
 </script>
 
+<div class="term-view" bind:this={view}>
 {#if problem}
   <div class="problem">{problem}</div>
 {/if}
+{#key tab?.id}
+  <FindBar root={view} searcher={() => (tab ? terminals.searcher(tab.id) : null)} />
+{/key}
 <div class="slot" bind:this={slot}></div>
+</div>
 
 <style>
+  .term-view {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
   .problem {
     padding: calc(var(--gap) * 0.5) var(--pad-x);
     border-bottom: 1px solid var(--line);

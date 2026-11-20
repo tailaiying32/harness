@@ -6,10 +6,11 @@
 // is never rewritten, so the file holds exactly what was typed. Loaded on demand (see LiveMarkdown.svelte): CodeMirror is
 // the biggest library in the window, and only notes and plans use it.
 
-import { defaultKeymap, history, historyKeymap, insertNewline } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, insertNewline, redo, undo } from "@codemirror/commands";
 import { defineLanguageFacet, forceParsing, Language, LanguageSupport, syntaxTree } from "@codemirror/language";
 import { GFM, parser as markdownParser } from "@lezer/markdown";
 import { emphasis, indent, link, newLine, outdent, pasteLink, renumbered, todo, type Edit } from "./editing";
+import { registerEditorHistory } from "../history";
 import { renderMarkdown } from "../markdown";
 import { commentsExtension } from "./commentMarks";
 import type { DocComment } from "./comments";
@@ -568,9 +569,24 @@ export function createLiveMarkdown(host: HTMLElement, options: LiveOptions): Edi
           { key: "Mod-i", run: listCommand((t, s, e) => emphasis(t, s, e, 1), false), preventDefault: true },
           { key: "Mod-k", run: listCommand(link, false), preventDefault: true },
           { key: "Backspace", run: deletePair },
+          // Explicit undo/redo bindings so Cmd+Y works on Mac and Ctrl+Shift+Z works on Windows.
+          { key: "Mod-z", run: undo, preventDefault: true },
+          { key: "Mod-y", run: redo, preventDefault: true },
+          { key: "Mod-Shift-z", run: redo, preventDefault: true },
           ...historyKeymap,
           ...defaultKeymap,
         ]),
+        ViewPlugin.fromClass(
+          class {
+            private off: () => void;
+            constructor(view: EditorView) {
+              this.off = registerEditorHistory(view.dom, (kind) => (kind === "undo" ? undo(view) : redo(view)));
+            }
+            destroy() {
+              this.off();
+            }
+          },
+        ),
         markdownSupport,
         EditorView.lineWrapping,
         placeholderText(options.placeholder ?? ""),

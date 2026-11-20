@@ -5,9 +5,9 @@
 /** What a find box searches. */
 export interface Searcher {
   /** Marks every match of `query` (any case); returns how many. */
-  search(query: string): number;
+  search(query: string): number | Promise<number>;
   /** Lights match `i` and scrolls it into view. */
-  show(i: number): void;
+  show(i: number): void | Promise<void>;
   /** Takes all the marks away. */
   clear(): void;
   /** Hears when the text changes under the box; returns a way to stop. */
@@ -20,6 +20,8 @@ export type Spot = {
   root: HTMLElement;
   /** The main chat: the pick when nothing nearer has one. */
   main?: boolean;
+  /** An overlay (Settings / Preferences): takes Cmd+F over everything underneath. */
+  modal?: boolean;
   open: () => void;
   close: () => void;
 };
@@ -57,22 +59,41 @@ export function closed(spot: Spot): void {
 /**
  * Cmd+F: opens the box nearest to where the user last was. From that place
  * outward, the first element holding a spot wins (the main chat on a tie),
- * so the message box finds in the chat above it. False if there is none.
+ * so the message box finds in the chat above it. When a modal spot (Settings
+ * or Preferences) is mounted, only modal spots participate. False if none.
  */
 export function openFind(): boolean {
   const live = [...spots].filter((s) => s.root.isConnected);
   if (!live.length) return false;
+  const modals = live.filter((s) => s.modal);
+  const pool = modals.length ? modals : live;
   const from = last?.isConnected ? last : null;
   for (let at: Node | null = from; at; at = at.parentNode) {
-    const near = live.filter((s) => at!.contains(s.root));
+    const near = pool.filter((s) => at!.contains(s.root));
     if (near.length) {
       (near.find((s) => s.main) ?? near[0]).open();
       return true;
     }
   }
-  const main = live.find((s) => s.main);
-  if (!main) return false;
-  main.open();
+  const pick = pool.find((s) => s.main) ?? (modals.length ? pool[0] : undefined);
+  if (!pick) return false;
+  pick.open();
+  return true;
+}
+
+/** Opens the find box registered on or inside `root`. False if none. */
+export function openFindIn(root: HTMLElement | null): boolean {
+  if (!root) return false;
+  const match = [...spots].find((s) => s.root.isConnected && (s.root === root || root.contains(s.root)));
+  if (!match) return false;
+  match.open();
+  return true;
+}
+
+/** Closes whichever find box is open; true if one was open. */
+export function closeFind(): boolean {
+  if (!shown) return false;
+  shown.close();
   return true;
 }
 

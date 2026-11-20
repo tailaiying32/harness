@@ -357,6 +357,10 @@ pub enum AgentEvent {
     /// arrive even while a browser page holds the keys. Sent with an empty
     /// session ID. Not saved.
     TabKey { action: String },
+    /// An edit key from the Mac menu: Cmd+Z ("undo"), Cmd+Shift+Z ("redo"),
+    /// Cmd+F ("find", or "find-browser" when a browser page held the keys).
+    /// Sent with an empty session ID. Not saved.
+    EditKey { action: String },
     /// Keep awake started, changed or ended: its mode and latest end (ms
     /// since 1970), both empty once it ended. Sent with an empty session ID.
     /// Not saved.
@@ -404,6 +408,7 @@ impl AgentEvent {
                 | AgentEvent::BrowserTabs { .. }
                 | AgentEvent::TerminalTabs { .. }
                 | AgentEvent::TabKey { .. }
+                | AgentEvent::EditKey { .. }
                 | AgentEvent::KeepAwake { .. }
                 | AgentEvent::ShowPanel { .. }
                 | AgentEvent::MessageWithdrawn { ok: false, .. }

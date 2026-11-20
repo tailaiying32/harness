@@ -4,7 +4,14 @@
   // after that get the new text.
   import { onDestroy } from "svelte";
   import LiveMarkdown from "./chat/LiveMarkdown.svelte";
+  import type { Searcher } from "./find";
   import { readPreferences, writePreferences } from "./ipc";
+
+  let editor = $state<LiveMarkdown>();
+  /** Find (Cmd+F) in the preferences editor; null until loaded. */
+  export function searcher(): Searcher | null {
+    return editor?.searcher() ?? null;
+  }
 
   /** The file's text; null until read. */
   let text = $state<string | null>(null);
@@ -51,7 +58,7 @@
 <svelte:window onfocus={() => unsaved === null && load()} />
 
 {#if text !== null}
-  <LiveMarkdown {text} onchange={typeIn} ondone={flush} placeholder="preferences" autofocus={text === ""} />
+  <LiveMarkdown bind:this={editor} {text} onchange={typeIn} ondone={flush} placeholder="preferences" autofocus={text === ""} />
 {/if}
 {#if problem}
   <div class="problem">{problem}</div>

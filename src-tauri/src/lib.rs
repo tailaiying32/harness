@@ -747,6 +747,31 @@ fn browser_current(state: State<'_, AppState>, chat_id: String) -> BrowserTabs {
     BrowserTabs { tabs, shown }
 }
 
+/// Find in the chat's active browser tab ("search", "show" or "clear").
+#[tauri::command]
+async fn browser_find(
+    state: State<'_, AppState>,
+    chat_id: String,
+    op: String,
+    query: Option<String>,
+    index: Option<usize>,
+) -> Result<usize, String> {
+    let browsers = state.browsers.clone();
+    browsers.find(&chat_id, &op, query.as_deref(), index).await
+}
+
+/// Triggers macOS native undo/redo (`undo:` / `redo:`) on the active first
+/// responder (for `<input>`, `<textarea>`, and `contenteditable` fields).
+#[tauri::command]
+fn native_edit(app: tauri::AppHandle, action: String) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.run_on_main_thread(move || browser::send_edit_action(&action));
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, action);
+}
+
 /// A project's terminal tabs, in order.
 #[tauri::command]
 fn terminal_tabs(state: State<'_, AppState>, project: String) -> Vec<TabInfo> {
@@ -1031,13 +1056,15 @@ fn app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wr
                 "Edit",
                 true,
                 &[
-                    &PredefinedMenuItem::undo(app, None)?,
-                    &PredefinedMenuItem::redo(app, None)?,
+                    &MenuItem::with_id(app, EDIT_KEYS[0].0, "Undo", true, Some("CmdOrCtrl+Z"))?,
+                    &MenuItem::with_id(app, EDIT_KEYS[1].0, "Redo", true, Some("CmdOrCtrl+Shift+Z"))?,
                     &PredefinedMenuItem::separator(app)?,
                     &PredefinedMenuItem::cut(app, None)?,
                     &PredefinedMenuItem::copy(app, None)?,
                     &PredefinedMenuItem::paste(app, None)?,
                     &PredefinedMenuItem::select_all(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &MenuItem::with_id(app, EDIT_KEYS[2].0, "Find…", true, Some("CmdOrCtrl+F"))?,
                 ],
             )?,
             &Submenu::with_items(app, "View", true, &[&PredefinedMenuItem::fullscreen(app, None)?])?,
@@ -1061,6 +1088,15 @@ const TAB_KEYS: [(&str, &str); 4] = [
     ("tab-close", "close"),
     ("tab-prev", "prev"),
     ("tab-next", "next"),
+];
+
+/// Edit menu items routed through the window so the markdown editor, plain
+/// text boxes, and embedded browser pages all get consistent undo/redo/find.
+#[cfg(target_os = "macos")]
+const EDIT_KEYS: [(&str, &str); 3] = [
+    ("edit-undo", "undo"),
+    ("edit-redo", "redo"),
+    ("edit-find", "find"),
 ];
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1095,16 +1131,38 @@ pub fn run() {
                 })
             };
             tauri::async_runtime::spawn(keep_awake.clone().run());
+            let browsers = Browsers::new(app.handle().clone(), out.clone());
             #[cfg(target_os = "macos")]
             {
                 app.set_menu(app_menu(app.handle())?)?;
                 let out = out.clone();
+                let browsers = browsers.clone();
                 app.on_menu_event(move |_, event| {
                     if let Some((_, action)) = TAB_KEYS.iter().find(|(id, _)| event.id() == *id) {
                         out(Envelope {
                             session_id: String::new(),
                             event: AgentEvent::TabKey { action: action.to_string() },
                         });
+                    } else if let Some((_, action)) = EDIT_KEYS.iter().find(|(id, _)| event.id() == *id) {
+                        let in_browser = browsers.has_focus();
+                        if *action == "find" {
+                            if in_browser {
+                                browsers.yield_focus();
+                            }
+                            out(Envelope {
+                                session_id: String::new(),
+                                event: AgentEvent::EditKey {
+                                    action: if in_browser { "find-browser" } else { "find" }.to_string(),
+                                },
+                            });
+                        } else if in_browser {
+                            browser::send_edit_action(action);
+                        } else {
+                            out(Envelope {
+                                session_id: String::new(),
+                                event: AgentEvent::EditKey { action: action.to_string() },
+                            });
+                        }
                     }
                 });
             }
@@ -1121,7 +1179,6 @@ pub fn run() {
             }
             let tab_command = home.tab_command();
             let side = SideChats::new(agents.clone(), store.clone(), out.clone(), home.clone(), &dir);
-            let browsers = Browsers::new(app.handle().clone(), out.clone());
             let terminals = Terminals::new(out.clone(), store.clone());
             let panel_out = out.clone();
             let sessions = SessionManager::new(agents.clone(), store.clone(), out, dir, home);
@@ -1361,6 +1418,8 @@ pub fn run() {
             browser_close_tab,
             browser_move,
             browser_current,
+            browser_find,
+            native_edit,
             terminal_tabs,
             terminal_new,
             terminal_attach,

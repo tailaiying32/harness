@@ -50,8 +50,9 @@
   } from "./lib/models";
   import { AppState } from "./lib/state/app.svelte";
   import { terminals } from "./lib/state/terminals.svelte";
-  import { tabKeyFrom } from "./lib/state/tabKeys";
-  import { openFind } from "./lib/find";
+  import { MAC, tabKeyFrom } from "./lib/state/tabKeys";
+  import { closeFind, openFind, openFindIn } from "./lib/find";
+  import { installHistoryKeys, runHistory } from "./lib/history";
   import type { Chat } from "./lib/state/chat.svelte";
   import {
     applyCommentButton,
@@ -141,13 +142,18 @@
   let showSettings = $state(false);
 
   // Cmd+, (Ctrl+, on Windows) opens settings, as in most apps; Escape closes
-  // them. Cmd+N starts a new chat. Cmd+F finds in the chat or a doc. Cmd+S shows or hides the sidebar (Cmd+B
-  // is bold in the text boxes). Escape also ends a full screen panel, unless
-  // it belongs to a box still being typed in (the docs editor lets go on
-  // Escape, so one press ends both).
+  // them. Cmd+N starts a new chat. Cmd+F finds in the view last clicked or
+  // typed in. Cmd+S shows or hides the sidebar (Cmd+B is bold in text boxes).
+  // Escape also closes an open find box first, or ends a full screen panel.
   function onKey(e: KeyboardEvent) {
-    // In a terminal, Ctrl keys belong to the shell (Ctrl+C, Ctrl+N, Ctrl+R...).
-    if (terminals.focused() && e.ctrlKey && !e.metaKey) return;
+    // In a terminal, Ctrl keys belong to the shell (Ctrl+C, Ctrl+N, Ctrl+R...),
+    // except Ctrl+Shift+F off Mac which opens terminal find.
+    if (terminals.focused() && e.ctrlKey && !e.metaKey) {
+      if (!MAC && e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") {
+        if (!chat.viewing && openFind()) e.preventDefault();
+      }
+      return;
+    }
     if (tabKeyFrom(app.current, e)) {
       e.preventDefault();
       return;
@@ -161,24 +167,40 @@
       showSettings = false;
       app.newChat();
     } else if (e.key.toLowerCase() === "f" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
-      // Find in the chat, side chat or doc last clicked or typed in (see find.ts).
-      if (!showSettings && !chat.viewing && openFind()) e.preventDefault();
+      // Find in the view last clicked or typed in (see find.ts).
+      if (!chat.viewing && openFind()) e.preventDefault();
     } else if (e.key.toLowerCase() === "s" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       toggleSidebar();
+    } else if (e.key === "Escape" && closeFind()) {
+      e.preventDefault();
     } else if (e.key === "Escape" && showSettings) {
       showSettings = false;
     } else if (e.key === "Escape" && wide && !chat.viewing && !(typing(e.target) && e.target === document.activeElement) && !e.defaultPrevented) {
       chat.panelWide = false;
     }
   }
+  // Mac Edit menu keys (Cmd+Z, Cmd+Shift+Z, Cmd+F) routed through the core.
+  app.onEditKey = (action) => {
+    if (action === "undo" || action === "redo") {
+      runHistory(action);
+    } else if (action === "find-browser") {
+      if (!showSettings && !chat.viewing) {
+        if (!openFindIn(document.querySelector<HTMLElement>(".browser-view"))) openFind();
+      }
+    } else if (action === "find") {
+      if (!chat.viewing) openFind();
+    }
+  };
+  $effect(() => installHistoryKeys());
   // Keys the terminal leaves to the window: the app's own Cmd shortcuts,
-  // the tab keys among them (see tabKeys.ts).
+  // the tab keys among them (see tabKeys.ts), and Ctrl+Shift+F off Mac.
   terminals.keys = (e) =>
-    e.metaKey &&
-    !e.ctrlKey &&
-    (["t", "n", ",", "w", "s"].includes(e.key.toLowerCase()) ||
-      (e.shiftKey && (e.code === "BracketLeft" || e.code === "BracketRight")));
+    (e.metaKey &&
+      !e.ctrlKey &&
+      (["t", "n", ",", "w", "s", "f"].includes(e.key.toLowerCase()) ||
+        (e.shiftKey && (e.code === "BracketLeft" || e.code === "BracketRight")))) ||
+    (!MAC && e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === "f");
   // Opening a chat, from the sidebar or the trash, puts settings away.
   let shownChat = app.current.sessionId;
   $effect(() => {

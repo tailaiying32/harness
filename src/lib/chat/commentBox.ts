@@ -52,6 +52,7 @@ export function commentBox(
   box.spellcheck = false;
   box.dataset.placeholder = "comment";
   box.textContent = text;
+  box.dataset.empty = text ? "" : "1";
   const value = () => box.innerText.replace(/\n$/, "");
   /**
    * Text that wraps leaves its box at full width, with a ragged gap at the
@@ -80,15 +81,16 @@ export function commentBox(
     if (lines.size > 1) box.style.width = `${Math.ceil(right - left) + 1}px`;
   };
   const changed = () => {
+    box.dataset.empty = box.textContent ? "" : "1";
     fit();
     resized();
   };
   box.addEventListener("input", () => {
-    // Emptied, a stray line break can stay behind and hide the placeholder.
-    if (!box.textContent) box.replaceChildren();
     changed();
   });
   box.addEventListener("keydown", (e) => {
+    // Let Cmd+F / Ctrl+F reach the app's find handler.
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") return;
     // The box's own keys: the editor's (and the app's) never see them.
     e.stopPropagation();
     if (e.isComposing) return;
@@ -312,7 +314,7 @@ export const commentLook: Record<string, Record<string, string>> = {
     paddingRight: "1ch",
     marginRight: "-1ch",
   },
-  ".cm-comment-box:empty::before": { content: "attr(data-placeholder)", color: "var(--faint)", pointerEvents: "none" },
+  '.cm-comment-box[data-empty="1"]::before': { content: "attr(data-placeholder)", color: "var(--faint)", pointerEvents: "none" },
   ".cm-comment-action": {
     background: "none",
     border: "0",

@@ -678,6 +678,54 @@ impl Browsers {
         webview.reload().map_err(|e| e.to_string())
     }
 
+    /// Find in the chat's shown browser tab: "search", "show" or "clear".
+    /// Returns the match count for "search", 0 otherwise or when no page is open.
+    pub async fn find(&self, chat: &str, op: &str, query: Option<&str>, index: Option<usize>) -> Result<usize, String> {
+        let Ok(key) = self.resolve(chat, None) else {
+            return Ok(0);
+        };
+        if self.webview(&key).is_none() {
+            return Ok(0);
+        }
+        let (action, args) = match op {
+            "search" => ("find_search", json!({ "query": query.unwrap_or("") })),
+            "show" => ("find_show", json!({ "index": index.unwrap_or(0) })),
+            "clear" => ("find_clear", json!({})),
+            _ => return Err(format!("Unknown find action: {op}")),
+        };
+        let value = self.page_action(&key, action, &args).await?;
+        Ok(value.as_u64().unwrap_or(0) as usize)
+    }
+
+    /// Whether one of the browser's pages currently holds the window's keys.
+    /// Must be called on the main thread (as `on_menu_event` is on macOS).
+    #[cfg(target_os = "macos")]
+    pub fn has_focus(&self) -> bool {
+        let holder = self
+            .0
+            .app
+            .get_window("main")
+            .and_then(|w| w.ns_window().ok())
+            .map(mac::keys_holder)
+            .unwrap_or(0);
+        if holder == 0 {
+            return false;
+        }
+        let hit = holder as *mut objc2::runtime::AnyObject;
+        let views: Vec<usize> = self.0.pages.lock().unwrap().values().map(|p| p.view).collect();
+        views.into_iter().any(|view| view != 0 && mac::is_inside(hit, view))
+    }
+
+    /// Gives the window's keys back to the main web view (e.g. when Cmd+F
+    /// opens the browser find box while a page holds focus).
+    #[cfg(target_os = "macos")]
+    pub fn yield_focus(&self) {
+        *self.0.clicked.lock().unwrap() = 0;
+        if let Some(main) = self.0.app.get_webview("main") {
+            let _ = main.set_focus();
+        }
+    }
+
     /// The user picked a tab.
     pub fn pick(&self, chat: &str, tab: &str) -> Result<(), String> {
         {
@@ -1256,6 +1304,11 @@ async fn screenshot(_webview: &Webview, _zoom: f64) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(target_os = "macos")]
+pub fn send_edit_action(action: &str) {
+    mac::send_edit_action(action);
+}
+
+#[cfg(target_os = "macos")]
 mod mac {
     use std::ffi::c_void;
     use std::ptr::NonNull;
@@ -1369,6 +1422,24 @@ mod mac {
         unsafe { msg_send![&*hit, isDescendantOf: view as *mut AnyObject] }
     }
 
+    /// Sends Cocoa's `undo:` or `redo:` action to the window's first responder.
+    /// Must be called on the main thread.
+    pub fn send_edit_action(action: &str) {
+        let sel = match action {
+            "undo" => objc2::sel!(undo:),
+            "redo" => objc2::sel!(redo:),
+            _ => return,
+        };
+        // SAFETY: NSApplication sharedApplication and sendAction:to:from: on main thread.
+        unsafe {
+            let app: *mut AnyObject = msg_send![objc2::class!(NSApplication), sharedApplication];
+            if !app.is_null() {
+                let nil = std::ptr::null_mut::<AnyObject>();
+                let _: bool = msg_send![app, sendAction: sel, to: nil, from: nil];
+            }
+        }
+    }
+
     /// Draws the page `scale` times its size, laid out at the view's size /
     /// `scale` (WebKit's `_setViewScale:` with layout mode "dynamic size
     /// computed from view scale"). Text sizes are left as the page set them.
@@ -1451,6 +1522,40 @@ const BRIDGE_JS: &str = r#"
     else keep("error", [e.error || (e.message + " at " + e.filename + ":" + e.lineno)]);
   }, true);
   addEventListener("unhandledrejection", (e) => keep("error", ["Unhandled rejection:", e.reason]));
+
+  // Cmd+Y on Mac (and Ctrl+Shift+Z elsewhere) redoes in any text box on the page.
+  const IS_MAC = /Mac/.test(navigator.userAgent);
+  addEventListener("keydown", (e) => {
+    if (e.isComposing || e.altKey) return;
+    const el = document.activeElement;
+    if (!el || !(el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+    const k = e.key.toLowerCase();
+    const redo = IS_MAC
+      ? e.metaKey && !e.ctrlKey && !e.shiftKey && k === "y"
+      : e.ctrlKey && !e.metaKey && e.shiftKey && k === "z";
+    if (!redo) return;
+    e.preventDefault();
+    document.execCommand("redo");
+  }, true);
+
+  let findRanges = [];
+  const hasHighlights = () => typeof CSS !== "undefined" && "highlights" in CSS;
+  const ensureFindStyle = () => {
+    if (document.getElementById("__hb_find_style")) return;
+    const s = document.createElement("style");
+    s.id = "__hb_find_style";
+    s.textContent = "::highlight(hb-find){background:rgba(255,210,70,0.45);color:inherit}::highlight(hb-find-current){background:#f5b800;color:#111}";
+    (document.head || document.documentElement).appendChild(s);
+  };
+  const findVisible = (node) => {
+    const el = node.parentElement;
+    if (!el || el.closest("script,style,noscript,template")) return false;
+    const fold = el.closest("details:not([open])");
+    if (fold && !el.closest("summary")) return false;
+    if (el.checkVisibility) return el.checkVisibility();
+    const st = getComputedStyle(el);
+    return st.display !== "none" && st.visibility !== "hidden";
+  };
 
   const INTERACTIVE = 'a[href],button,input,select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[role=option],[role=switch],[onclick],[contenteditable=""],[contenteditable=true],[tabindex]:not([tabindex="-1"])';
   let nextRef = 1;
@@ -1592,6 +1697,71 @@ const BRIDGE_JS: &str = r#"
       await frame();
       await frame();
       return [innerWidth, innerHeight];
+    },
+    find_search({ query }) {
+      findRanges = [];
+      const q = String(query || "").toLowerCase();
+      if (q && document.body) {
+        const nodes = [];
+        const starts = [];
+        let text = "";
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+          const val = n.nodeValue || "";
+          if (!val || !findVisible(n)) continue;
+          nodes.push(n);
+          starts.push(text.length);
+          text += val;
+        }
+        const lower = text.toLowerCase();
+        const hay = lower.length === text.length ? lower : text;
+        const needle = hay === lower ? q : String(query || "");
+        const at = (pos) => {
+          let lo = 0, hi = starts.length - 1;
+          while (lo < hi) {
+            const mid = (lo + hi + 1) >> 1;
+            if (starts[mid] <= pos) lo = mid;
+            else hi = mid - 1;
+          }
+          return [nodes[lo], pos - starts[lo]];
+        };
+        for (let i = hay.indexOf(needle); i >= 0; i = hay.indexOf(needle, i + needle.length)) {
+          const r = document.createRange();
+          const [sn, so] = at(i);
+          const [en, eo] = at(i + needle.length - 1);
+          r.setStart(sn, so);
+          r.setEnd(en, eo + 1);
+          findRanges.push(r);
+        }
+      }
+      if (hasHighlights()) {
+        ensureFindStyle();
+        CSS.highlights.set("hb-find", new Highlight(...findRanges));
+        CSS.highlights.delete("hb-find-current");
+      }
+      return findRanges.length;
+    },
+    find_show({ index }) {
+      const r = findRanges[index];
+      if (!r) return 0;
+      if (hasHighlights()) {
+        ensureFindStyle();
+        CSS.highlights.set("hb-find-current", new Highlight(r));
+      } else {
+        const sel = getSelection();
+        if (sel) { sel.removeAllRanges(); sel.addRange(r); }
+      }
+      const el = r.startContainer.parentElement;
+      if (el && el.scrollIntoView) el.scrollIntoView({ block: "center", inline: "nearest" });
+      return 0;
+    },
+    find_clear() {
+      findRanges = [];
+      if (hasHighlights()) {
+        CSS.highlights.delete("hb-find");
+        CSS.highlights.delete("hb-find-current");
+      }
+      return 0;
     },
   };
 
