@@ -4,6 +4,8 @@
   // what it wrote, and the answer it handed back. Stays at the bottom while
   // it runs, unless the user scrolls up.
   import { onMount, tick } from "svelte";
+  import FindBar from "../FindBar.svelte";
+  import { domSearcher } from "../find";
   import Markdown from "../chat/Markdown.svelte";
   import WorkRun from "../chat/WorkRun.svelte";
   import type { Chat } from "../state/chat.svelte";
@@ -65,6 +67,7 @@
 
   let promptOpen = $state(false);
 
+  let view = $state<HTMLElement>();
   let scroller: HTMLElement;
   let content: HTMLElement;
   let pinned = true;
@@ -81,6 +84,8 @@
   });
 </script>
 
+<div class="agent-view" bind:this={view}>
+<FindBar root={view} searcher={() => (scroller ? domSearcher(scroller) : null)} />
 <div class="scroll" bind:this={scroller} onscroll={onScroll}>
   <div class="content" bind:this={content}>
     <div class="head">
@@ -129,8 +134,16 @@
     {/if}
   </div>
 </div>
+</div>
 
 <style>
+  .agent-view {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
   .scroll {
     flex: 1;
     min-height: 0;

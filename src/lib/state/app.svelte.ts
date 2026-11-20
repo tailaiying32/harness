@@ -15,6 +15,7 @@ import {
   renameSession,
   restoreChat,
   sidebar,
+  type EditAction,
   type Envelope,
   type KeepAwakeState,
   type Mode,
@@ -128,6 +129,9 @@ export class AppState {
     };
   }
 
+  /** Handles Mac Edit menu keys (undo, redo, find) routed from the core. */
+  onEditKey: ((action: EditAction) => void) | null = null;
+
   /** Every event from the core comes through here. */
   route(envelope: Envelope): void {
     const { session_id: id, event } = envelope;
@@ -138,6 +142,10 @@ export class AppState {
     }
     if (event.kind === "tab_key") {
       tabKey(this.current, event.action);
+      return;
+    }
+    if (event.kind === "edit_key") {
+      this.onEditKey?.(event.action);
       return;
     }
     if (event.kind === "keep_awake") {

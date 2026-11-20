@@ -6,14 +6,29 @@
   // this view is on screen and nothing is drawn over it; otherwise the core
   // parks it out of sight at the same size, so Claude still sees it as shown.
   import { onDestroy } from "svelte";
-  import { browserPlace, type BrowserRect } from "../ipc";
+  import FindBar from "../FindBar.svelte";
+  import type { Searcher } from "../find";
+  import { browserFind, browserPlace, type BrowserRect } from "../ipc";
   import AddressRow from "./AddressRow.svelte";
   import type { Chat } from "../state/chat.svelte";
 
   let { chat, covered }: { chat: Chat; covered: boolean } = $props();
 
   const page = $derived(chat.browser);
+  let view = $state<HTMLElement>();
   let slot = $state<HTMLElement>();
+
+  function browserSearcher(chatId: string): Searcher {
+    return {
+      search: (query) => browserFind(chatId, "search", { query }).catch(() => 0),
+      show: (index) => {
+        void browserFind(chatId, "show", { index }).catch(() => {});
+      },
+      clear: () => {
+        void browserFind(chatId, "clear").catch(() => {});
+      },
+    };
+  }
 
   // ---- Placing the page over the slot ----
   const visible = $derived(!covered && page !== null);
@@ -65,14 +80,26 @@
   });
 </script>
 
+<div class="browser-view" bind:this={view}>
 <AddressRow {chat} />
+<!-- Inline so the native child web view over `slot` never paints over the find bar. -->
+{#key page?.id}
+  <FindBar inline root={view} searcher={() => browserSearcher(chat.sessionId)} />
+{/key}
 <!-- An address that couldn't be opened, typed above. -->
 {#if chat.browserProblem}
   <div class="problem">{chat.browserProblem}</div>
 {/if}
 <div class="slot" bind:this={slot}></div>
+</div>
 
 <style>
+  .browser-view {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
   .problem {
     padding: calc(var(--gap) * 0.5) var(--pad-x);
     border-bottom: 1px solid var(--line);

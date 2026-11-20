@@ -8,6 +8,8 @@
     root,
     searcher,
     main = false,
+    modal = false,
+    inline = false,
     onopen,
     onclose,
   }: {
@@ -16,6 +18,10 @@
     /** What to search, asked each time the box opens. */
     searcher: () => Searcher | null;
     main?: boolean;
+    /** An overlay (Settings / Preferences): takes Cmd+F over everything underneath. */
+    modal?: boolean;
+    /** In normal document flow instead of floating over the view (for the embedded browser). */
+    inline?: boolean;
     /** Runs before searching, e.g. to draw a chat's earlier messages. */
     onopen?: () => Promise<void> | void;
     onclose?: () => void;
@@ -30,6 +36,8 @@
   let unwatch: (() => void) | undefined;
   /** Where the cursor was, to go back to on close. */
   let back: HTMLElement | null = null;
+  /** Drops stale results from async searchers when the query changes mid-flight. */
+  let seq = 0;
 
   const spot: Spot = { root: null as unknown as HTMLElement, open: show, close };
 
@@ -37,6 +45,7 @@
     if (!root) return;
     spot.root = root;
     spot.main = main;
+    spot.modal = modal;
     return addSpot(spot);
   });
 
@@ -48,8 +57,8 @@
       open = true;
       await onopen?.();
       using = searcher();
-      unwatch = using?.watch?.(() => run(false));
-      if (query) run(true);
+      unwatch = using?.watch?.(() => void run(false));
+      if (query) void run(true);
     }
     await tick();
     input?.focus();
@@ -57,21 +66,26 @@
   }
 
   /** Searches again; `jump` moves to the first match, otherwise the place is kept. */
-  function run(jump: boolean) {
-    if (!using) return;
-    count = using.search(query);
+  async function run(jump: boolean) {
+    const active = using;
+    if (!active) return;
+    const turn = ++seq;
+    const found = await active.search(query);
+    if (turn !== seq || using !== active) return;
+    count = found;
     index = jump ? 0 : Math.min(index, Math.max(0, count - 1));
-    if (count) using.show(index);
+    if (count) void active.show(index);
   }
 
   function step(by: number) {
     if (!count || !using) return;
     index = (index + by + count) % count;
-    using.show(index);
+    void using.show(index);
   }
 
   function close() {
     if (!open) return;
+    seq++;
     const handled = count > 0 && using?.finish?.(index);
     unwatch?.();
     unwatch = undefined;
@@ -105,8 +119,8 @@
 </script>
 
 {#if open}
-  <div class="find-bar">
-    <input bind:this={input} bind:value={query} oninput={() => run(true)} onkeydown={onKey} placeholder="find" spellcheck="false" />
+  <div class="find-bar" class:inline>
+    <input bind:this={input} bind:value={query} oninput={() => void run(true)} onkeydown={onKey} placeholder="find" spellcheck="false" />
     <span class="count" class:none={query && !count}>{query ? (count ? `${index + 1}/${count}` : "0/0") : ""}</span>
     <button title="Previous (Shift+Enter)" disabled={!count} onclick={() => step(-1)}>↑</button>
     <button title="Next (Enter)" disabled={!count} onclick={() => step(1)}>↓</button>
@@ -128,6 +142,19 @@
     padding: 2px 4px 2px 1ch;
     background: var(--bg);
     border: 1px solid var(--line);
+  }
+  /* Inline bar for the embedded browser: sits above the native web view so it is never covered. */
+  .find-bar.inline {
+    position: static;
+    flex-shrink: 0;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    padding: calc(var(--gap) * 0.4) var(--pad-x);
+  }
+  .find-bar.inline input {
+    flex: 1;
+    width: auto;
+    min-width: 0;
   }
   input {
     width: 18ch;

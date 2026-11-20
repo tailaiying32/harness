@@ -29,6 +29,8 @@ export { AGENTS, AGENT_INFO, ANTIGRAVITY, CLAUDE, CODEX, CURSOR, agentLabel, inO
 
 /** A tab key from the Mac menu (or the keyboard elsewhere): Cmd+T, Cmd+W, Cmd+Shift+[ and ]. */
 export type TabAction = "new" | "close" | "prev" | "next";
+/** An edit key from the Mac menu: Cmd+Z, Cmd+Shift+Z, Cmd+F. */
+export type EditAction = "undo" | "redo" | "find" | "find-browser";
 
 export type AgentEvent =
   | { kind: "session_started"; agent_session_id: string; model: string | null; mode: string | null }
@@ -108,6 +110,7 @@ export type AgentEvent =
   | { kind: "browser_tabs"; tabs: BrowserTab[]; shown: string | null }
   | { kind: "terminal_tabs"; project: string; tabs: TerminalTab[] }
   | { kind: "tab_key"; action: TabAction }
+  | { kind: "edit_key"; action: EditAction }
   | { kind: "keep_awake"; mode: KeepAwakeMode | null; ends_at: number | null }
   | { kind: "show_panel"; path: string | null; view: "notes" | "plan" | "browser" | "terminal" | "info" | null; tab?: string | null };
 
@@ -486,6 +489,11 @@ export const browserPlace = (chatId: string, rect: BrowserRect, visible: boolean
 export const browserClose = (chatId: string) => invoke<void>("browser_close", { chatId });
 export const browserCurrent = (chatId: string) =>
   invoke<{ tabs: BrowserTab[]; shown: string | null }>("browser_current", { chatId });
+/** Find in the chat's shown browser tab: returns the match count for "search". */
+export const browserFind = (chatId: string, op: "search" | "show" | "clear", opts?: { query?: string; index?: number }) =>
+  invoke<number>("browser_find", { chatId, op, query: opts?.query, index: opts?.index });
+/** Runs macOS native undo/redo (`undo:` / `redo:`) on the active first responder. */
+export const nativeEdit = (action: "undo" | "redo") => invoke<void>("native_edit", { action });
 
 // ---- The side panel's terminal (tabs belong to a project) ----
 

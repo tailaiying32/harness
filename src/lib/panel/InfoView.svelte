@@ -4,6 +4,8 @@
   // background. Sections with nothing in them are left out. Clicking a
   // subagent shows it full size (see AgentView); so does picking it in the
   // top bar's ▾ menu (see PanelBar), and "chat info" there comes back here.
+  import FindBar from "../FindBar.svelte";
+  import { domSearcher } from "../find";
   import type { Chat } from "../state/chat.svelte";
   import { ago, batchLabel, QUIET_MS, runTime, span, tokens, type Agent } from "../state/chatInfo.svelte";
   import { past, present } from "../tools";
@@ -54,9 +56,14 @@
 
   const quiet = (agent: Agent) =>
     agent.state === "running" && agent.lastAt !== undefined && now - agent.lastAt > QUIET_MS;
+
+  let view = $state<HTMLElement>();
+  let pageEl = $state<HTMLElement>();
 </script>
 
-<div class="page">
+<div class="info-view" bind:this={view}>
+<FindBar root={view} searcher={() => (pageEl ? domSearcher(pageEl) : null)} />
+<div class="page" bind:this={pageEl}>
   {#if context}
     <section>
       <div class="head">context</div>
@@ -148,8 +155,16 @@
     <div class="faint">nothing yet</div>
   {/if}
 </div>
+</div>
 
 <style>
+  .info-view {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
   .page {
     flex: 1;
     min-height: 0;
