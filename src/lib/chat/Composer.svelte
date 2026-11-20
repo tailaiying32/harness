@@ -424,7 +424,7 @@
   });
 
   // ---- Picking a chat with @, or a command with / ----
-  // Typing @ at the start of a word lists the project's 8 newest other chats
+  // Typing @ at the start of a word lists the project's other chats, newest first,
   // that match what is typed after it. A picked chat becomes a word,
   // `[@Title]`, kept like a dropped file's: it is one thing in the box, a
   // click opens the chat, and the agent is sent the chat's ID to read it by.
@@ -456,7 +456,7 @@
   const mentioned = $derived.by(() => {
     if (suggest?.kind !== "chat") return [];
     const typed = typedWord.toLowerCase();
-    return chats.filter((c) => c.title.toLowerCase().includes(typed)).slice(0, 8);
+    return chats.filter((c) => c.title.toLowerCase().includes(typed));
   });
   const commanded = $derived<Command[]>(
     suggest?.kind === "command" ? matchCommands(commands, typedWord) : suggest?.kind === "skill" ? matchCommands(skills, typedWord) : [],
