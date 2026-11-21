@@ -217,19 +217,19 @@ exec curl -sS --fail-with-body --max-time 20 --data-binary \"$*\" \"$TILDE_TAB_U
     pub fn write_shell_hook(&self) -> Result<(), String> {
         let dir = self.zsh_hook_dir();
         let path = dir.join(".zshenv");
-        let text = "# Written by Harness; changes are overwritten.
+        let text = "# Written by Tilde; changes are overwritten.
 # A terminal tab an agent opened starts zsh here, so the tab can tell
 # whether the last command failed. Your own startup files load as usual.
-if [[ -n ${HARNESS_USER_ZDOTDIR+x} ]]; then
-  export ZDOTDIR=$HARNESS_USER_ZDOTDIR
+if [[ -n ${TILDE_USER_ZDOTDIR+x} ]]; then
+  export ZDOTDIR=$TILDE_USER_ZDOTDIR
 else
   unset ZDOTDIR
 fi
-unset HARNESS_USER_ZDOTDIR
+unset TILDE_USER_ZDOTDIR
 [[ -r ${ZDOTDIR:-$HOME}/.zshenv ]] && source ${ZDOTDIR:-$HOME}/.zshenv
 if [[ -o interactive ]]; then
-  __harness_status() { printf '\\033]7718;%s\\007' $? }
-  precmd_functions=(__harness_status $precmd_functions)
+  __tilde_status() { printf '\\033]7718;%s\\007' $? }
+  precmd_functions=(__tilde_status $precmd_functions)
 fi
 ";
         if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {

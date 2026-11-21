@@ -1245,7 +1245,7 @@ fn start_shell(folder: &Path, size: PtySize, zsh_hook: Option<&Path>) -> Result<
     let zsh = cmd.get_argv().first().is_some_and(|shell| Path::new(shell).file_name().is_some_and(|name| name == "zsh"));
     if let Some(dir) = zsh_hook.filter(|_| zsh) {
         if let Some(own) = std::env::var_os("ZDOTDIR") {
-            cmd.env("HARNESS_USER_ZDOTDIR", own);
+            cmd.env("TILDE_USER_ZDOTDIR", own);
         }
         cmd.env("ZDOTDIR", dir);
     }
@@ -1400,7 +1400,7 @@ fn read_loop(weak: Weak<Inner>, id: String, run: u64, mut reader: Box<dyn Read +
     shell_ended(&weak, &id, run);
 }
 
-/// How a shell with Harness's hook reports a command's exit status before
+/// How a shell with Tilde's hook reports a command's exit status before
 /// each prompt: ESC ] 7718 ; <status> BEL.
 const STATUS_MARK: &[u8] = b"\x1b]7718;";
 
@@ -1820,7 +1820,7 @@ mod tests {
             return;
         }
         let (t, _) = rig(IDLE);
-        let base = std::env::temp_dir().join(format!("harness-hook-{}", uuid::Uuid::new_v4().simple()));
+        let base = std::env::temp_dir().join(format!("tilde-hook-{}", uuid::Uuid::new_v4().simple()));
         let home = crate::home::Home::new(base.clone());
         home.write_shell_hook().unwrap();
         t.set_zsh_hook(home.zsh_hook_dir());

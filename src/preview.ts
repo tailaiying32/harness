@@ -1127,7 +1127,7 @@ function addTab(project: string, label: string, worktree: string | null, output 
     ].join("\r\n"),
   );
   // A tab an agent opened, whose command failed.
-  const tests = addTab(project, "harness", null);
+  const tests = addTab(project, "tilde", null);
   tests.failed = true;
   termOutput.set(
     tests.id,

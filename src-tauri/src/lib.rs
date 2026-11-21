@@ -1216,7 +1216,7 @@ pub fn run() {
             // How an agent's tab learns that its command failed.
             match home.write_shell_hook() {
                 Ok(()) => terminals.set_zsh_hook(home.zsh_hook_dir()),
-                Err(e) => eprintln!("harness: couldn't write the shell hook: {e}"),
+                Err(e) => eprintln!("tilde: couldn't write the shell hook: {e}"),
             }
             let panel_out = out.clone();
             let sessions = SessionManager::new(agents.clone(), store.clone(), out, dir, home);
