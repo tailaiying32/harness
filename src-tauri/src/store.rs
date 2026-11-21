@@ -90,6 +90,8 @@ pub struct SavedTerminal {
     pub position: i64,
     /// The last of its output, raw.
     pub output: Vec<u8>,
+    /// The chat whose agent opened it, while the user hasn't typed in it.
+    pub chat: Option<String>,
     pub saved_at: i64,
 }
 
@@ -246,6 +248,15 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if !has_former {
         conn.execute_batch("ALTER TABLE projects ADD COLUMN former_paths TEXT")
             .map_err(err)?;
+    }
+    // The chat whose agent opened a terminal tab.
+    let has_chat: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('terminals') WHERE name = 'chat'")
+        .map_err(err)?
+        .exists([])
+        .map_err(err)?;
+    if !has_chat {
+        conn.execute_batch("ALTER TABLE terminals ADD COLUMN chat TEXT").map_err(err)?;
     }
     Ok(())
 }
@@ -442,9 +453,9 @@ impl Store {
         tx.execute("DELETE FROM terminals", []).map_err(err)?;
         for t in tabs {
             tx.execute(
-                "INSERT INTO terminals (id, project, folder, worktree, label, position, output, saved_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![t.id, t.project, t.folder, t.worktree, t.label, t.position, t.output, t.saved_at],
+                "INSERT INTO terminals (id, project, folder, worktree, label, position, output, saved_at, chat)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![t.id, t.project, t.folder, t.worktree, t.label, t.position, t.output, t.saved_at, t.chat],
             )
             .map_err(err)?;
         }
@@ -456,7 +467,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, project, folder, worktree, label, position, output, saved_at FROM terminals
+                "SELECT id, project, folder, worktree, label, position, output, saved_at, chat FROM terminals
                  WHERE project IN (SELECT path FROM projects) ORDER BY project, position",
             )
             .map_err(err)?;
@@ -471,6 +482,7 @@ impl Store {
                     position: row.get(5)?,
                     output: row.get(6)?,
                     saved_at: row.get(7)?,
+                    chat: row.get(8)?,
                 })
             })
             .map_err(err)?;
@@ -1582,6 +1594,7 @@ mod tests {
             position,
             output: Vec::new(),
             saved_at: 0,
+            chat: None,
         };
         store
             .save_terminals(&[

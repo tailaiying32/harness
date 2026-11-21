@@ -23,6 +23,8 @@
 //!   the tabs are back, closed, with a "restored" line.
 //! - A tab opened in a chat's worktree keeps that worktree from being put away
 //!   while its shell runs, and is closed with a line when the worktree goes.
+//! - A tab an agent opened goes with its chat when the chat is deleted, unless
+//!   something still runs in it or the user has typed in it (then it is theirs).
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -81,6 +83,8 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 /// How long quitting waits for shells to end before killing them.
 const QUIT_GRACE: Duration = Duration::from_secs(1);
 /// Lines `read` returns by default, and at most.
+/// How a paste into the terminal starts (bracketed paste).
+const PASTE_START: &str = "\x1b[200~";
 const READ_LINES: usize = 200;
 const MAX_READ_LINES: usize = 2000;
 /// Size of a shell started before the window has measured its tab.
@@ -124,6 +128,8 @@ struct Tab {
     worktree: Option<PathBuf>,
     /// Its name when nothing runs in it.
     label: String,
+    /// The chat whose agent opened it, until the user types in it.
+    chat: Option<String>,
     /// The command line running in it besides the shell, and that job's group.
     running: Option<String>,
     fg: Option<i32>,
@@ -161,6 +167,7 @@ impl Tab {
             folder,
             worktree,
             label,
+            chat: None,
             running: None,
             fg: None,
             done: false,
@@ -311,6 +318,7 @@ impl Terminals {
             tab.drawn = last_size_mark(&row.output).and_then(mark_size);
             tab.alt_screen = alt_screen_after(false, &row.output);
             tab.tail = row.output;
+            tab.chat = row.chat;
             tab.line(&format!("restored {}", local_time(row.saved_at)));
             tab.dirty = false;
             state.add(row.id, tab);
@@ -376,8 +384,8 @@ impl Terminals {
             .ok_or_else(|| "The tab closed at once".to_string())
     }
 
-    /// An agent's `harness-tab`: a new tab in the chat's folder (`worktree`,
-    /// or the project's main folder), with `command` typed into it once the
+    /// An agent's `harness-tab`, for the chat `chat`: a new tab in the chat's
+    /// folder (`worktree`, or the project's main folder), with `command` typed into it once the
     /// shell has printed something (its prompt), up to `PROMPT_WAIT`. Typed
     /// sooner, the line still runs but shows twice: echoed before the prompt,
     /// then again at it. One line only, so nothing rides along unseen after it.
@@ -390,6 +398,7 @@ impl Terminals {
     pub fn run_for_agent(
         &self,
         project: &str,
+        chat: &str,
         worktree: Option<String>,
         command: &str,
         show: &dyn Fn(&TabInfo),
@@ -403,6 +412,9 @@ impl Terminals {
         }
         let guess = lock(&self.0.state).panel_size.unwrap_or(DEFAULT_SIZE);
         let id = self.add_tab(project, worktree, None, guess)?;
+        if let Some(tab) = lock(&self.0.state).tabs.get_mut(&id) {
+            tab.chat = Some(chat.to_string());
+        }
         self.emit(project);
         if let Some(info) = self.tabs(project).into_iter().find(|t| t.id == id) {
             show(&info);
@@ -418,7 +430,7 @@ impl Terminals {
         }
         // A prompt is often drawn in pieces; let it finish.
         std::thread::sleep(Duration::from_millis(150));
-        self.write(&tab.id, &format!("{command}\r"))?;
+        self.type_in(&tab.id, &format!("{command}\r"))?;
         Ok(tab)
     }
 
@@ -477,8 +489,23 @@ impl Terminals {
         Ok(tab.tail.clone())
     }
 
-    /// What the user typed. Starts a fresh shell first in a closed tab.
+    /// What the user typed. Starts a fresh shell first in a closed tab. A tab
+    /// an agent opened is the user's from here on.
     pub fn write(&self, id: &str, data: &str) -> Result<(), String> {
+        // Escape sequences aren't typing: the window's own answers to the
+        // shell's questions (cursor place, focus) come this way too.
+        let typed = !data.starts_with('\x1b') || data.starts_with(PASTE_START);
+        if typed {
+            if let Some(tab) = lock(&self.0.state).tabs.get_mut(id) {
+                if tab.chat.take().is_some() {
+                    tab.dirty = true;
+                }
+            }
+        }
+        self.type_in(id, data)
+    }
+
+    fn type_in(&self, id: &str, data: &str) -> Result<(), String> {
         let (project, started) = {
             let mut state = lock(&self.0.state);
             let tab = state.tabs.get_mut(id).ok_or("That terminal tab is gone")?;
@@ -633,6 +660,21 @@ impl Terminals {
         self.emit(to);
     }
 
+    /// A chat was deleted: the tabs its agent opened go with it, except those
+    /// with something still running and those the user has typed in.
+    pub fn chat_gone(&self, chat: &str) {
+        self.check_running();
+        let ids: Vec<String> = lock(&self.0.state)
+            .tabs
+            .iter()
+            .filter(|(_, t)| t.chat.as_deref() == Some(chat) && t.running.is_none())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.close(&id);
+        }
+    }
+
     /// A worktree folder is gone: its tabs close with a line saying why, and
     /// start again in the project's main folder.
     pub fn worktree_gone(&self, root: &Path, why: &str) {
@@ -776,6 +818,7 @@ impl Terminals {
                     position: *position,
                     output,
                     saved_at: now,
+                    chat: tab.chat.clone(),
                 });
                 *position += 1;
             }
@@ -1493,14 +1536,14 @@ mod tests {
     fn an_agent_opens_a_tab_with_one_command_typed_in() {
         let (t, _) = rig(IDLE);
         // Typed before the shell's first prompt; the shell still runs it.
-        let tab = t.run_for_agent(&folder(), None, "echo from-the-ag''ent", &|_| {}).unwrap();
+        let tab = t.run_for_agent(&folder(), "chat-1", None, "echo from-the-ag''ent", &|_| {}).unwrap();
         assert!(wait_for(&t, &tab.id, "from-the-agent"));
-        assert!(t.run_for_agent(&folder(), None, "echo a\nrm -rf x", &|_| {}).is_err());
-        assert!(t.run_for_agent(&folder(), None, "  ", &|_| {}).is_err());
+        assert!(t.run_for_agent(&folder(), "chat-1", None, "echo a\nrm -rf x", &|_| {}).is_err());
+        assert!(t.run_for_agent(&folder(), "chat-1", None, "  ", &|_| {}).is_err());
         assert_eq!(t.tabs(&folder()).len(), 1);
         // Once the window has given a size, the agent's next tab starts at it.
         t.resize(&tab.id, 52, 30).unwrap();
-        let next = t.run_for_agent(&folder(), None, SIZE, &|_| {}).unwrap();
+        let next = t.run_for_agent(&folder(), "chat-1", None, SIZE, &|_| {}).unwrap();
         assert!(wait_for(&t, &next.id, "30 52"));
         // Shown first, the tab's shell waits for the size the panel gives it.
         let shown = |info: &TabInfo| {
@@ -1510,7 +1553,7 @@ mod tests {
                 t.resize(&id, 47, 19).unwrap();
             });
         };
-        let third = t.run_for_agent(&folder(), None, SIZE, &shown).unwrap();
+        let third = t.run_for_agent(&folder(), "chat-1", None, SIZE, &shown).unwrap();
         assert!(wait_for(&t, &third.id, "19 47"));
         t.close(&tab.id);
         t.close(&next.id);
@@ -1627,9 +1670,38 @@ mod tests {
         assert_eq!(last_size_mark(&raw).and_then(mark_size), Some(size(52, 30)));
         assert!(!text.contains("7717"));
         // The panel's size comes back too: the agent's first tab starts at it.
-        let tab = again.run_for_agent(&project, None, SIZE, &|_| {}).unwrap();
+        let tab = again.run_for_agent(&project, "chat-1", None, SIZE, &|_| {}).unwrap();
         assert!(wait_for(&again, &tab.id, "30 52"));
         again.close(&tab.id);
+    }
+
+    #[test]
+    fn a_deleted_chats_agent_tabs_go_unless_busy_or_typed_in() {
+        let (t, _) = rig(IDLE);
+        let project = folder();
+        let mine = t.open(&project, None, None, 80, 24).unwrap();
+        let idle = t.run_for_agent(&project, "chat-1", None, "echo o''ne", &|_| {}).unwrap();
+        let typed = t.run_for_agent(&project, "chat-1", None, "echo t''wo", &|_| {}).unwrap();
+        let busy = t.run_for_agent(&project, "chat-1", None, "sleep 30", &|_| {}).unwrap();
+        let other = t.run_for_agent(&project, "chat-2", None, "echo th''ree", &|_| {}).unwrap();
+        assert!(wait_for(&t, &idle.id, "one"));
+        assert!(wait_for(&t, &typed.id, "two"));
+        assert!(wait_for(&t, &other.id, "three"));
+        // The window answering the shell isn't the user typing.
+        t.write(&idle.id, "\x1b[I").unwrap();
+        t.write(&typed.id, "echo fo''ur\r").unwrap();
+        assert!(wait_for(&t, &typed.id, "four"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline && (t.running(&busy.id).is_none() || t.running(&typed.id).is_some()) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        t.chat_gone("chat-1");
+        let left: Vec<String> = t.tabs(&project).into_iter().map(|x| x.id).collect();
+        assert_eq!(left, vec![mine.id.clone(), typed.id.clone(), busy.id.clone(), other.id.clone()]);
+        for id in left {
+            t.close(&id);
+        }
     }
 
     #[test]
