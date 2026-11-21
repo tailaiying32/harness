@@ -51,19 +51,16 @@
     onclose: () => void;
   } = $props();
 
-  // Models: one row per installed agent with a floating dropdown menu of
-  // checkboxes. Long lists get a filter box and pin the models already on at
-  // the top when opened so toggling doesn't make rows jump under the pointer.
-  const FILTER_AT = 8;
+  // Models: one row per installed agent with a floating full-height dropdown
+  // of checkboxes. Long lists pin the models already on at the top when opened
+  // so toggling doesn't make rows jump under the pointer.
   const PIN_AT = 12;
   const modelAgents = $derived(
     AGENTS.filter((agent) => (!app.agents.length || app.agents.includes(agent)) && models[agent].length > 0),
   );
   let openAgent = $state<AgentId | null>(null);
-  let modelQuery = $state("");
   let pinnedOnOpen = $state<string[]>([]);
   let openPicker = $state<HTMLElement>();
-  let filterBox = $state<HTMLInputElement>();
 
   function toggleModels(agent: AgentId) {
     if (openAgent === agent) {
@@ -71,13 +68,11 @@
       return;
     }
     openAgent = agent;
-    modelQuery = "";
     pinnedOnOpen = [...shownModels[agent]];
   }
 
   function closeModels() {
     openAgent = null;
-    modelQuery = "";
   }
 
   function shownCount(agent: AgentId): number {
@@ -91,15 +86,10 @@
     onModelPick(agent, value, !on);
   }
 
-  /** Filtered models for the open dropdown, split into pinned-on-open + rest for long lists. */
+  /** Models for the open dropdown, split into pinned-on-open + rest for long lists. */
   const openModels = $derived.by(() => {
     if (!openAgent) return { top: [] as ModelInfo[], rest: [] as ModelInfo[] };
     const list = models[openAgent];
-    const words = modelQuery.toLowerCase().split(/\s+/).filter(Boolean);
-    if (words.length) {
-      const matched = list.filter((m) => words.every((w) => `${m.name} ${m.value}`.toLowerCase().includes(w)));
-      return { top: matched, rest: [] as ModelInfo[] };
-    }
     if (list.length > PIN_AT) {
       const top = list.filter((m) => pinnedOnOpen.includes(m.value));
       const rest = list.filter((m) => !pinnedOnOpen.includes(m.value));
@@ -108,17 +98,9 @@
     return { top: list, rest: [] as ModelInfo[] };
   });
 
-  function filterKey(e: KeyboardEvent) {
-    if (e.key === "Enter" && openAgent && modelQuery.trim() && openModels.top.length) {
-      e.preventDefault();
-      toggleModel(openAgent, openModels.top[0].value);
-    }
-  }
-
-  // Click outside closes the open model dropdown; opening a filtered list puts the cursor in its box.
+  // Click outside closes the open model dropdown.
   $effect(() => {
     if (!openAgent) return;
-    filterBox?.focus();
     const away = (e: PointerEvent) => {
       if (!openPicker?.contains(e.target as Node)) closeModels();
     };
@@ -292,8 +274,7 @@
     if (openAgent) {
       e.preventDefault();
       e.stopPropagation();
-      if (modelQuery) modelQuery = "";
-      else closeModels();
+      closeModels();
       return;
     }
     if (page) {
@@ -398,7 +379,6 @@
         <div class="label">Models</div>
         {#each modelAgents as agent (agent)}
           {@const count = shownCount(agent)}
-          {@const total = models[agent].length}
           {@const isOpen = openAgent === agent}
           <div class="model-picker">
             {#if isOpen}
@@ -410,53 +390,38 @@
                   onclick={() => toggleModels(agent)}
                 >
                   <span class="name">{agentLabel(agent)}</span>
-                  <span class="count">{count} of {total} ▾</span>
+                  <span class="count">models</span>
                 </button>
                 <div class="model-menu" role="menu">
-                  {#if total > FILTER_AT}
-                    <input
-                      class="model-filter"
-                      placeholder="filter"
-                      spellcheck="false"
-                      bind:this={filterBox}
-                      bind:value={modelQuery}
-                      onkeydown={filterKey}
-                    />
+                  {#each openModels.top as m (m.value)}
+                    {@const on = shownModels[agent].includes(m.value)}
+                    <button
+                      class="model-item"
+                      class:on
+                      role="menuitemcheckbox"
+                      aria-checked={on}
+                      disabled={on && count <= 1}
+                      onclick={() => toggleModel(agent, m.value)}
+                    >
+                      <span class="mark">{on ? "[x]" : "[ ]"}</span><span class="model-name">{m.name}</span>
+                    </button>
+                  {/each}
+                  {#if openModels.top.length && openModels.rest.length}
+                    <div class="model-sep"></div>
                   {/if}
-                  <div class="model-list">
-                    {#each openModels.top as m (m.value)}
-                      {@const on = shownModels[agent].includes(m.value)}
-                      <button
-                        class="model-item"
-                        class:on
-                        role="menuitemcheckbox"
-                        aria-checked={on}
-                        disabled={on && count <= 1}
-                        onclick={() => toggleModel(agent, m.value)}
-                      >
-                        <span class="mark">{on ? "[x]" : "[ ]"}</span><span class="model-name">{m.name}</span>
-                      </button>
-                    {/each}
-                    {#if openModels.top.length && openModels.rest.length}
-                      <div class="model-sep"></div>
-                    {/if}
-                    {#each openModels.rest as m (m.value)}
-                      {@const on = shownModels[agent].includes(m.value)}
-                      <button
-                        class="model-item"
-                        class:on
-                        role="menuitemcheckbox"
-                        aria-checked={on}
-                        disabled={on && count <= 1}
-                        onclick={() => toggleModel(agent, m.value)}
-                      >
-                        <span class="mark">{on ? "[x]" : "[ ]"}</span><span class="model-name">{m.name}</span>
-                      </button>
-                    {/each}
-                    {#if modelQuery.trim() && !openModels.top.length}
-                      <div class="model-empty">no match</div>
-                    {/if}
-                  </div>
+                  {#each openModels.rest as m (m.value)}
+                    {@const on = shownModels[agent].includes(m.value)}
+                    <button
+                      class="model-item"
+                      class:on
+                      role="menuitemcheckbox"
+                      aria-checked={on}
+                      disabled={on && count <= 1}
+                      onclick={() => toggleModel(agent, m.value)}
+                    >
+                      <span class="mark">{on ? "[x]" : "[ ]"}</span><span class="model-name">{m.name}</span>
+                    </button>
+                  {/each}
                 </div>
               </div>
             {:else}
@@ -467,7 +432,7 @@
                 onclick={() => toggleModels(agent)}
               >
                 <span class="name">{agentLabel(agent)}</span>
-                <span class="count">{count} of {total} ▾</span>
+                <span class="count">models</span>
               </button>
             {/if}
           </div>
@@ -757,35 +722,9 @@
     z-index: 10;
     display: flex;
     flex-direction: column;
-    max-height: min(48vh, 22em);
+    padding: calc(var(--gap) * 0.4) 0;
     background: var(--panel);
     border: 1px solid var(--line);
-  }
-  .model-filter {
-    flex-shrink: 0;
-    box-sizing: border-box;
-    width: 100%;
-    padding: calc(var(--gap) * 0.4) 2ch;
-    font: inherit;
-    color: var(--fg);
-    background: none;
-    border: none;
-    border-bottom: 1px solid var(--line);
-    outline: none;
-  }
-  .model-filter::placeholder {
-    color: var(--faint);
-  }
-  .model-filter:focus {
-    border-bottom-color: var(--accent);
-  }
-  .model-list {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    padding: calc(var(--gap) * 0.4) 0;
   }
   .model-item {
     display: flex;
@@ -815,10 +754,6 @@
   .model-sep {
     margin: calc(var(--gap) * 0.4) 0;
     border-top: 1px solid var(--line);
-  }
-  .model-empty {
-    padding: 0 2ch;
-    color: var(--faint);
   }
   .danger {
     color: var(--bad);
