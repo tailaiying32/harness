@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::acp::{self, AcpConfig, Dialect, Intro, PrintCommand, Tool};
-use super::acp_sync::{self, SyncRpc, effort_levels, model_option};
+use super::acp_sync::{self, SmallAsk, SyncRpc, effort_levels, model_option};
+use super::claude_code::{BATCH_PROMPT, batch_input};
 use super::{AgentAdapter, EventSink, RunningAgent, SideCopy, SpawnOptions, copy_database, copy_folder, plain_id};
 use crate::events::{AgentEvent, CommandInfo, ModelInfo};
 
@@ -22,6 +23,8 @@ const LABEL: &str = "Antigravity";
 const LIST_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long listing the commands may take, from start to its list.
 const COMMANDS_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a batch label may take (about 5 s on agy 1.5.12).
+const LABEL_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long signing in may wait for the user in the browser.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long reading the usage limits may take (about 2 s on agy 1.5.11).
@@ -167,6 +170,21 @@ impl AgentAdapter for AntigravityAdapter {
         Err("Antigravity writes its own titles".to_string())
     }
 
+    /// One prompt on its Flash model, at the lowest thinking level. Default
+    /// mode asks before edits and commands, and every ask is refused.
+    fn name_batch(&self, binary: &Path, ask: &str, agents: &[String]) -> Result<String, String> {
+        let how = SmallAsk {
+            label: LABEL,
+            client_meta: json!({}),
+            model: cheap_model,
+            mode: None,
+            put_model_back: false,
+            timeout: LABEL_TIMEOUT,
+        };
+        let prompt = format!("{BATCH_PROMPT}\n\n{}", batch_input(ask, agents));
+        acp_sync::small_answer(binary, &how, &prompt, |id| self.forget_session(id))
+    }
+
     /// ACP's own sign-in: Antigravity opens the browser and answers once
     /// the user has signed in with Google. (`agy acp --login` instead wants
     /// a code pasted back into a terminal.)
@@ -278,6 +296,16 @@ fn forget_in(data: &Path, id: &str) {
         let _ = std::fs::remove_file(file);
     }
     let _ = std::fs::remove_dir_all(brain);
+}
+
+/// The model for batch labels: the first one named Flash, from the `model`
+/// option. None (keep the current model) if there isn't one.
+fn cheap_model(option: &Value) -> Option<String> {
+    option["options"].as_array()?.iter().find_map(|o| {
+        let value = o["value"].as_str()?;
+        let name = o["name"].as_str().unwrap_or(value);
+        name.to_lowercase().contains("flash").then(|| value.to_string())
+    })
 }
 
 /// The models in a `configOptions` list. Only the current model carries the
