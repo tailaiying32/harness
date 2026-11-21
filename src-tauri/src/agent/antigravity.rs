@@ -116,9 +116,9 @@ impl AgentAdapter for AntigravityAdapter {
     /// Opens a conversation in an empty folder (nothing is sent, so nothing
     /// is spent) and reads the models in the order Antigravity lists them.
     /// Thinking levels differ by model (Claude Opus stops at High, GPT-OSS
-    /// has none) and only show once a model is picked, so each is picked in
-    /// turn; there are about ten.
-    fn list_models(&self, binary: &Path, _efforts_for: Option<&[String]>) -> Result<Vec<ModelInfo>, String> {
+    /// has none) and only show once a model is picked, so each model in
+    /// `efforts_for` (all if None) is picked in turn.
+    fn list_models(&self, binary: &Path, efforts_for: Option<&[String]>) -> Result<Vec<ModelInfo>, String> {
         let folder = std::env::temp_dir().join("harness-antigravity-models");
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         let mut rpc = SyncRpc::start(binary, &["acp"], LABEL, &folder)?;
@@ -133,6 +133,9 @@ impl AgentAdapter for AntigravityAdapter {
         let current = model_option(&session["configOptions"]).and_then(|o| o["currentValue"].as_str()).map(str::to_owned);
         for info in &mut models {
             if current.as_deref() == Some(info.value.as_str()) {
+                continue;
+            }
+            if efforts_for.is_some_and(|wanted| !wanted.contains(&info.value)) {
                 continue;
             }
             let picked = rpc.call(
@@ -305,10 +308,11 @@ fn cheap_model(option: &Value) -> Option<String> {
     })
 }
 
-/// The models in a `configOptions` list. The current model's thinking
-/// levels are given to all; each other model's are read once it is picked.
+/// The models in a `configOptions` list. Only the current model carries the
+/// thinking levels from this reply; any other model's are read once it is picked.
 fn models_from(options: &Value) -> Vec<ModelInfo> {
     let Some(option) = model_option(options) else { return Vec::new() };
+    let current = option["currentValue"].as_str();
     let (efforts, default_effort) = effort_levels(options).unwrap_or_default();
     option["options"]
         .as_array()
@@ -317,12 +321,13 @@ fn models_from(options: &Value) -> Vec<ModelInfo> {
         .filter_map(|o| {
             let value = o["value"].as_str()?.to_string();
             let name = o["name"].as_str().unwrap_or(&value).to_string();
+            let is_current = current == Some(value.as_str());
             Some(ModelInfo {
                 value,
                 name,
                 detail: None,
-                efforts: efforts.clone(),
-                default_effort: default_effort.clone(),
+                efforts: if is_current { efforts.clone() } else { Vec::new() },
+                default_effort: if is_current { default_effort.clone() } else { None },
             })
         })
         .collect()
@@ -641,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn every_model_gets_the_thinking_levels() {
+    fn only_the_current_model_starts_with_thinking_levels() {
         let options = json!([
             { "id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [
                 { "value": "gemini-4-neon", "name": "Gemini 4 Neon" },
@@ -654,9 +659,11 @@ mod tests {
         ]);
         let models = models_from(&options);
         assert_eq!(models.iter().map(|m| m.value.as_str()).collect::<Vec<_>>(), ["gemini-4-neon", "claude-opus-5-5"]);
+        assert_eq!(models[0].efforts, ["low", "medium", "high", "xhigh"]);
+        assert_eq!(models[0].default_effort.as_deref(), Some("high"));
         assert_eq!(models[1].name, "Claude Opus 5.5");
-        assert_eq!(models[1].efforts, ["low", "medium", "high", "xhigh"]);
-        assert_eq!(models[1].default_effort.as_deref(), Some("high"));
+        assert!(models[1].efforts.is_empty());
+        assert_eq!(models[1].default_effort, None);
     }
 
     #[test]

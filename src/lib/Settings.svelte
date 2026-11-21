@@ -7,7 +7,8 @@
   import Preferences from "./Preferences.svelte";
   import { refreshSkills } from "./commands.svelte";
   import { closeFind, domSearcher } from "./find";
-  import { ANTIGRAVITY, CLAUDE, CODEX, agentLabel, importSkill, listSkills, pickFile, pickFolder, removeSkill, type AgentId, type ModelInfo, type SkillInfo } from "./ipc";
+  import { AGENTS, ANTIGRAVITY, CLAUDE, CODEX, agentLabel, importSkill, listSkills, pickFile, pickFolder, removeSkill, type AgentId, type ModelInfo, type SkillInfo } from "./ipc";
+  import type { AgentModels } from "./models";
   import type { AppState, Limit } from "./state/app.svelte";
   import {
     appearances,
@@ -31,9 +32,9 @@
     appearance = $bindable(),
     size = $bindable(),
     fontSize = $bindable(),
-    cursorModels = [],
-    cursorShown = [],
-    onCursorPick = () => {},
+    models = { "claude-code": [], codex: [], antigravity: [], cursor: [] },
+    shownModels = { "claude-code": [], codex: [], antigravity: [], cursor: [] },
+    onModelPick = () => {},
     onclose,
   }: {
     app: AppState;
@@ -42,36 +43,70 @@
     appearance: Appearance;
     size: Size;
     fontSize: number;
-    /** Every model Cursor offers; empty when Cursor isn't installed. */
-    cursorModels?: ModelInfo[];
-    /** The ones the model menu shows. */
-    cursorShown?: string[];
-    onCursorPick?: (value: string, on: boolean) => void;
+    /** Every model each agent offers. */
+    models?: AgentModels;
+    /** Which model values each agent shows in the model menu. */
+    shownModels?: Record<AgentId, string[]>;
+    onModelPick?: (agent: AgentId, value: string, on: boolean) => void;
     onclose: () => void;
   } = $props();
 
-  // Cursor's models: the ones in the menu, each with "remove", and one box
-  // that finds the rest as you type. Dozens of models, so no list of them all.
-  const picked = $derived(cursorModels.filter((m) => cursorShown.includes(m.value)));
-  let query = $state("");
-  const found = $derived.by(() => {
-    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-    if (!words.length) return [];
-    return cursorModels
-      .filter((m) => !cursorShown.includes(m.value))
-      .filter((m) => words.every((w) => `${m.name} ${m.value}`.toLowerCase().includes(w)))
-      .slice(0, 8);
+  // Models: one row per installed agent with a floating full-height dropdown
+  // of checkboxes. Long lists pin the models already on at the top when opened
+  // so toggling doesn't make rows jump under the pointer.
+  const PIN_AT = 12;
+  const modelAgents = $derived(
+    AGENTS.filter((agent) => (!app.agents.length || app.agents.includes(agent)) && models[agent].length > 0),
+  );
+  let openAgent = $state<AgentId | null>(null);
+  let pinnedOnOpen = $state<string[]>([]);
+  let openPicker = $state<HTMLElement>();
+
+  function toggleModels(agent: AgentId) {
+    if (openAgent === agent) {
+      closeModels();
+      return;
+    }
+    openAgent = agent;
+    pinnedOnOpen = [...shownModels[agent]];
+  }
+
+  function closeModels() {
+    openAgent = null;
+  }
+
+  function shownCount(agent: AgentId): number {
+    const shown = shownModels[agent];
+    return models[agent].filter((m) => shown.includes(m.value)).length;
+  }
+
+  function toggleModel(agent: AgentId, value: string) {
+    const on = shownModels[agent].includes(value);
+    if (on && shownCount(agent) <= 1) return;
+    onModelPick(agent, value, !on);
+  }
+
+  /** Models for the open dropdown, split into pinned-on-open + rest for long lists. */
+  const openModels = $derived.by(() => {
+    if (!openAgent) return { top: [] as ModelInfo[], rest: [] as ModelInfo[] };
+    const list = models[openAgent];
+    if (list.length > PIN_AT) {
+      const top = list.filter((m) => pinnedOnOpen.includes(m.value));
+      const rest = list.filter((m) => !pinnedOnOpen.includes(m.value));
+      return { top, rest };
+    }
+    return { top: list, rest: [] as ModelInfo[] };
   });
 
-  function addModel(value: string) {
-    onCursorPick(value, true);
-    query = "";
-  }
-
-  function findKey(e: KeyboardEvent) {
-    if (e.key === "Enter" && found.length) addModel(found[0].value);
-    if (e.key === "Escape") query = "";
-  }
+  // Click outside closes the open model dropdown.
+  $effect(() => {
+    if (!openAgent) return;
+    const away = (e: PointerEvent) => {
+      if (!openPicker?.contains(e.target as Node)) closeModels();
+    };
+    window.addEventListener("pointerdown", away, true);
+    return () => window.removeEventListener("pointerdown", away, true);
+  });
 
   // One pick per side. The app shows whichever side the appearance says, so
   // picking for the other side changes nothing on screen. App.svelte applies it.
@@ -227,13 +262,19 @@
   let scroller = $state<HTMLElement>();
   let prefsView = $state<Preferences>();
 
-  /** Escape closes an open find box first; on a page it goes back to the list,
-   *  not out of Settings. Caught before the app's own key handler. */
+  /** Escape closes an open find box or model dropdown first; on a page it goes
+   *  back to the list, not out of Settings. Caught before the app's own key handler. */
   function pageKey(e: KeyboardEvent) {
     if (e.key !== "Escape") return;
     if (closeFind()) {
       e.preventDefault();
       e.stopPropagation();
+      return;
+    }
+    if (openAgent) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeModels();
       return;
     }
     if (page) {
@@ -333,24 +374,69 @@
       </div>
     </section>
 
-    {#if cursorModels.length}
+    {#if modelAgents.length}
       <section>
-        <div class="label">Cursor models</div>
-        {#each picked as m (m.value)}
-          <div class="row">
-            <span class="name">{m.name}</span>
-            {#if picked.length > 1}
-              <button class="act" onclick={() => onCursorPick(m.value, false)}>remove</button>
+        <div class="label">Models</div>
+        {#each modelAgents as agent (agent)}
+          {@const count = shownCount(agent)}
+          {@const isOpen = openAgent === agent}
+          <div class="model-picker">
+            {#if isOpen}
+              <div bind:this={openPicker}>
+                <button
+                  class="model-trigger open"
+                  aria-haspopup="menu"
+                  aria-expanded="true"
+                  onclick={() => toggleModels(agent)}
+                >
+                  <span class="name">{agentLabel(agent)}</span>
+                  <span class="count">models</span>
+                </button>
+                <div class="model-menu" role="menu">
+                  {#each openModels.top as m (m.value)}
+                    {@const on = shownModels[agent].includes(m.value)}
+                    <button
+                      class="model-item"
+                      class:on
+                      role="menuitemcheckbox"
+                      aria-checked={on}
+                      disabled={on && count <= 1}
+                      onclick={() => toggleModel(agent, m.value)}
+                    >
+                      <span class="mark">{on ? "[x]" : "[ ]"}</span><span class="model-name">{m.name}</span>
+                    </button>
+                  {/each}
+                  {#if openModels.top.length && openModels.rest.length}
+                    <div class="model-sep"></div>
+                  {/if}
+                  {#each openModels.rest as m (m.value)}
+                    {@const on = shownModels[agent].includes(m.value)}
+                    <button
+                      class="model-item"
+                      class:on
+                      role="menuitemcheckbox"
+                      aria-checked={on}
+                      disabled={on && count <= 1}
+                      onclick={() => toggleModel(agent, m.value)}
+                    >
+                      <span class="mark">{on ? "[x]" : "[ ]"}</span><span class="model-name">{m.name}</span>
+                    </button>
+                  {/each}
+                </div>
+              </div>
+            {:else}
+              <button
+                class="model-trigger"
+                aria-haspopup="menu"
+                aria-expanded="false"
+                onclick={() => toggleModels(agent)}
+              >
+                <span class="name">{agentLabel(agent)}</span>
+                <span class="count">models</span>
+              </button>
             {/if}
           </div>
         {/each}
-        <input class="find" placeholder="add a model" spellcheck="false" bind:value={query} onkeydown={findKey} />
-        {#each found as m (m.value)}
-          <button class="open add" onclick={() => addModel(m.value)}>{m.name}</button>
-        {/each}
-        {#if query.trim() && !found.length}
-          <div class="sub">no match</div>
-        {/if}
       </section>
     {/if}
 
@@ -606,27 +692,68 @@
     min-width: 0;
     color: var(--fg);
   }
-  .find {
-    display: block;
-    width: 100%;
-    margin-top: calc(var(--gap) * 0.6);
-    padding: 0.2em 0;
-    font: inherit;
-    color: var(--fg);
-    background: none;
-    border: none;
-    border-bottom: 1px solid var(--line);
-    outline: none;
+  .model-picker {
+    position: relative;
   }
-  .find::placeholder {
+  .model-trigger {
+    display: flex;
+    align-items: baseline;
+    gap: 2ch;
+    width: 100%;
+    text-align: left;
+  }
+  .model-trigger:hover .name,
+  .model-trigger.open .name {
+    color: var(--bright);
+  }
+  .model-trigger .count {
+    flex-shrink: 0;
     color: var(--faint);
   }
-  .find:focus {
-    border-bottom-color: var(--accent);
+  .model-trigger:hover .count,
+  .model-trigger.open .count {
+    color: var(--fg);
   }
-  .add {
-    display: block;
+  .model-menu {
+    position: absolute;
+    top: calc(100% + var(--gap) * 0.3);
+    left: 0;
+    right: 0;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    padding: calc(var(--gap) * 0.4) 0;
+    background: var(--panel);
+    border: 1px solid var(--line);
+  }
+  .model-item {
+    display: flex;
+    align-items: baseline;
     width: 100%;
+    padding: 0 2ch;
+    text-align: left;
+    color: var(--dim);
+  }
+  .model-item.on {
+    color: var(--fg);
+  }
+  .model-item:hover:not(:disabled) {
+    color: var(--bright);
+    background: var(--line);
+  }
+  .model-item:disabled {
+    cursor: default;
+  }
+  .model-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .model-sep {
+    margin: calc(var(--gap) * 0.4) 0;
+    border-top: 1px solid var(--line);
   }
   .danger {
     color: var(--bad);

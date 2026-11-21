@@ -30,9 +30,8 @@ function loadOne(agent: AgentId): ModelInfo[] {
     const saved = JSON.parse(localStorage.getItem(KEYS[agent]) ?? "[]") as ModelInfo[];
     if (Array.isArray(saved) && saved.every((m) => m && typeof m.value === "string")) {
       if (agent !== CLAUDE) return saved;
-      // A list saved before the picker was trimmed: the same trim (see
-      // `parse_models` in the core).
-      const kept = saved.filter((m) => m.value !== "default" && !m.value.includes("-"));
+      // Leave out "default"; pinned older versions stay so Settings can offer them.
+      const kept = saved.filter((m) => m.value !== "default");
       if (kept.length > 0) return kept;
     }
   } catch {
@@ -47,17 +46,17 @@ export function loadCachedModels(): AgentModels {
 }
 
 /**
- * The model a new chat starts on: the last one picked, or for Claude Code the
- * recommended one (listed first) if that was its "default", which the picker
- * no longer offers.
+ * The model a new chat starts on: the last one picked, or the agent's first
+ * shown model (recommended for Claude Code, Auto for Cursor, default for
+ * Codex and Antigravity) if none was picked.
  */
 export function startingModel(saved: string, agent: AgentId, models: AgentModels): string {
-  if (agent === CURSOR) return saved || "default";
-  // Codex and Antigravity list their default first.
+  const firstVisible = visibleModels(agent, models[agent], loadModelPick(agent))[0]?.value;
+  if (agent === CURSOR) return saved || firstVisible || "default";
   if (agent === CODEX || agent === ANTIGRAVITY) {
-    return saved && saved !== "default" ? saved : (models[agent][0]?.value ?? "default");
+    return saved && saved !== "default" ? saved : (firstVisible ?? models[agent][0]?.value ?? "default");
   }
-  return !saved || saved === "default" ? (models[CLAUDE][0]?.value ?? "default") : saved;
+  return !saved || saved === "default" ? (firstVisible ?? models[CLAUDE][0]?.value ?? "default") : saved;
 }
 
 export function saveCachedModels(agent: AgentId, models: ModelInfo[]): void {
@@ -130,18 +129,26 @@ export function modelName(agent: AgentId, value: string): string {
   return value;
 }
 
-// Which of Cursor's models the menu shows: the user's pick, made in Settings.
-// Cursor offers dozens, and its names don't say which are current. The first
-// pick is Auto alone; a model Cursor adds later is shown as it appears.
+// Which models each agent shows in the menu: the user's pick, made in Settings.
+// Cursor starts with Auto alone; Claude Code starts with its short-name
+// families (pinned older versions stay unchecked until turned on); Codex and
+// Antigravity start with all models on. Any new model an agent adds later
+// joins the menu automatically (except Claude Code's pinned older versions).
 
-const PICK_KEY = "harness.models.cursor.picked";
+const PICK_KEYS: Record<AgentId, string> = {
+  "claude-code": "harness.models.claude-code.picked",
+  codex: "harness.models.codex.picked",
+  antigravity: "harness.models.antigravity.picked",
+  cursor: "harness.models.cursor.picked",
+};
 
 /** `shown`: in the menu. `known`: every model seen so far, so a new one can be told apart. */
-export type CursorPick = { shown: string[]; known: string[] };
+export type ModelPick = { shown: string[]; known: string[] };
+export type AgentPicks = Record<AgentId, ModelPick | null>;
 
-export function loadCursorPick(): CursorPick | null {
+export function loadModelPick(agent: AgentId): ModelPick | null {
   try {
-    const saved = JSON.parse(localStorage.getItem(PICK_KEY) ?? "null") as CursorPick | null;
+    const saved = JSON.parse(localStorage.getItem(PICK_KEYS[agent]) ?? "null") as ModelPick | null;
     if (saved && Array.isArray(saved.shown) && Array.isArray(saved.known)) return saved;
   } catch {
     // Treated as never picked.
@@ -149,30 +156,72 @@ export function loadCursorPick(): CursorPick | null {
   return null;
 }
 
-export function saveCursorPick(pick: CursorPick): void {
+export function loadModelPicks(): AgentPicks {
+  return Object.fromEntries(AGENTS.map((agent) => [agent, loadModelPick(agent)])) as AgentPicks;
+}
+
+export function saveModelPick(agent: AgentId, pick: ModelPick): void {
   try {
-    localStorage.setItem(PICK_KEY, JSON.stringify(pick));
+    localStorage.setItem(PICK_KEYS[agent], JSON.stringify(pick));
   } catch {
     // Storage can be unavailable; the pick is then lost at quit.
   }
 }
 
-/**
- * The pick after Cursor listed `models`: at first only Auto; after that, any
- * model not seen before is added to the menu.
- */
-export function followList(pick: CursorPick | null, models: ModelInfo[]): CursorPick {
-  const values = models.map((m) => m.value);
-  if (!pick) return { shown: values.filter((v) => v === "default"), known: values };
-  const fresh = values.filter((v) => !pick.known.includes(v));
-  return { shown: [...pick.shown, ...fresh], known: [...pick.known, ...fresh] };
+/** Which models of `values` are shown before the user has picked any. */
+export function defaultShown(agent: AgentId, values: string[]): string[] {
+  if (agent === CURSOR) {
+    const auto = values.filter((v) => v === "default");
+    return auto.length ? auto : values.slice(0, 1);
+  }
+  if (agent === CLAUDE) {
+    const short = values.filter((v) => !v.includes("-"));
+    return short.length ? short : [...values];
+  }
+  return [...values];
 }
 
-/** Effort levels from an earlier list, kept where a new list didn't read them. */
+/** The model values currently shown for `agent`, before or after a first pick. */
+export function shownFor(agent: AgentId, pick: ModelPick | null, list: ModelInfo[]): string[] {
+  if (pick) return pick.shown;
+  if (agent === CURSOR && list.length === 0) return ["default"];
+  return defaultShown(agent, list.map((m) => m.value));
+}
+
+/** The subset of `list` shown in the model menu, in the agent's own order. */
+export function visibleModels(agent: AgentId, list: ModelInfo[], pick: ModelPick | null): ModelInfo[] {
+  const shown = shownFor(agent, pick, list);
+  const kept = list.filter((m) => shown.includes(m.value));
+  if (kept.length > 0 || list.length === 0) return kept;
+  const fallback = defaultShown(agent, list.map((m) => m.value));
+  return list.filter((m) => fallback.includes(m.value));
+}
+
+/**
+ * The pick after `agent` listed `models`: defaults on the first run; after
+ * that, newly seen models join the menu (except Claude Code's pinned older
+ * versions, which stay unchecked until turned on).
+ */
+export function followList(agent: AgentId, pick: ModelPick | null, models: ModelInfo[]): ModelPick {
+  const values = models.map((m) => m.value);
+  if (!pick) return { shown: defaultShown(agent, values), known: values };
+  const fresh = values.filter((v) => !pick.known.includes(v));
+  const auto = agent === CLAUDE ? fresh.filter((v) => !v.includes("-")) : fresh;
+  const shown = [...pick.shown, ...auto];
+  const hasLive = values.some((v) => shown.includes(v));
+  const nextShown = hasLive
+    ? shown
+    : [...shown, ...defaultShown(agent, values).filter((v) => !shown.includes(v))];
+  return { shown: nextShown, known: [...pick.known, ...fresh] };
+}
+
+/** Effort levels and defaults from an earlier list, kept where a new list didn't read them. */
 export function keepEfforts(list: ModelInfo[], before: ModelInfo[]): ModelInfo[] {
   return list.map((m) => {
-    if (m.efforts?.length) return m;
     const old = before.find((b) => b.value === m.value);
-    return old?.efforts?.length ? { ...m, efforts: old.efforts, default_effort: old.default_effort } : m;
+    if (!old) return m;
+    const efforts = m.efforts?.length ? m.efforts : old.efforts;
+    const default_effort = m.default_effort ?? (efforts?.length ? old.default_effort : null);
+    return { ...m, efforts, default_effort };
   });
 }
