@@ -121,7 +121,7 @@
     <button
     class="icon"
     class:off={!page?.url}
-    title="Open in your browser"
+    title="Open in browser"
     onclick={() => page?.url && void openUrl(page.url).catch(() => {})}
   >
     <BarIcon name="external" />

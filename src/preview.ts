@@ -1070,7 +1070,7 @@ function moveDoc(from: string, to: string) {
 
 // ---- The terminal: a pretend shell that echoes and answers a few commands ----
 
-type PreviewTab = { id: string; project: string; label: string; running: string | null; closed: boolean; worktree: string | null };
+type PreviewTab = { id: string; project: string; label: string; running: string | null; closed: boolean; worktree: string | null; failed?: boolean };
 const termTabs: PreviewTab[] = [];
 const termOutput = new Map<string, string>();
 const termSinks = new Map<string, { callback: number; index: number }>();
@@ -1083,7 +1083,7 @@ const promptFor = (tab: PreviewTab) =>
 function termInfo(project: string) {
   return termTabs
     .filter((t) => t.project === project)
-    .map((t) => ({ id: t.id, title: t.running ? t.running.split(" ")[0] : t.label, running: t.running, closed: t.closed, done: false, worktree: t.worktree }));
+    .map((t) => ({ id: t.id, title: t.running ? t.running.split(" ")[0] : t.label, running: t.running, closed: t.closed, done: false, failed: !!t.failed, worktree: t.worktree }));
 }
 function termSend(id: string, text: string) {
   termOutput.set(id, (termOutput.get(id) ?? "") + text);
@@ -1125,6 +1125,18 @@ function addTab(project: string, label: string, worktree: string | null, output 
       "",
     ].join("\r\n"),
   );
+  // A tab an agent opened, whose command failed.
+  const tests = addTab(project, "harness", null);
+  tests.failed = true;
+  termOutput.set(
+    tests.id,
+    [
+      `${promptFor(tests)}npm test`,
+      `${esc}[31m✗${esc}[0m sidebar > folds a project (12 ms)`,
+      "Tests: 1 failed, 41 passed",
+      promptFor(tests),
+    ].join("\r\n"),
+  );
 }
 
 Object.assign(commands, {
@@ -1160,6 +1172,10 @@ Object.assign(commands, {
       const line = termLine.get(id) ?? "";
       if (ch === "\r") {
         termLine.set(id, "");
+        if (tab.failed) {
+          tab.failed = false;
+          termTabsChanged(tab.project);
+        }
         const answer: Record<string, string> = {
           ls: "PLAN.md  package.json  src  src-tauri",
           pwd: tab.worktree ?? tab.project,

@@ -11,7 +11,7 @@
 </script>
 
 <!-- A chat picked with @ is kept as a file with the path `chat:<id>`. -->
-<button class="file-word" title={path.startsWith("chat:") ? "Open this chat" : path} onclick={open}>{word}</button>
+<button class="file-word" title={path.startsWith("chat:") ? "Open" : path} onclick={open}>{word}</button>
 
 <style>
   .file-word {

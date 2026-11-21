@@ -1213,6 +1213,11 @@ pub fn run() {
             let tab_command = home.tab_command();
             let side = SideChats::new(agents.clone(), store.clone(), out.clone(), home.clone(), &dir);
             let terminals = Terminals::new(out.clone(), store.clone());
+            // How an agent's tab learns that its command failed.
+            match home.write_shell_hook() {
+                Ok(()) => terminals.set_zsh_hook(home.zsh_hook_dir()),
+                Err(e) => eprintln!("harness: couldn't write the shell hook: {e}"),
+            }
             let panel_out = out.clone();
             let sessions = SessionManager::new(agents.clone(), store.clone(), out, dir, home);
             // Every chat's agent can drive that chat's browser and read its
