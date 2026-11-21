@@ -163,12 +163,12 @@
 {#snippet corner()}
   <button
     class="icon"
-    title={chat.panelWide ? "Bring the chat back (Esc)" : "Full screen"}
+    title={chat.panelWide ? "Exit full screen (Esc)" : "Full screen"}
     onclick={() => (chat.panelWide = !chat.panelWide)}
   >
     <BarIcon name={chat.panelWide ? "narrow" : "widen"} />
   </button>
-  <button class="icon" title="Hide the panel" onclick={() => (chat.panelOpen = false)}>
+  <button class="icon" title="Hide" onclick={() => (chat.panelOpen = false)}>
     <BarIcon name="close" />
   </button>
 {/snippet}
@@ -193,9 +193,9 @@
                 () => termTabs.map((t) => t.id),
                 (id, to) => terminals.move(project, id, to),
               )}
-            >{#if tab.done}<span class="done" title="Finished since you last looked">●</span>{/if}{tab.title}</button
+            >{#if tab.failed}<span class="done failed" title="Failed">●</span>{:else if tab.done}<span class="done" title="Finished">●</span>{/if}{tab.title}</button
           >
-          <button class="shut" title="Close this tab" onclick={(e) => shut(e, tab.id)}>×</button>
+          <button class="shut" title="Close" onclick={(e) => shut(e, tab.id)}>×</button>
         </span>
       {/each}
     </div>
@@ -249,7 +249,7 @@
                 (id, to) => chat.moveBrowserTab(id, to),
               )}>{pageLabel(tab)}</button
           >
-          <button class="shut" title="Close this tab" onclick={() => chat.closeBrowserTab(tab.id)}>×</button>
+          <button class="shut" title="Close" onclick={() => chat.closeBrowserTab(tab.id)}>×</button>
         </span>
       {/each}
     </div>
@@ -315,7 +315,7 @@
                 (id, to) => chat.moveSide(id, to),
               )}>{name}</button
           >
-          <button class="shut" title="End this side chat; it is forgotten" onclick={() => chat.endSide(id)}>×</button>
+          <button class="shut" title="End" onclick={() => chat.endSide(id)}>×</button>
         </span>
       {/each}
     </div>
@@ -330,7 +330,7 @@
       {#if chat.notesTab}
         <span class="tab" class:on={active === NOTES_TAB}>
           <button onclick={() => chat.openPanel(NOTES_TAB)}>notes</button>
-          <button class="shut" title="Close this tab" onclick={() => chat.closeTab(NOTES_TAB)}>×</button>
+          <button class="shut" title="Close" onclick={() => chat.closeTab(NOTES_TAB)}>×</button>
         </span>
       {/if}
       {#if chat.planTab}
@@ -338,7 +338,7 @@
           <button onclick={() => chat.openPanel(PLAN_TAB)}>plan</button>
           <!-- A plan that is waiting for an answer stays put. -->
           {#if !chat.planPending}
-            <button class="shut" title="Close this tab" onclick={() => chat.closeTab(PLAN_TAB)}>×</button>
+            <button class="shut" title="Close" onclick={() => chat.closeTab(PLAN_TAB)}>×</button>
           {/if}
         </span>
       {/if}
@@ -361,7 +361,7 @@
                 (path, to) => chat.moveDoc(path, to),
               )}>{label(doc.path)}</button
           >
-          <button class="shut" title="Close this tab" onclick={() => chat.closeTab(doc.path)}>×</button>
+          <button class="shut" title="Close" onclick={() => chat.closeTab(doc.path)}>×</button>
         </span>
       {/each}
     </div>
@@ -410,6 +410,10 @@
     display: inline-block;
     width: 2ch;
     color: var(--blue);
+  }
+  /* An agent's tab whose last command failed: red until its next command. */
+  .done.failed {
+    color: var(--bad);
   }
   /* A tab's close mark shows on the tab in front, or under the pointer. */
   .shut {

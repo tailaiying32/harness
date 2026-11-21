@@ -181,9 +181,9 @@
     <span class="label">{label}</span>
     {#if list.length > 1}
       <span class="steps">
-        <button disabled={at <= 0} title="Previous image (←)" onclick={() => step(-1)}>‹</button>
+        <button disabled={at <= 0} title="Previous (←)" onclick={() => step(-1)}>‹</button>
         <span>{at + 1} of {list.length}</span>
-        <button disabled={at >= list.length - 1} title="Next image (→)" onclick={() => step(1)}>›</button>
+        <button disabled={at >= list.length - 1} title="Next (→)" onclick={() => step(1)}>›</button>
       </span>
     {/if}
     <button class="close" title="Close (Esc)" onclick={close}><BarIcon name="close" /></button>

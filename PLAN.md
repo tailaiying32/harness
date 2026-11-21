@@ -2385,7 +2385,8 @@ plan, approving brings an edit to a document), and a scripted answer to
 anything typed. For working on the look without building the app. Add
 `#open=planning&browser` for the browser view (no page is drawn in the
 preview; the tab and address line work), or `&terminal` for the terminal (a
-pretend shell with two tabs: one at its prompt, one running a server; it
+pretend shell with three tabs: one at its prompt, one running a server, one
+whose command failed; it
 answers `ls`, `pwd` and `echo hello`, and `sleep`/`python3` "run" until Ctrl+C).
 It is not part of the built app. `.claude/launch.json` starts it as
 `ui-preview`.

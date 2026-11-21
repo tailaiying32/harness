@@ -276,7 +276,7 @@
 
 <aside class="panel" bind:this={panel}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="grip" title="Drag to resize; double-click to reset" onpointerdown={startDrag} ondblclick={resetWidth}></div>
+  <div class="grip" onpointerdown={startDrag} ondblclick={resetWidth}></div>
   {#if chat.panelView === "terminal"}
     <TerminalView {chat} {covered} />
   {:else if chat.panelView === "browser"}

@@ -23,6 +23,10 @@
 //!   the tabs are back, closed, with a "restored" line.
 //! - A tab opened in a chat's worktree keeps that worktree from being put away
 //!   while its shell runs, and is closed with a line when the worktree goes.
+//! - A tab an agent opened knows when its last command failed: its zsh starts
+//!   with a hook that reports each exit status in a mark (`STATUS_MARK`), which
+//!   is taken out of the output here. Other shells and the user's own tabs
+//!   don't report.
 //! - A tab an agent opened goes with its chat when the chat is deleted, unless
 //!   something still runs in it or the user has typed in it (then it is theirs).
 
@@ -106,6 +110,8 @@ pub struct TabInfo {
     pub closed: bool,
     /// A command finished in it since it was last on screen.
     pub done: bool,
+    /// Its last command failed (known only in tabs an agent opened).
+    pub failed: bool,
     /// The worktree folder it was opened in, if any.
     pub worktree: Option<String>,
 }
@@ -136,6 +142,11 @@ struct Tab {
     /// A command finished in it while it was off screen, and it hasn't been
     /// on screen since.
     done: bool,
+    /// Its last command ended with a failing status, as its shell reported.
+    failed: bool,
+    /// The end of the last output read, held back while it may be the start
+    /// of a status mark.
+    held: Vec<u8>,
     /// The last of its raw output.
     tail: Vec<u8>,
     /// A full-screen program (vim, less) has the screen.
@@ -171,6 +182,8 @@ impl Tab {
             running: None,
             fg: None,
             done: false,
+            failed: false,
+            held: Vec::new(),
             tail: Vec::new(),
             alt_screen: false,
             used: Instant::now(),
@@ -255,6 +268,8 @@ impl State {
 struct Inner {
     out: Out,
     store: Arc<Store>,
+    /// The folder agents' zsh tabs start in for their startup file, once set.
+    zsh_hook: Mutex<Option<PathBuf>>,
     state: Mutex<State>,
     idle: Duration,
     ticks: Mutex<u64>,
@@ -295,10 +310,16 @@ impl Terminals {
         Terminals(Arc::new(Inner {
             out,
             store,
+            zsh_hook: Mutex::new(None),
             state: Mutex::new(State::default()),
             idle,
             ticks: Mutex::new(0),
         }))
+    }
+
+    /// Where the zsh startup file for agents' tabs is (see `Home::write_shell_hook`).
+    pub fn set_zsh_hook(&self, dir: PathBuf) {
+        *lock(&self.0.zsh_hook) = Some(dir);
     }
 
     fn restore(&self) {
@@ -435,16 +456,18 @@ impl Terminals {
 
     /// Starts a shell in a tab whose shell isn't running.
     fn start(&self, id: &str) -> Result<(), String> {
-        let (folder, size) = {
+        let (folder, size, agents) = {
             let state = lock(&self.0.state);
             let tab = state.tabs.get(id).ok_or("That terminal tab is gone")?;
             if tab.live.is_some() {
                 return Ok(());
             }
             let folder = if tab.folder.is_dir() { tab.folder.clone() } else { PathBuf::from(&tab.project) };
-            (folder, tab.size)
+            (folder, tab.size, tab.chat.is_some())
         };
-        let (live, reader) = start_shell(&folder, size)?;
+        // Only an agent's tab reports how its commands end.
+        let hook = if agents { lock(&self.0.zsh_hook).clone() } else { None };
+        let (live, reader) = start_shell(&folder, size, hook.as_deref())?;
         let mut state = lock(&self.0.state);
         let Some(tab) = state.tabs.get_mut(id) else {
             drop(state);
@@ -466,6 +489,8 @@ impl Terminals {
         tab.running = None;
         tab.fg = None;
         tab.alt_screen = false;
+        tab.failed = false;
+        tab.held.clear();
         let run = tab.run;
         let weak = Arc::downgrade(&self.0);
         let id = id.to_string();
@@ -517,9 +542,16 @@ impl Terminals {
         }
         let mut state = lock(&self.0.state);
         let tab = state.tabs.get_mut(id).ok_or("That terminal tab is gone")?;
+        // A new command line: the last one's failure is old news.
+        let cleared = data.contains('\r') && std::mem::take(&mut tab.failed);
+        let project = tab.project.clone();
         let live = tab.live.as_mut().ok_or("The shell isn't running")?;
-        live.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-        live.writer.flush().map_err(|e| e.to_string())
+        let sent = live.writer.write_all(data.as_bytes()).and_then(|_| live.writer.flush()).map_err(|e| e.to_string());
+        drop(state);
+        if cleared {
+            self.emit(&project);
+        }
+        sent
     }
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), String> {
@@ -614,6 +646,7 @@ impl Terminals {
             let Some(tab) = state.tabs.get_mut(id) else { return };
             let text = why(tab.running.as_deref());
             let live = tab.live.take();
+            tab.failed = false;
             // Whatever the old shell still prints is dropped.
             tab.run += 1;
             let fg = tab.fg.take();
@@ -868,6 +901,7 @@ impl Terminals {
                         let tab = &state.tabs[&info.id];
                         let what = match (&info.running, info.closed) {
                             (_, true) => "closed".to_string(),
+                            (None, _) if info.failed => "idle; its last command failed".to_string(),
                             (Some(line), _) => format!("running: {line}"),
                             (None, _) => "at its prompt".to_string(),
                         };
@@ -956,6 +990,7 @@ fn infos(state: &State, project: &str) -> Vec<TabInfo> {
                 running: tab.running.clone(),
                 closed: tab.live.is_none(),
                 done: tab.done,
+                failed: tab.failed,
                 worktree: tab.worktree.as_ref().map(|w| w.to_string_lossy().into_owned()),
             }
         })
@@ -1202,9 +1237,18 @@ fn local_time(ms: i64) -> String {
 }
 
 /// Starts the user's shell, as a login shell so their profile sets PATH.
-fn start_shell(folder: &Path, size: PtySize) -> Result<(Live, Box<dyn Read + Send>), String> {
+fn start_shell(folder: &Path, size: PtySize, zsh_hook: Option<&Path>) -> Result<(Live, Box<dyn Read + Send>), String> {
     let pair = native_pty_system().openpty(size).map_err(|e| format!("Can't make a terminal: {e}"))?;
     let mut cmd = shell_command();
+    // zsh reads its first startup file from the hook's folder; that file
+    // puts the user's own folder back and loads theirs.
+    let zsh = cmd.get_argv().first().is_some_and(|shell| Path::new(shell).file_name().is_some_and(|name| name == "zsh"));
+    if let Some(dir) = zsh_hook.filter(|_| zsh) {
+        if let Some(own) = std::env::var_os("ZDOTDIR") {
+            cmd.env("HARNESS_USER_ZDOTDIR", own);
+        }
+        cmd.env("ZDOTDIR", dir);
+    }
     cmd.cwd(folder);
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -1339,9 +1383,60 @@ fn read_loop(weak: Weak<Inner>, id: String, run: u64, mut reader: Box<dyn Read +
             }
         }
         tab.spoke = true;
-        tab.push(&buf[..n]);
+        let mut bytes = std::mem::take(&mut tab.held);
+        bytes.extend_from_slice(&buf[..n]);
+        let (out, status, held) = take_status_marks(&bytes);
+        tab.held = held;
+        // Ctrl+C (130) is the user stopping it, not a failure.
+        let failed = status.map(|code| code != 0 && code != 130);
+        let changed = failed.is_some_and(|failed| std::mem::replace(&mut tab.failed, failed) != failed);
+        tab.push(&out);
+        if changed {
+            let project = tab.project.clone();
+            drop(state);
+            Terminals(inner).emit(&project);
+        }
     }
     shell_ended(&weak, &id, run);
+}
+
+/// How a shell with Harness's hook reports a command's exit status before
+/// each prompt: ESC ] 7718 ; <status> BEL.
+const STATUS_MARK: &[u8] = b"\x1b]7718;";
+
+/// Takes the status marks out of a stretch of output. Returns the output
+/// without them, the last status reported, and an unfinished mark at the end
+/// to hold back until more output comes.
+fn take_status_marks(bytes: &[u8]) -> (Vec<u8>, Option<i32>, Vec<u8>) {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut status = None;
+    let mut at = 0;
+    while at < bytes.len() {
+        let Some(found) = bytes[at..].iter().position(|b| *b == 0x1b).map(|i| at + i) else { break };
+        out.extend_from_slice(&bytes[at..found]);
+        let rest = &bytes[found..];
+        let known = rest.len().min(STATUS_MARK.len());
+        if rest[..known] != STATUS_MARK[..known] {
+            out.push(0x1b);
+            at = found + 1;
+            continue;
+        }
+        // The mark's start, whole or cut off by the end of the output.
+        let digits = rest[known..].iter().take_while(|b| b.is_ascii_digit()).count();
+        let end = known + digits;
+        if end == rest.len() && digits <= 3 {
+            return (out, status, rest.to_vec());
+        }
+        if digits > 0 && digits <= 3 && rest.get(end) == Some(&0x07) {
+            status = std::str::from_utf8(&rest[known..end]).ok().and_then(|s| s.parse().ok());
+            at = found + end + 1;
+        } else {
+            out.push(0x1b);
+            at = found + 1;
+        }
+    }
+    out.extend_from_slice(&bytes[at.min(bytes.len())..]);
+    (out, status, Vec::new())
 }
 
 /// ConPTY keeps its output open after the shell exits (until the pseudo
@@ -1701,6 +1796,59 @@ mod tests {
         for id in left {
             t.close(&id);
         }
+    }
+
+    #[test]
+    fn status_marks_come_out_of_the_output() {
+        assert_eq!(take_status_marks(b"a\x1b]7718;1\x07b"), (b"ab".to_vec(), Some(1), Vec::new()));
+        assert_eq!(take_status_marks(b"\x1b]7718;1\x07x\x1b]7718;0\x07"), (b"x".to_vec(), Some(0), Vec::new()));
+        // Cut off at the end: held back, and whole with the next output.
+        let (out, status, held) = take_status_marks(b"ok\x1b]77");
+        assert_eq!((out, status, held.clone()), (b"ok".to_vec(), None, b"\x1b]77".to_vec()));
+        let mut next = held;
+        next.extend_from_slice(b"18;127\x07$ ");
+        assert_eq!(take_status_marks(&next), (b"$ ".to_vec(), Some(127), Vec::new()));
+        // Other escapes pass through, a size mark too.
+        let other = b"\x1b[31mred\x1b]7717;80x24\x07\x1b]7718;x\x07\x1b]7718;12345".to_vec();
+        assert_eq!(take_status_marks(&other), (other.clone(), None, Vec::new()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_agents_tab_knows_its_last_command_failed() {
+        if !std::env::var("SHELL").is_ok_and(|s| s.ends_with("/zsh")) {
+            return;
+        }
+        let (t, _) = rig(IDLE);
+        let base = std::env::temp_dir().join(format!("harness-hook-{}", uuid::Uuid::new_v4().simple()));
+        let home = crate::home::Home::new(base.clone());
+        home.write_shell_hook().unwrap();
+        t.set_zsh_hook(home.zsh_hook_dir());
+        let project = folder();
+        let failed = |id: &str, want: bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline && t.tabs(&project).iter().find(|x| x.id == id).unwrap().failed != want {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            t.tabs(&project).iter().find(|x| x.id == id).unwrap().failed == want
+        };
+        let tab = t.run_for_agent(&project, "chat-1", None, "echo o''ne; false", &|_| {}).unwrap();
+        assert!(wait_for(&t, &tab.id, "one"));
+        assert!(failed(&tab.id, true));
+        // The mark never reaches the output.
+        assert!(!String::from_utf8_lossy(&lock(&t.0.state).tabs[&tab.id].tail).contains("7718"));
+        t.write(&tab.id, "echo t''wo\r").unwrap();
+        assert!(wait_for(&t, &tab.id, "two"));
+        assert!(failed(&tab.id, false));
+        // The user's own tabs don't report.
+        let mine = t.open(&project, None, None, 80, 24).unwrap();
+        t.write(&mine.id, "echo th''ree; false\r").unwrap();
+        assert!(wait_for(&t, &mine.id, "three"));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!t.tabs(&project).iter().find(|x| x.id == mine.id).unwrap().failed);
+        t.close(&tab.id);
+        t.close(&mine.id);
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]

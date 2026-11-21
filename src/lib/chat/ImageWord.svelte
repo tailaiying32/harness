@@ -12,7 +12,7 @@
   }
 </script>
 
-<button class="image-word" title="Open the image" onclick={open}>[image {image.n}]</button>
+<button class="image-word" onclick={open}>[image {image.n}]</button>
 
 <style>
   .image-word {

@@ -60,7 +60,7 @@
       {#if renaming && renaming === chat.sessionId}
         <RenameField value={title} done={finishRename} />
       {:else if title}
-        <button title="{title} (click to rename)" onclick={() => (renaming = chat.sessionId)}>{title}</button>
+        <button title="Rename" onclick={() => (renaming = chat.sessionId)}>{title}</button>
       {/if}
     </span>
     <span class="views">

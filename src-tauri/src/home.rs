@@ -203,6 +203,42 @@ exec curl -sS --fail-with-body --max-time 20 --data-binary \"$*\" \"$TILDE_TAB_U
         Ok(())
     }
 
+    /// Where the zsh startup file for agents' terminal tabs lives (see
+    /// `write_shell_hook`).
+    pub fn zsh_hook_dir(&self) -> PathBuf {
+        self.root.join("shell").join("zsh")
+    }
+
+    /// Writes the zsh startup file that a terminal tab an agent opened starts
+    /// with (its folder is the shell's `ZDOTDIR`). It hands straight back to
+    /// the user's own startup files, and adds one thing: before each prompt
+    /// the shell reports the last command's exit status in a mark the
+    /// terminal takes out of the output (see `terminal::STATUS_MARK`).
+    pub fn write_shell_hook(&self) -> Result<(), String> {
+        let dir = self.zsh_hook_dir();
+        let path = dir.join(".zshenv");
+        let text = "# Written by Harness; changes are overwritten.
+# A terminal tab an agent opened starts zsh here, so the tab can tell
+# whether the last command failed. Your own startup files load as usual.
+if [[ -n ${HARNESS_USER_ZDOTDIR+x} ]]; then
+  export ZDOTDIR=$HARNESS_USER_ZDOTDIR
+else
+  unset ZDOTDIR
+fi
+unset HARNESS_USER_ZDOTDIR
+[[ -r ${ZDOTDIR:-$HOME}/.zshenv ]] && source ${ZDOTDIR:-$HOME}/.zshenv
+if [[ -o interactive ]]; then
+  __harness_status() { printf '\\033]7718;%s\\007' $? }
+  precmd_functions=(__harness_status $precmd_functions)
+fi
+";
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            std::fs::write(&path, text).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     /// The file the user's working preferences are kept in.
     pub fn preferences_file(&self) -> PathBuf {
         self.root.join("preferences.md")

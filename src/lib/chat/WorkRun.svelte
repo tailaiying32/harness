@@ -118,7 +118,7 @@
       {active ? spinner : failed ? "!" : waiting ? "·" : allSkipped ? "–" : "✓"}
     </span>
     <span class="summary">
-      {#if active && running}{present(running)}…{:else}{#each summary as part}{#if part.doc}{@const path = part.doc}<button class="doc" title="Open in the side panel" onclick={(e) => openDoc(e, path)}>{part.text}</button>{:else}{part.text}{/if}{/each}{/if}
+      {#if active && running}{present(running)}…{:else}{#each summary as part}{#if part.doc}{@const path = part.doc}<button class="doc" title="Open" onclick={(e) => openDoc(e, path)}>{part.text}</button>{:else}{part.text}{/if}{/each}{/if}
       {#if counts.added > 0}<span class="ok">+{counts.added}</span>{/if}
       {#if counts.removed > 0}<span class="bad">-{counts.removed}</span>{/if}
     </span>
@@ -138,16 +138,16 @@
           <div class="call">
             <span class="verb">{name.verb}</span>
             {#if onagent && isAgent(tool) && !tool.declined}
-              <button class="target doc" title="Follow this subagent in chat info" onclick={(e) => { e.stopPropagation(); onagent(tool.toolId); }}>
+              <button class="target doc" title="Open in chat info" onclick={(e) => { e.stopPropagation(); onagent(tool.toolId); }}>
                 {name.target}
               </button>
             {:else if docs.includes(docPath(tool)) && !tool.declined}
-              <button class="target doc" title="Open in the side panel" onclick={(e) => openDoc(e, docPath(tool))}>
+              <button class="target doc" title="Open" onclick={(e) => openDoc(e, docPath(tool))}>
                 {name.target}
               </button>
             {:else if onchat && readChat(tool)}
               {@const id = readChat(tool)}
-              <button class="target doc" title="Open this chat" onclick={(e) => { e.stopPropagation(); onchat(id); }}>
+              <button class="target doc" title="Open" onclick={(e) => { e.stopPropagation(); onchat(id); }}>
                 {name.target}
               </button>
             {:else}
@@ -168,13 +168,13 @@
                 {:else}
                   <div class="chat">
                     {#if onchat}
-                      <button class="doc name" title="Open this chat" onclick={() => onchat(line.id)}>{line.title}</button>
+                      <button class="doc name" title="Open" onclick={() => onchat(line.id)}>{line.title}</button>
                     {:else}
                       <span class="name">{line.title}</span>
                     {/if}
                     <span class="faint">{line.age}</span>
                     {#if onsteer}
-                      <button class="doc use" title="Tell the agent to go by this chat" onclick={() => onsteer(line.id, line.title)}>use this</button>
+                      <button class="doc use" onclick={() => onsteer(line.id, line.title)}>use this</button>
                     {/if}
                   </div>
                 {/if}
