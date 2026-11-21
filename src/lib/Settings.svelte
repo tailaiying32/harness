@@ -6,12 +6,16 @@
   import FindBar from "./FindBar.svelte";
   import Preferences from "./Preferences.svelte";
   import { refreshSkills } from "./commands.svelte";
+  import { iconUrl } from "./appIcon";
   import { closeFind, domSearcher } from "./find";
   import { AGENTS, ANTIGRAVITY, CLAUDE, CODEX, agentLabel, importSkill, listSkills, pickFile, pickFolder, removeSkill, type AgentId, type ModelInfo, type SkillInfo } from "./ipc";
   import type { AgentModels } from "./models";
   import type { AppState, Limit } from "./state/app.svelte";
   import {
+    APP_ICONS,
+    appIcons,
     appearances,
+    applyAppIcon,
     applyCommentButton,
     applyFontSize,
     applySize,
@@ -119,6 +123,19 @@
     if (dark) darkTheme = id;
     else lightTheme = id;
     savePrefs(dark ? { darkTheme: id } : { lightTheme: id });
+  }
+
+  // The app's icon is its own pick, plain or in any theme's colours: it
+  // doesn't follow the theme on show.
+  let appIcon = $state(loadPrefs().appIcon);
+  const iconGroups = [
+    { name: "dark", list: appIcons.filter((icon) => icon.dark) },
+    { name: "light", list: appIcons.filter((icon) => !icon.dark) },
+  ];
+  function pickAppIcon(id: string) {
+    appIcon = id;
+    savePrefs({ appIcon: id });
+    void applyAppIcon(id);
   }
 
   function pickAppearance(value: Appearance) {
@@ -362,6 +379,22 @@
         </div>
       {/each}
     </section>
+
+    {#if APP_ICONS}
+      <section>
+        <div class="label">App icon</div>
+        {#each iconGroups as group (group.name)}
+          <div class="sub">{group.name}</div>
+          <div class="choices grid icons">
+            {#each group.list as icon (icon.id)}
+              <button class:on={icon.id === appIcon} onclick={() => pickAppIcon(icon.id)}>
+                <span class="mark">{icon.id === appIcon ? "(•)" : "( )"}</span><img src={iconUrl(icon)} alt="" />{icon.name}
+              </button>
+            {/each}
+          </div>
+        {/each}
+      </section>
+    {/if}
 
     <section>
       <div class="label">Comment button</div>
@@ -618,6 +651,16 @@
   .choices button:hover,
   .choices button.on {
     color: var(--bright);
+  }
+  /* An icon sits in its row of text: two lines tall, the name beside its middle. */
+  .choices.icons button {
+    display: flex;
+    align-items: center;
+  }
+  .choices.icons img {
+    width: calc(var(--lh) * 2em);
+    height: calc(var(--lh) * 2em);
+    margin-right: 1ch;
   }
   .mark {
     color: var(--faint);

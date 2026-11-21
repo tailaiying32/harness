@@ -3132,6 +3132,34 @@ or carry on when one agent's usage runs out.
   background commands end at the switch (as when a chat closes). Codex
   joined with its adapter (see "Codex over app-server").
 
+### App icon (built 2026-11-21, branch `harness/tilde-app-icon-c377a5`)
+
+The app is being renamed Tilde; its icon is `~/` (the home folder) on a
+rounded tile. The rename itself has not started.
+
+- **The drawing** is code, `src/lib/appIcon.ts`: a gentle wave for the
+  tilde with its ends cut level, a slash cut level the same way, both in one
+  colour. Decided with the user: no font glyph, no rounder wave, no second
+  colour, no amber tile.
+- **One per theme**: the tile takes a theme's background and `~/` its
+  accent, so light themes have light tiles. The app's own two come
+  first, then two plain ones, white on black and black on white (both asked
+  for by the user). The user picks
+  the icon by hand in Settings ("App icon"); it does not follow the theme on
+  show.
+- **The files the app ships** (`src-tauri/icons`) are Harness Dark's icon,
+  made by `npm run icons` from the same drawing. Windows' files fill their
+  square; a Mac's keep the margin every Dock icon has.
+- **While the app runs** the window draws the picked icon to a PNG and the
+  core sets it as the Dock icon (`set_app_icon`), again at each start. A
+  pinned Dock tile shows the shipped icon while the app is closed. Changing
+  the shipped file would break the app's signature; making a pick stay needs
+  a Dock tile plug-in, which is put off.
+- **A build run from source** (`npm run tauri dev`, `dev_build`) wears a band
+  of hazard stripes on whichever icon is picked, so it is told apart from
+  the real app in the Dock.
+- Not covered: Windows has the new files but no picker and no stripes.
+
 ### If the approval channel breaks
 
 `--permission-prompt-tool stdio` and the `control_request` /
