@@ -507,6 +507,8 @@ export type TerminalTab = {
   closed: boolean;
   /** A command finished in it since it was last on screen. */
   done: boolean;
+  /** Its last command failed (known only in tabs an agent opened). */
+  failed: boolean;
   /** The chat worktree folder it was opened in, if any. */
   worktree: string | null;
 };

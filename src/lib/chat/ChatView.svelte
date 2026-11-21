@@ -233,7 +233,7 @@
           <!-- Claude reads a message sent mid-turn after its current step,
                unless the user would rather cut that step short. -->
           {#if group.item.queued}
-            <button class="now" title="Stop the current turn and send this now" onclick={() => chat.stop()}>
+            <button class="now" title="Send now" onclick={() => chat.stop()}>
               send now
             </button>
           {/if}
@@ -280,7 +280,7 @@
             <span>Page ·&nbsp;</span><button
               class="address"
               class:copied={copiedPage === page.id}
-              title="Click to copy"
+              title="Copy"
               onclick={() => copyPage(page.id, page.url)}>{page.url.replace(/^https?:\/\//, "")}</button>
             {#if page.id === latestPage}
               <span>&nbsp;·&nbsp;</span><button class="open" onclick={() => chat.showPage(page.url)}>open browser</button>

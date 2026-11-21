@@ -701,7 +701,7 @@
            sits at the left; once the chat has started it is gone (the sidebar
            shows the folder). Model and mode sit at the right. -->
       {#if !chat.started}
-        <button class="folder" onclick={changeFolder} title="Choose the folder this chat works in">
+        <button class="folder" onclick={changeFolder} title="Change folder">
           {folder}
         </button>
       {:else if chat.prs.length}
@@ -727,7 +727,7 @@
                 </button>
               {/each}
               {#if chat.workPath}
-                <div class="where" title="This chat works in its own worktree">{shortPath(chat.workPath, home, 60)}</div>
+                <div class="where" title="Worktree">{shortPath(chat.workPath, home, 60)}</div>
               {/if}
             </div>
           {/if}

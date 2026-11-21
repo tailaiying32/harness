@@ -13,8 +13,8 @@
   const glyph: Record<Dot, string> = { working: "●", waiting: "●", unseen: "●", idle: "○" };
   const meaning: Record<Dot, string> = {
     working: "Working",
-    waiting: "Needs your answer",
-    unseen: "Finished since you last looked",
+    waiting: "Waiting",
+    unseen: "Finished",
     idle: "",
   };
 
@@ -152,7 +152,7 @@
                caret points down while open, right once folded to the name. -->
           <button
             class="path"
-            title="{project.path} (click to fold, drag to move)"
+            title={project.path}
             onclick={() => fold(project)}
             onpointerdown={(e) => press(e, project.path)}
             onpointermove={drag}
@@ -164,9 +164,9 @@
           </button>
           {#if project.missing}
             <!-- The folder was moved or renamed: point at where it is, and its chats follow. -->
-            <button class="locate" title="{project.path} is gone. Pick where it is now." onclick={() => app.locate(project.path)}>locate</button>
+            <button class="locate" title="{project.path} is gone" onclick={() => app.locate(project.path)}>locate</button>
           {:else}
-            <button class="quiet" title="New chat in this folder" onclick={() => app.newChat(project.path)}>+</button>
+            <button class="quiet" title="New chat" onclick={() => app.newChat(project.path)}>+</button>
           {/if}
         </div>
         {#each shown as session (session.id)}
@@ -180,7 +180,7 @@
               <span class="dot {dot}">{glyph[dot]}</span>
               <RenameField class="in-row" value={session.title} done={finishRename} />
             {:else}
-              <button class="open" ondblclick={() => (renaming = session.id)} onclick={() => app.open(session.id)} title="{session.title} (double-click to rename)">
+              <button class="open" ondblclick={() => (renaming = session.id)} onclick={() => app.open(session.id)} title={session.title}>
                 <span class="dot {dot}" title={meaning[dot]}>{glyph[dot]}</span>
                 <span class="title">{session.title || "untitled"}</span>
               </button>
@@ -192,7 +192,7 @@
                 {#if session.prs.length}
                   <span class="branch" title={prLabel(session.prs)}><BranchMark prs={session.prs} /></span>
                 {/if}
-                <button class="quiet" title="Move this chat to the trash" onclick={() => (deleting = session.id)}>×</button>
+                <button class="quiet" title="Trash" onclick={() => (deleting = session.id)}>×</button>
               </span>
             {/if}
           </div>
