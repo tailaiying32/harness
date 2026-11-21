@@ -894,6 +894,12 @@ impl Store {
     /// Adds a pull request to the chat's list, or replaces the one with the
     /// same link. Returns the list afterwards and whether it changed.
     ///
+    /// A repo that is renamed or handed over changes every link, so one with
+    /// the same number from the same branch is the same pull request too: it
+    /// is replaced, not listed a second time. A second entry left by an older
+    /// build is dropped here as well: it would stay "open" for good, since
+    /// asking about its old link answers with the new one.
+    ///
     /// The only way the list is written, and it reads and writes under one
     /// lock, so two updates at once (a refresh and a new pull request) can't
     /// undo each other.
@@ -907,10 +913,21 @@ impl Store {
             return Ok((Vec::new(), false)); // the chat is gone
         };
         let mut prs: Vec<PrInfo> = saved.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        match prs.iter_mut().find(|p| p.url == pr.url) {
-            Some(same) if same == pr => return Ok((prs, false)),
-            Some(old) => *old = pr.clone(),
+        let same_one = |p: &PrInfo| p.url == pr.url || (p.number == pr.number && !pr.branch.is_empty() && p.branch == pr.branch);
+        let before = prs.clone();
+        match prs.iter().position(same_one) {
+            Some(first) => {
+                prs[first] = pr.clone();
+                let mut at = 0;
+                prs.retain(|p| {
+                    at += 1;
+                    at - 1 == first || !same_one(p)
+                });
+            }
             None => prs.push(pr.clone()),
+        }
+        if prs == before {
+            return Ok((prs, false));
         }
         let json = serde_json::to_string(&prs).map_err(|e| e.to_string())?;
         conn.execute("UPDATE sessions SET prs = ?2 WHERE id = ?1", params![session_id, json])
@@ -1542,6 +1559,30 @@ mod tests {
         assert_eq!(store.session("a").unwrap().unwrap().prs, prs);
         // A chat that is gone takes nothing.
         assert_eq!(store.upsert_pr("gone", &pr(1, "open")).unwrap(), (vec![], false));
+    }
+
+    #[test]
+    fn a_pull_request_whose_link_changed_is_still_one_entry() {
+        let store = Store::in_memory();
+        store.touch_session("a", "/one", "A", "default", "default").unwrap();
+        store.upsert_pr("a", &pr(1, "open")).unwrap();
+        store.upsert_pr("a", &pr(2, "open")).unwrap();
+        // The repo was renamed: the same pull request comes back under a new link.
+        let moved = |number: i64, state: &str| PrInfo { url: format!("https://github.com/o/renamed/pull/{number}"), ..pr(number, state) };
+        let (prs, changed) = store.upsert_pr("a", &moved(1, "merged")).unwrap();
+        assert!(changed);
+        assert_eq!(prs, vec![moved(1, "merged"), pr(2, "open")]);
+
+        // Two entries for one pull request, as a build before this left them, become one.
+        let twice = serde_json::to_string(&vec![pr(2, "open"), moved(2, "merged")]).unwrap();
+        store.exec("UPDATE sessions SET prs = ?2 WHERE id = ?1", params!["a", twice]).unwrap();
+        let (prs, changed) = store.upsert_pr("a", &moved(2, "merged")).unwrap();
+        assert!(changed);
+        assert_eq!(prs, vec![moved(2, "merged")]);
+
+        // The same number from another branch is another pull request (another repo's, say).
+        let other = PrInfo { url: "https://github.com/o/other/pull/2".into(), branch: "elsewhere".into(), ..pr(2, "open") };
+        assert_eq!(store.upsert_pr("a", &other).unwrap().0, vec![moved(2, "merged"), other]);
     }
 
     #[test]
