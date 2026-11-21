@@ -1,10 +1,11 @@
 <script lang="ts">
   // One of the chat's images, drawn over the top bar, chat and side panel
   // the way settings are, sized to fit. Clicking the picture switches between that and
-  // its actual pixels (one image pixel per screen pixel), to make out detail.
+  // its actual pixels (one image pixel per screen pixel), to make out detail. A pinch,
+  // ⌘-scroll or + and - zoom freely, about the pointer; 0 fits it again.
   // ← and → step through the chat's images; Escape, close or a click beside the
   // picture closes it. The picture is read from the core only while shown.
-  import { tick } from "svelte";
+  import { flushSync } from "svelte";
   import BarIcon from "./BarIcon.svelte";
   import { readImage } from "./ipc";
   import type { Chat } from "./state/chat.svelte";
@@ -18,7 +19,9 @@
   let url = $state<string | null>(null);
   let failed = $state(false);
   let size = $state<{ w: number; h: number } | null>(null);
-  let actual = $state(false);
+  /** Null when fitted; else the size, where 1 is one image pixel per screen pixel. */
+  let zoom = $state<number | null>(null);
+  const actual = $derived(zoom !== null);
   /** Fitted, the picture is drawn smaller than its actual pixels. */
   let shrunk = $state(false);
 
@@ -32,7 +35,7 @@
     url = null;
     failed = false;
     size = null;
-    actual = false;
+    zoom = null;
     let made: string | null = null;
     let gone = false;
     readImage(sessionId, n).then(
@@ -66,19 +69,77 @@
     shrunk = !actual && img.clientWidth < actualWidth() - 1;
   }
 
-  async function toggle(e: MouseEvent) {
-    if (!img || (!shrunk && !actual)) return;
-    // Zooming in keeps the clicked spot in view.
-    const fx = e.offsetX / img.clientWidth;
-    const fy = e.offsetY / img.clientHeight;
-    actual = !actual;
-    await tick();
-    if (actual) {
-      stage.scrollLeft = img.offsetLeft + fx * img.clientWidth - stage.clientWidth / 2;
-      stage.scrollTop = img.offsetTop + fy * img.clientHeight - stage.clientHeight / 2;
-    }
+  /** The fitted picture's size, in the units of `zoom`. */
+  function fitZoom() {
+    if (!img) return 1;
+    const cs = getComputedStyle(stage);
+    const w = stage.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    const h = stage.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    return Math.min(w / img.naturalWidth, h / img.naturalHeight, 1) * window.devicePixelRatio;
+  }
+
+  const current = () => zoom ?? fitZoom();
+
+  /** Zooms to `next`, keeping the spot at (x, y) in the window where it is.
+      Zooming out stops at the fitted size. */
+  function zoomTo(next: number, x: number, y: number) {
+    if (!img) return;
+    const fit = fitZoom();
+    next = Math.min(next, Math.max(8, fit * 4));
+    const was = img.getBoundingClientRect();
+    const fx = (x - was.left) / was.width;
+    const fy = (y - was.top) / was.height;
+    flushSync(() => (zoom = next <= fit * 1.001 ? null : next));
+    const now = img.getBoundingClientRect();
+    stage.scrollLeft += now.left + fx * now.width - x;
+    stage.scrollTop += now.top + fy * now.height - y;
     measure();
   }
+
+  /** Zooms by a factor about the middle of the view, for the keys. */
+  function zoomBy(factor: number) {
+    const r = stage.getBoundingClientRect();
+    zoomTo(current() * factor, r.left + r.width / 2, r.top + r.height / 2);
+  }
+
+  function toggle(e: MouseEvent) {
+    if (!img || (!shrunk && !actual)) return;
+    if (actual) fit();
+    else zoomTo(1, e.clientX, e.clientY);
+  }
+
+  function fit() {
+    flushSync(() => (zoom = null));
+    measure();
+  }
+
+  // A trackpad pinch arrives as a wheel with ctrl held (and ⌘-scroll is the
+  // mouse's way); plain scrolling pans a zoomed picture.
+  function onWheel(e: WheelEvent) {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    zoomTo(current() * Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
+  }
+
+  // WebKit (the Mac app) reports a pinch as its own gesture events instead.
+  $effect(() => {
+    let from = 1;
+    const start = (e: Event) => {
+      e.preventDefault();
+      from = current();
+    };
+    const change = (e: Event) => {
+      e.preventDefault();
+      const g = e as Event & { scale: number; clientX: number; clientY: number };
+      zoomTo(from * g.scale, g.clientX, g.clientY);
+    };
+    stage.addEventListener("gesturestart", start);
+    stage.addEventListener("gesturechange", change);
+    return () => {
+      stage.removeEventListener("gesturestart", start);
+      stage.removeEventListener("gesturechange", change);
+    };
+  });
 
   function step(by: number) {
     const next = list[at + by];
@@ -96,13 +157,16 @@
     if (e.key === "Escape") close();
     else if (e.key === "ArrowLeft") step(-1);
     else if (e.key === "ArrowRight") step(1);
+    else if (e.key === "=" || e.key === "+") zoomBy(1.25);
+    else if (e.key === "-") zoomBy(0.8);
+    else if (e.key === "0") fit();
     else return;
     e.preventDefault();
     e.stopPropagation();
   }
 
   const label = $derived(
-    [`image ${image.n}`, failed ? "couldn't load" : size ? `${size.w}×${size.h}` : "", actual ? "actual pixels" : ""]
+    [`image ${image.n}`, failed ? "couldn't load" : size ? `${size.w}×${size.h}` : "", zoom === 1 ? "actual pixels" : zoom ? `${Math.round(zoom * 100)}%` : ""]
       .filter(Boolean)
       .join(" · "),
   );
@@ -125,7 +189,7 @@
     <button class="close" title="Close (Esc)" onclick={close}><BarIcon name="close" /></button>
   </div>
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="stage" class:actual bind:this={stage} onclick={(e) => e.target === stage && close()}>
+  <div class="stage" class:actual bind:this={stage} onwheel={onWheel} onclick={(e) => e.target === stage && close()}>
     {#if url}
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
       <img
@@ -134,7 +198,7 @@
         alt="image {image.n}"
         class:zoom-in={shrunk}
         class:zoom-out={actual}
-        style:width={actual ? `${actualWidth()}px` : null}
+        style:width={zoom ? `${actualWidth() * zoom}px` : null}
         onload={measure}
         onclick={toggle}
       />
@@ -212,6 +276,8 @@
     max-width: none;
     max-height: none;
     height: auto;
+    /* Else the row squeezes a picture wider than the view back down. */
+    flex-shrink: 0;
   }
   .zoom-in {
     cursor: zoom-in;
