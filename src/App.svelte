@@ -18,6 +18,7 @@
     type AgentId,
     AGENTS,
     CLAUDE,
+    CODEX,
     inOrder,
     autotest,
     autotestReport,
@@ -41,12 +42,14 @@
     followList,
     keepEfforts,
     loadCachedModels,
-    loadCursorPick,
+    loadModelPicks,
     saveCachedModels,
-    saveCursorPick,
+    saveModelPick,
+    shownFor,
     startingModel,
+    visibleModels,
     type AgentModels,
-    type CursorPick,
+    type AgentPicks,
   } from "./lib/models";
   import { AppState } from "./lib/state/app.svelte";
   import { terminals } from "./lib/state/terminals.svelte";
@@ -209,15 +212,16 @@
       showSettings = false;
     }
   });
-  // Last known list first; refreshed from Claude Code once it has been found.
+  // Last known list first; refreshed from each agent once it has been found.
   let models = $state<AgentModels>(loadCachedModels());
-  // Which of Cursor's models the menu shows, picked in Settings.
-  let cursorPick = $state<CursorPick | null>(loadCursorPick());
-  const cursorShown = $derived(cursorPick?.shown ?? ["default"]);
-  const menuModels = $derived<AgentModels>({
-    ...models,
-    cursor: models.cursor.filter((m) => cursorShown.includes(m.value)),
-  });
+  // Which of each agent's models the menu shows, picked in Settings.
+  let modelPicks = $state<AgentPicks>(loadModelPicks());
+  const shownModels = $derived(
+    Object.fromEntries(AGENTS.map((agent) => [agent, shownFor(agent, modelPicks[agent], models[agent])])) as Record<AgentId, string[]>,
+  );
+  const menuModels = $derived(
+    Object.fromEntries(AGENTS.map((agent) => [agent, visibleModels(agent, models[agent], modelPicks[agent])])) as AgentModels,
+  );
 
   onMount(async () => {
     await subscribe((envelope) => app.route(envelope));
@@ -243,13 +247,21 @@
     void runSelfTest();
   });
 
+  /** Effort levels are read only for shown models on agents that probe them one by one. */
   async function refreshModels(agent: AgentId) {
     try {
-      if (agent === "cursor") return await refreshCursor();
-      const list = await listModels(agent);
-      if (list.length > 0) {
-        models[agent] = list;
-        saveCachedModels(agent, list);
+      const pick = modelPicks[agent];
+      const current = shownFor(agent, pick, models[agent]);
+      const asked = current.length ? current : undefined;
+      const list = await listModels(agent, asked);
+      if (list.length === 0) return;
+      setAgentModels(agent, keepEfforts(list, models[agent]));
+      const next = followList(agent, pick, models[agent]);
+      modelPicks[agent] = next;
+      saveModelPick(agent, next);
+      if (asked && agent !== CODEX) {
+        const added = next.shown.filter((v) => !asked.includes(v));
+        if (added.length) await readEfforts(agent, added);
       }
     } catch {
       // Keep the list we have; the picker still works with it.
@@ -264,41 +276,33 @@
     return [CLAUDE, name.replace(/^claude:/, "")];
   }
 
-  /** Effort levels are read only for the models the menu shows, a second each. */
-  async function refreshCursor() {
-    const asked = [...cursorShown];
-    const list = await listModels("cursor", asked);
-    if (list.length === 0) return;
-    setCursorModels(keepEfforts(list, models.cursor));
-    // Models Cursor added since last time join the menu.
-    cursorPick = followList(cursorPick, models.cursor);
-    saveCursorPick(cursorPick);
-    const added = cursorShown.filter((v) => !asked.includes(v));
-    if (added.length) await readEfforts(added);
+  function setAgentModels(agent: AgentId, list: ModelInfo[]) {
+    models[agent] = list;
+    saveCachedModels(agent, list);
   }
 
-  function setCursorModels(list: ModelInfo[]) {
-    models.cursor = list;
-    saveCachedModels("cursor", list);
-  }
-
-  async function readEfforts(values: string[]) {
+  async function readEfforts(agent: AgentId, values: string[]) {
     try {
-      const list = await listModels("cursor", values);
-      setCursorModels(keepEfforts(list, models.cursor));
+      const list = await listModels(agent, values);
+      if (list.length > 0) setAgentModels(agent, keepEfforts(list, models[agent]));
     } catch {
       // The model works without them; the effort row just doesn't show.
     }
   }
 
-  /** Settings: show or hide one of Cursor's models in the menu. */
-  function pickCursorModel(value: string, on: boolean) {
-    const pick = cursorPick ?? followList(null, models.cursor);
+  /** Settings: show or hide one of an agent's models in the menu. */
+  function pickAgentModel(agent: AgentId, value: string, on: boolean) {
+    const pick = modelPicks[agent] ?? followList(agent, null, models[agent]);
     const shown = on ? [...pick.shown.filter((v) => v !== value), value] : pick.shown.filter((v) => v !== value);
-    cursorPick = { ...pick, shown };
-    saveCursorPick(cursorPick);
-    const known = models.cursor.find((m) => m.value === value);
-    if (on && !known?.efforts?.length) void readEfforts([value]);
+    const next = { ...pick, shown };
+    modelPicks[agent] = next;
+    saveModelPick(agent, next);
+    const known = models[agent].find((m) => m.value === value);
+    const needsEfforts =
+      agent === CLAUDE
+        ? !!known?.efforts?.length && !known.default_effort
+        : agent !== CODEX && !known?.efforts?.length;
+    if (on && needsEfforts) void readEfforts(agent, [value]);
   }
 
   // Self-test: send scripted messages through this same window, answer every
@@ -685,7 +689,7 @@
     {/key}
   {/if}
   {#if showSettings}
-    <Settings {app} cursorModels={models.cursor} {cursorShown} onCursorPick={pickCursorModel} bind:darkTheme bind:lightTheme bind:appearance bind:size bind:fontSize onclose={() => (showSettings = false)} />
+    <Settings {app} {models} {shownModels} onModelPick={pickAgentModel} bind:darkTheme bind:lightTheme bind:appearance bind:size bind:fontSize onclose={() => (showSettings = false)} />
   {/if}
   </div>
 </div>

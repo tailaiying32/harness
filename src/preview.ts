@@ -844,22 +844,32 @@ const commands: Record<string, (args: Args) => unknown> = {
         { value: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", detail: null, efforts: levels, default_effort: "high" },
       ];
     }
-    // Cursor's, as the core sends them: Auto first, newest of each family.
+    // Cursor's, as the core sends them: Auto first, then all offered models.
     if (args.agent === "cursor")
       return [
         { value: "default", name: "Auto", detail: null, efforts: [], default_effort: null },
         { value: "claude-opus-5-5", name: "Claude Opus 5.5", detail: null, efforts: all, default_effort: "medium" },
+        { value: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", detail: null, efforts: all, default_effort: "medium" },
+        { value: "claude-opus-4-7", name: "Claude Opus 4.7", detail: null, efforts: all, default_effort: "medium" },
         { value: "gpt-5.6-sol", name: "GPT-5.6 Sol", detail: null, efforts: ["none", "low", "medium", "high", "xhigh", "max"], default_effort: "medium" },
+        { value: "gpt-5.5", name: "GPT-5.5", detail: null, efforts: ["low", "medium", "high"], default_effort: "medium" },
+        { value: "gpt-5.4-mini", name: "GPT-5.4 Mini", detail: null, efforts: ["low", "medium", "high"], default_effort: "medium" },
         { value: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen", detail: null, efforts: ["low", "medium", "high", "xhigh"], default_effort: "high" },
+        { value: "gemini-4-neon", name: "Gemini 4 Neon", detail: null, efforts: ["low", "medium", "high", "xhigh"], default_effort: "high" },
+        { value: "gemini-3.8-flash", name: "Gemini 3.8 Flash", detail: null, efforts: ["low", "medium", "high"], default_effort: "medium" },
         { value: "grok-4.7", name: "Grok 4.7", detail: null, efforts: ["low", "medium", "high", "xhigh"], default_effort: "high" },
+        { value: "deepseek-r2", name: "DeepSeek R2", detail: null, efforts: [], default_effort: null },
         { value: "composer-2.5", name: "Composer 2.5", detail: null, efforts: [], default_effort: null },
+        { value: "composer-2", name: "Composer 2", detail: null, efforts: [], default_effort: null },
       ];
-    // As the core sends it: newest of each family, the recommended one first.
+    // As the core sends it: recommended first, other short names, then pinned older versions.
     return [
       { value: "opus", name: "Opus 5.5", detail: null, efforts: all, default_effort: "high" },
       { value: "fable", name: "Fable 5.2", detail: null, efforts: all, default_effort: "medium" },
       { value: "sonnet", name: "Sonnet 5.5", detail: null, efforts: all, default_effort: "medium" },
       { value: "haiku", name: "Haiku 5.5", detail: null, efforts: all, default_effort: "medium" },
+      { value: "claude-opus-4-7", name: "Opus 4.7", detail: null, efforts: all, default_effort: "high" },
+      { value: "claude-sonnet-4-6", name: "Sonnet 4.6", detail: null, efforts: all, default_effort: "medium" },
     ];
   },
   close_session: () => undefined,
