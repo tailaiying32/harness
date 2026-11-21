@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::acp::{self, AcpConfig, Dialect, Intro, Tool};
-use super::acp_sync::{self, SyncRpc, effort_levels, model_option};
+use super::acp_sync::{self, SmallAsk, SyncRpc, effort_levels, model_option};
+use super::claude_code::{BATCH_PROMPT, batch_input};
 #[cfg(test)]
 use super::acp_sync::parse_commands;
 use super::{AgentAdapter, EventSink, RunningAgent, SideCopy, SpawnOptions, copy_database, plain_id};
@@ -53,6 +54,8 @@ fn client_meta() -> Value {
 const LIST_TIMEOUT: Duration = Duration::from_secs(90);
 /// How long listing the commands may take, from start to Cursor's list.
 const COMMANDS_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a batch label may take (about 6 s on Cursor CLI 2026.11.19).
+const LABEL_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long `agent login` may wait for the user in the browser.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -148,6 +151,21 @@ impl AgentAdapter for CursorAdapter {
     /// the chat takes as its title; no model call is needed.
     fn make_title(&self, _binary: &Path, _first_message: &str) -> Result<String, String> {
         Err("Cursor writes its own titles".to_string())
+    }
+
+    /// One prompt on Auto in Ask mode. Cursor has no system prompt, so the
+    /// instructions lead the prompt.
+    fn name_batch(&self, binary: &Path, ask: &str, agents: &[String]) -> Result<String, String> {
+        let how = SmallAsk {
+            label: "Cursor",
+            client_meta: client_meta(),
+            model: |_| Some("default".to_string()),
+            mode: Some("ask"),
+            put_model_back: true,
+            timeout: LABEL_TIMEOUT,
+        };
+        let prompt = format!("{BATCH_PROMPT}\n\n{}", batch_input(ask, agents));
+        acp_sync::small_answer(binary, &how, &prompt, |id| self.forget_session(id))
     }
 
     fn sign_in(&self, binary: &Path) -> Result<(), String> {
