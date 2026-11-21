@@ -578,9 +578,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
     // Starts a short-lived process and sends the `initialize` request the Agent
     // SDK opens with. The reply lists the models; no chat message is sent, so
-    // nothing is spent. The list takes about a second, the effort defaults below
-    // about 7 more (tested on CLI 2.1.322).
-    fn list_models(&self, binary: &Path, _efforts_for: Option<&[String]>) -> Result<Vec<ModelInfo>, String> {
+    // nothing is spent. The list takes about a second; reading each model's
+    // default effort below takes about half a second each, so only the models
+    // in `efforts_for` (all if None) are asked (tested on CLI 2.1.322).
+    fn list_models(&self, binary: &Path, efforts_for: Option<&[String]>) -> Result<Vec<ModelInfo>, String> {
         let mut probe = Probe::start(binary, &std::env::temp_dir())?;
         let reply = probe.ask("models", json!({ "subtype": "initialize" }), Duration::from_secs(15));
         let mut models = reply.as_ref().map(parse_models).unwrap_or_default();
@@ -590,7 +591,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // Nothing is sent to a model and no settings file changes. About half
         // a second per model (tested on CLI 2.1.322); stops at the first miss.
         for (i, model) in models.iter_mut().enumerate() {
-            if model.efforts.is_empty() {
+            if model.efforts.is_empty() || efforts_for.is_some_and(|wanted| !wanted.contains(&model.value)) {
                 continue;
             }
             let wait = Duration::from_secs(5);
@@ -916,11 +917,9 @@ fn parse_commands(reply: &Value) -> Vec<CommandInfo> {
 /// Pull the model list out of an `initialize` reply. Each entry has `value`
 /// (what to pass back), `displayName` and `description`; for the "default"
 /// entry the description is the model it currently stands for.
-/// The picker lists only Claude Code's short names (opus, fable, sonnet,
-/// haiku): each always points at the newest model of its family, so the list
-/// stays current without pinned older versions ("claude-opus-4-7"), which
-/// carry a dash. "default" is left out too; the model it stands for (same
-/// resolved model) goes first, so new chats start on it.
+/// "default" is left out; the short-name model it stands for goes first, then
+/// the rest of the short names (opus, fable, sonnet, haiku), then pinned older
+/// versions ("claude-opus-4-7", which carry a dash and start hidden in Settings).
 fn parse_models(reply: &Value) -> Vec<ModelInfo> {
     let listed: Vec<&Value> = reply["response"]["response"]["models"]
         .as_array()
@@ -932,18 +931,19 @@ fn parse_models(reply: &Value) -> Vec<ModelInfo> {
         .iter()
         .find(|m| m["value"] == "default")
         .and_then(|m| m["resolvedModel"].as_str());
-    let mut models: Vec<(bool, ModelInfo)> = listed
+    let mut models: Vec<(u8, ModelInfo)> = listed
         .iter()
         .filter_map(|m| {
             let value = m["value"].as_str()?.to_string();
-            if value == "default" || value.contains('-') {
+            if value == "default" {
                 return None;
             }
+            let pinned = value.contains('-');
             let mut name = m["displayName"].as_str().unwrap_or(&value).to_string();
             // Some Claude Code versions name the family only ("Opus") and put
             // the version in the description; the picker should say which.
             if !name.chars().any(|c| c.is_ascii_digit()) {
-                if let Some(versioned) = m["resolvedModel"].as_str().and_then(versioned_name) {
+                if let Some(versioned) = m["resolvedModel"].as_str().or(Some(value.as_str())).and_then(versioned_name) {
                     name = versioned;
                 }
             }
@@ -960,9 +960,15 @@ fn parse_models(reply: &Value) -> Vec<ModelInfo> {
                 .flatten()
                 .filter_map(|e| e.as_str().map(str::to_owned))
                 .collect();
-            let first = recommended.is_some() && m["resolvedModel"].as_str() == recommended;
+            let rank = if pinned {
+                2
+            } else if recommended.is_some() && m["resolvedModel"].as_str() == recommended {
+                0
+            } else {
+                1
+            };
             Some((
-                first,
+                rank,
                 ModelInfo {
                     value,
                     name,
@@ -973,8 +979,8 @@ fn parse_models(reply: &Value) -> Vec<ModelInfo> {
             ))
         })
         .collect();
-    // Stable: the rest keep Claude Code's order.
-    models.sort_by_key(|(first, _)| !first);
+    // Stable: within each group, models keep Claude Code's order.
+    models.sort_by_key(|(rank, _)| *rank);
     models.into_iter().map(|(_, m)| m).collect()
 }
 
@@ -2376,7 +2382,7 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
             { "value": "claude-opus-4-7", "resolvedModel": "claude-opus-4-7", "displayName": "Opus 4.7", "description": "Older, pinned" },
             { "displayName": "No value, so skipped" },
         ]}}});
-        // Default and the pinned version are left out; what default stands for comes first.
+        // Default is left out; what default stands for comes first, then other short names, then pinned versions.
         assert_eq!(
             parse_models(&reply),
             vec![
@@ -2391,6 +2397,13 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
                     value: "fable".into(),
                     name: "Fable 5.2".into(),
                     detail: Some("For your toughest challenges".into()),
+                    efforts: vec![],
+                    default_effort: None,
+                },
+                ModelInfo {
+                    value: "claude-opus-4-7".into(),
+                    name: "Opus 4.7".into(),
+                    detail: Some("Older, pinned".into()),
                     efforts: vec![],
                     default_effort: None,
                 },
