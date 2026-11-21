@@ -39,8 +39,17 @@ function host(url: string): string {
   }
 }
 
+/**
+ * A tool's name as the app calls it today. The app's own tool groups were
+ * `harness_*` before it was renamed (2026-11-21), and chats saved then hold
+ * those names: read as the new ones, their lines keep their wording and links.
+ */
+export function currentToolName(name: string): string {
+  return name.startsWith("mcp__harness_") ? `mcp__tilde_${name.slice("mcp__harness_".length)}` : name;
+}
+
 /** The side panel's browser, driven by Claude (see browser.rs). */
-const BROWSER = "mcp__harness_browser__";
+const BROWSER = "mcp__tilde_browser__";
 
 function browserWording(tool: string, input: unknown): [string, string, string] {
   const target = clip(field(input, "text") || field(input, "selector"), 30);
@@ -80,7 +89,7 @@ function browserWording(tool: string, input: unknown): [string, string, string] 
 }
 
 /** The project's terminal in the side panel, which Claude can read (see terminal.rs). */
-const TERMINAL = "mcp__harness_terminal__";
+const TERMINAL = "mcp__tilde_terminal__";
 
 function terminalWording(tool: string, input: unknown): [string, string, string] {
   if (tool === "tabs") return [`looked at the terminal tabs`, `Looking at the terminal tabs`, `look at the terminal tabs`];
@@ -90,11 +99,11 @@ function terminalWording(tool: string, input: unknown): [string, string, string]
 }
 
 /** The project's earlier chats, which an agent can search and read (see chats.rs). */
-const CHATS = "mcp__harness_chats__";
+const CHATS = "mcp__tilde_chats__";
 
 /** The app's worktree tool, how every agent asks for a worktree (see sessions/worktrees.rs). */
-const WORKTREE = "mcp__harness_worktree__ask";
-const NEW_CHATS = "mcp__harness_new_chats__start";
+const WORKTREE = "mcp__tilde_worktree__ask";
+const NEW_CHATS = "mcp__tilde_new_chats__start";
 
 /** Which of the earlier-chats tools a call is ("search", "recent", "read"), or "" for another tool. */
 export const chatsTool = (tool: ToolCall) => (tool.name.startsWith(CHATS) ? tool.name.slice(CHATS.length) : "");

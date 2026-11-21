@@ -3,7 +3,7 @@
 // Fed the same events as the chat (see Chat.handle); see PLAN.md, "Chat info view".
 
 import type { AgentEvent, BackgroundTask } from "../ipc";
-import { showsOutput, type ToolCall } from "../tools";
+import { currentToolName, showsOutput, type ToolCall } from "../tools";
 
 /** The tools that start a subagent: Claude Code's ("Task" before 2.1, "Agent" after) and Cursor's, renamed. */
 const AGENT_TOOLS = new Set(["Agent", "Task"]);
@@ -187,7 +187,7 @@ export class ChatInfo {
             // task's own summary then only points here.
             agent.answer = field(block.input, "message");
           } else if (block.type === "tool_call") {
-            agent.steps.push({ type: "tool", toolId: block.tool_id, name: block.name, input: block.input });
+            agent.steps.push({ type: "tool", toolId: block.tool_id, name: currentToolName(block.name), input: block.input });
           } else if (block.type === "text" && block.text.trim()) {
             agent.steps.push({ type: "text", text: block.text });
           }
@@ -268,7 +268,7 @@ export class ChatInfo {
           (s): s is Extract<AgentStep, { type: "tool" }> => s.type === "tool" && s.toolId === event.tool_id,
         );
         if (step) {
-          step.name = event.name;
+          step.name = currentToolName(event.name);
           step.input = event.input;
         }
         return true;

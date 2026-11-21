@@ -31,11 +31,11 @@ use crate::sessions::Out;
 use crate::store::now_ms;
 
 /// The name the agent knows the tool group by.
-pub const SERVER: &str = "harness_keep_awake";
+pub const SERVER: &str = "tilde_keep_awake";
 
 /// The line added to the agent's instructions.
 pub const INSTRUCTION: &str = "When the user asks to keep the computer awake, caffeinate, or keep the \
-session alive while they're away, use the harness_keep_awake tools instead of running caffeinate.";
+session alive while they're away, use the tilde_keep_awake tools instead of running caffeinate.";
 
 /// How long a plain keep-awake lasts at most.
 const LIMIT: Duration = Duration::from_secs(2 * 60 * 60);
@@ -74,11 +74,10 @@ struct Config {
 }
 
 impl Config {
-    /// The defaults, with `HARNESS_KEEP_AWAKE_*_SECONDS` overrides for tests.
+    /// The defaults, with `TILDE_KEEP_AWAKE_*_SECONDS` overrides for tests.
     fn from_env() -> Self {
         let secs = |name: &str, default: Duration| {
-            std::env::var(format!("HARNESS_KEEP_AWAKE_{name}_SECONDS"))
-                .ok()
+            crate::home::app_env_text(&format!("KEEP_AWAKE_{name}_SECONDS"))
                 .and_then(|v| v.parse().ok())
                 .map(Duration::from_secs)
                 .unwrap_or(default)

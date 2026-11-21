@@ -175,7 +175,7 @@ mod tests {
     use super::*;
 
     fn temp() -> (Images, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("harness-images-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("tilde-images-{}", uuid::Uuid::new_v4()));
         (Images::new(dir.clone()), dir)
     }
 

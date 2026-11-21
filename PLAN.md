@@ -1,4 +1,4 @@
-# Harness v1 plan
+# Tilde v1 plan
 
 Added 2026-11-18 (branch `harness/antigravity-agent-3ca873`): chats can run
 on Google's Antigravity CLI (`agy acp`) through the same ACP layer as Cursor.
@@ -9,7 +9,7 @@ Added 2026-11-15 (branch `harness/cursor-acp-217ae2`): chats can run on
 Cursor's agent as well as Claude Code, picked from the model menu before the
 first message. See "Cursor over ACP".
 
-Added 2026-11-16: Harness's own skills, imported in Settings and offered to
+Added 2026-11-16: Tilde's own skills, imported in Settings and offered to
 every chat whatever its agent. See "Skills".
 
 Added 2026-11-16 (branch `harness/chat-info-view-83b2a2`): a fifth side
@@ -28,7 +28,7 @@ user steps away, ending when they're back, when the work is done, or after
 two hours; overnight is a deliberate step. See "Keep awake".
 
 Added 2026-11-17 (branch `harness/harness-home-2cc4f2`): what chats write
-for the user to read lives in one folder in the home directory, `~/.harness`,
+for the user to read lives in one folder in the home directory, `~/.tilde`,
 split by project: each project's docs, shared by all its chats and
 worktrees, and each chat's own notes and docs. Nothing is saved into a repo
 unless the user asks for exactly that. The same folder holds each project's
@@ -105,7 +105,7 @@ shown in Finder, so a link never runs anything. Not yet clicked through in
 the real app.
 
 Added 2026-11-13 (worktrees, branch `worktrees`): when Claude judges a piece
-of work deserves its own branch, it asks for a worktree, and Harness shows a
+of work deserves its own branch, it asks for a worktree, and Tilde shows a
 card ("new worktree" or "work here"); worktrees share
 build files with the main folder as copy-on-write copies; idle ones are put
 away (edits kept in a hidden git ref) and come back with the next message;
@@ -115,7 +115,7 @@ a branch mark in the sidebar and in the bottom bar. Since 2026-11-14 the
 sidebar mark shows only once a chat's branch has a pull request (a worktree
 alone is how a chat keeps its work apart, not news); the bottom bar still
 shows the open chat's branch. Merges go through pull requests on GitHub
-(repo `tailaiying32/harness`, private) so the marks track real events. Deferred (2026-11-14): a cue for idle
+(repo `tailaiying32/tilde`) so the marks track real events. Deferred (2026-11-14): a cue for idle
 chats with work not on GitHub (uncommitted or unmerged), maybe as an
 "unfinished work" list in settings; revisit if work actually gets lost.
 Since 2026-11-14 a chat keeps a list of pull requests, not one (a task split
@@ -153,7 +153,7 @@ merged): the side panel's third view, a localhost page that Claude can drive
 **Tested** live with the self-test (Haiku): all seven tools on a test page,
 with no approval cards; a page Claude opened while the panel showed docs
 (parked, screenshot still right); a non-localhost address
-refused; Harness's own preview page loading cleanly in it. Not checked by eye
+refused; Tilde's own preview page loading cleanly in it. Not checked by eye
 in the real window (the screen couldn't be captured): the page lining up over
 the panel, following the panel's drag, hiding under Settings and the image
 view. Not tried: clicking a link to another site (it should open the default
@@ -341,7 +341,7 @@ src-tauri/
     side_chat.rs       SideChats: read-only side chats on the chat's agent, several per chat as tabs (/btw), never saved
     store.rs           SQLite schema, reads, writes, and the search index over what chats said
     chats.rs           the earlier-chats tools: search, list and read a project's chats
-    home.rs            where the home folder (~/.harness) is, and each project's and chat's place in it
+    home.rs            where the home folder (~/.tilde) is, and each project's and chat's place in it
     notes.rs           each chat's own folder there: its notes and docs
     images.rs          pasted images and images from tools, as files per chat
     locate.rs          find the claude binary
@@ -600,7 +600,7 @@ limit that applies to the model that answered in `unifiedWindows`, so one
 `UsageUpdate` goes out per limit. Seen on CLI 2.1.322: `seven_day` (all
 models) every time, and `seven_day_overage_included` after a Fable reply,
 which matched the Fable line of `/usage`. The window keeps the newest reading
-of each limit by agent (localStorage `harness.limits`), because a limit is
+of each limit by agent (localStorage `tilde.limits`), because a limit is
 only reported after a reply from a model it applies to. Settings → Usage
 shows a heading per agent ("Claude Code") with "all models" and "fable"
 lines, each "64% · resets Mon 4:37 PM", "unknown" before any reading, and
@@ -633,9 +633,9 @@ Usage audit (2026-11-19, CLI 2.1.326, codex 0.169.1, agy 1.5.11, agent
   CLI) or calling Cursor's service with the user's login, so it is left out.
 
 Commands in each agent's own syntax (2026-11-19). The menus follow how
-each agent's own screen takes them; Harness's own commands sit beside them
+each agent's own screen takes them; Tilde's own commands sit beside them
 where the names don't clash:
-- **Harness's**: `/model` (model menu), `/clear` or `/new` (a new chat in
+- **Tilde's**: `/model` (model menu), `/clear` or `/new` (a new chat in
   the same folder, as Cmd+N), `/btw` (a side chat), and its skills, in every
   agent's `/` menu. Claude Code's own `/clear` stays hidden.
 - **Codex**: its app-server takes `/` and `$` as plain text; its own screen
@@ -697,16 +697,16 @@ them back.
 Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-rolling-whale.md`.
 
 - **The request** (2026-11-17: one app tool for every agent). Every main
-  chat gets the app's worktree tool, `harness_worktree` / `ask` with a short
+  chat gets the app's worktree tool, `tilde_worktree` / `ask` with a short
   name for the work, built in `sessions/worktrees.rs`. When to call it (first
   step of real work in a repo, before any file is made or changed; not for
   tiny edits, questions, reviews or plans, nor once in a worktree) is in the
   group's instruction and in the tool's own description: Cursor hears
   instructions only when a conversation starts. The wording matters: a soft
-  "ask for a worktree with the harness_worktree tool" made Haiku skip it for
+  "ask for a worktree with the tilde_worktree tool" made Haiku skip it for
   a new module with tests (2 of 2 runs, while the old "call EnterWorktree"
   asked 2 of 2); "your first step... is to call the ask tool of the
-  harness_worktree server" asked 2 of 2 and still skipped a one-line fix.
+  tilde_worktree server" asked 2 of 2 and still skipped a one-line fix.
   The tool carries `_meta: {"anthropic/alwaysLoad": true}` so Claude Code
   lists it up front instead of behind its tool search; other agents ignore it. Claude Code's own `EnterWorktree`/`ExitWorktree` are turned off
   with deny rules, which take them off the model's list (tested on CLI
@@ -730,7 +730,7 @@ Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-roll
   latest call ID (whole from Claude Code, in a later `ToolInput` from Cursor).
 - **"Work here"**: a hidden note tells the agent to carry on here; it may ask
   again later for other work. **"New worktree"**: the process is stopped if it
-  still runs; `worktree::create` makes `harness/<the agent's name for the
+  still runs; `worktree::create` makes `tilde/<the agent's name for the
   work>-<6 hex>` at `<data>/worktrees/<repo>-<6 hex>` from the latest commit
   of the branch the main folder was on when the chat began (`start_branch`,
   saved on the first message); then the chat resumes there with a hidden
@@ -742,7 +742,7 @@ Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-roll
   nothing saved, and the message goes with a note before it: it answers the
   question; ask again before any file changes if the work still needs a
   worktree.
-- **Tested live** (2026-11-17, self-test with `HARNESS_DATA_DIR`): Claude Code
+- **Tested live** (2026-11-17, self-test with `TILDE_DATA_DIR`): Claude Code
   (Haiku) and Cursor (GPT-5.3 Codex) each asked first thing for a new module
   with tests, made no changes, and after "New worktree" carried on and
   finished inside it (`pwd` there); the main folder kept only its README. A
@@ -753,7 +753,7 @@ Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-roll
   are copied plainly and folders skipped. Folders holding a `.git` (nested
   repos and worktrees) are never copied.
 - **Put away** = uncommitted edits (not ignored files) saved as a commit under
-  `refs/harness/saved/<chat>` (a temporary index; branch untouched), then
+  `refs/tilde/saved/<chat>` (a temporary index; branch untouched), then
   `git worktree remove --force`. **Restore** = `worktree add` at the same
   path, `git restore --source=<ref> --worktree -- .`, ref deleted, ignored
   files copied again. Sending a message to a put-away (or trashed) chat
@@ -793,7 +793,7 @@ Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-roll
   branch removed, chat asks again at its next edit. No message for 14 days
   (`worktree_idle_days`) → put away. Put away for 30 days (`trash_days`) →
   branch and saved edits deleted. Trashed for 30 days → chat purged.
-  `HARNESS_WORKTREE_IDLE_SECONDS` and `HARNESS_TRASH_SECONDS` override both
+  `TILDE_WORKTREE_IDLE_SECONDS` and `TILDE_TRASH_SECONDS` override both
   for tests.
 - **Pull requests** via one `gh api graphql` query per host (`github.rs`,
   `prs`): each chat's open and draft pull requests by number, and the newest
@@ -803,7 +803,7 @@ Built 2026-11-13. The design discussion and plan: `~/.claude/plans/purrfect-roll
   to the front (every chat that may have one changing), when a chat is
   opened (both at most every 10 s per chat, so flicking between windows
   doesn't ask again and again), and in the sweep (at most every 10 minutes).
-  No timer: merges by others while Harness is in front are rare, and nothing
+  No timer: merges by others while Tilde is in front are rare, and nothing
   acts on a merge while the user is away (cleanup keeps its own clock). A
   repo `gh` can't answer for isn't asked again until restart.
 - **Titles**: on a chat's first message, `claude -p --model haiku
@@ -826,8 +826,8 @@ When the user asks, an agent splits work into parts and asks to start a chat
 for each. One card covers them all. Once started, each is an ordinary chat:
 the user manages them, and the chat that asked doesn't follow them.
 
-- **The request**: the app's `harness_new_chats` tool group, one tool
-  `start` (`mcp__harness_new_chats__start` for both agents), offered to every
+- **The request**: the app's `tilde_new_chats` tool group, one tool
+  `start` (`mcp__tilde_new_chats__start` for both agents), offered to every
   main chat next to the worktree tool. Input: `parts` (1 to 8 of `title`,
   `summary`, `why`, `brief`, optional `agent`) and optional `from` (`main`, the
   default, or `this_chat`). The brief shape follows Claude Code's
@@ -865,7 +865,7 @@ the user manages them, and the chat that asked doesn't follow them.
   another agent gets that agent's defaults.
 - **Not covered**: parts that clash or depend on each other (the user's
   call), coordinating the children, folders outside git.
-- **Tested live** (2026-11-17, self-test with `HARNESS_DATA_DIR`):
+- **Tested live** (2026-11-17, self-test with `TILDE_DATA_DIR`):
   - Haiku split two parts. On start, both chats showed in the sidebar, each
     in its own worktree, and each replied with its understanding and plan.
     Neither changed any files.
@@ -891,7 +891,7 @@ can't close a chat that has been used since.
 - **Send with a process:** record and write. Claude Code queues it if a turn
   is running.
 - **Turn ends (`Idle`):** start the idle timer. Its length is, in order:
-  `HARNESS_IDLE_SECONDS`, the `idle_seconds` setting, 300. Zero means never.
+  `TILDE_IDLE_SECONDS`, the `idle_seconds` setting, 300. Zero means never.
 - **Background work** (`BackgroundWork { running }`, from Claude Code's
   `background_tasks_changed`): while any runs, the chat is never closed for
   being idle, with no time limit. This keeps a dev server watcher or a
@@ -1011,9 +1011,10 @@ so Claude sees the file as it is now.
 
 ### Store (`store.rs`)
 
-One SQLite file, `harness.db`, in the Tauri app data directory
-(`~/Library/Application Support/com.harness.app` on macOS), or in
-`HARNESS_DATA_DIR` if set (tests use this). WAL mode, `synchronous = NORMAL`.
+One SQLite file, `tilde.db`, in the app's data folder
+(`~/Library/Application Support/Tilde` on macOS), or in
+`TILDE_DATA_DIR` if set (tests use this). An install from before the rename
+keeps `harness.db` in `com.harness.app` (see "Renamed to Tilde"). WAL mode, `synchronous = NORMAL`.
 
 ```
 projects(id TEXT PK, path TEXT UNIQUE, created_at, last_used_at)
@@ -1178,7 +1179,7 @@ inside, and tinted inline code. The tint (each theme's `panel` colour) is
 tuned per theme so the panel is always clearly visible against the
 background; where a palette's own value is too close, override it (GitHub
 Light and Nord are already adjusted in the mock-up). Working defaults, cheap
-to change since both are settings: Harness Dark and the regular 12.5px size.
+to change since both are settings: Tilde Dark and the regular 12.5px size.
 There are two theme picks, one dark and one light, and an appearance setting
 that says which shows: light, dark, or auto (the default), which follows the
 system and switches the moment it does (added 2026-11-14). Picking a theme for
@@ -1203,7 +1204,7 @@ Mocked up on the same board:
 - **Colour themes.** A theme is data: eleven role colours (background, panel,
   text, bright, dim, faint, rule, accent, ok, bad) plus six syntax colours
   (keyword, function, string, type, number, comment). The UI reads only these
-  roles, so adding a theme never touches a component. Mocked up: Harness Dark
+  roles, so adding a theme never touches a component. Mocked up: Tilde Dark
   and Light, Solarized Dark and Light, Gruvbox Dark and Light, Dracula, Nord,
   Tokyo Night, Catppuccin Mocha and Latte, One Dark, Monokai, GitHub Dark and
   Light, Rosé Pine and Dawn, Everforest, Kanagawa, Ayu Dark. The values are in
@@ -1268,7 +1269,7 @@ Mocked up on the same board:
   folder picker sits at the left, and it disappears once the first message
   is sent (the sidebar shows the folder from then on). Model, mode and usage
   sit at the right, in that order. The desktop app also shows an effort level
-  ("High") next to the model; Harness has no effort setting yet. A chat with
+  ("High") next to the model; Tilde has no effort setting yet. A chat with
   pull requests shows their mark and count at the left (2026-11-14); the
   branch name and "no PR" are gone.
 - **Queued mark** (2026-11-13). A message sent while Claude works shows a
@@ -1321,10 +1322,10 @@ Mocked up on the same board:
   "compacted automatically") marks the cut; earlier messages stay on screen.
   A command stays above its own output, live and after reopening, because
   `command_lifecycle` `started` is the "taken in" signal. Commands that
-  duplicate Harness controls (`/model`, `/clear`, `/rename`, `/effort`) are
-  left alone: Claude Code runs them, and Harness's own controls may fall out
+  duplicate Tilde controls (`/model`, `/clear`, `/rename`, `/effort`) are
+  left alone: Claude Code runs them, and Tilde's own controls may fall out
   of step. `/btw` answers "isn't available in this environment" headless,
-  so Harness catches it and opens a side chat instead (next item).
+  so Tilde catches it and opens a side chat instead (next item).
 - **Side chat (`/btw`): built** (2026-11-14; mock-up: "Top Bar" canvas,
   version A). `/btw <question>` in the message box, or **side chat** in the
   top bar, opens a small second conversation in the side panel. It starts as
@@ -1334,7 +1335,7 @@ Mocked up on the same board:
   and `--strict-mcp-config` with no config. Without the latter, the user's
   claude.ai connectors (Gmail, Drive…) loaded from the second message on
   (tested, CLI 2.1.322). No approval channel, so anything needing permission
-  is refused without asking. Nothing is saved by Harness: its events go to
+  is refused without asking. Nothing is saved by Tilde: its events go to
   the window under the side chat's own id (`side_chat.rs`). Its process closes after
   the chats' idle time and resumes its own session on the next question, so
   a forgotten side chat costs no memory; that is why Claude Code saves it.
@@ -1403,13 +1404,13 @@ Mocked up on the same board:
 
   **If there's nothing to copy** (the agent can't, its copy fails, or the
   chat's saved session is gone; `has_session` is checked first), the side
-  chat starts fresh with the earlier-chats tool (`harness_chats`; Claude Code
-  gets `--mcp-config` for it and `--allowedTools mcp__harness_chats`), its
+  chat starts fresh with the earlier-chats tool (`tilde_chats`; Claude Code
+  gets `--mcp-config` for it and `--allowedTools mcp__tilde_chats`), its
   first question carries a note to read the chat first (as an agent switch
   does), and the side chat shows "Couldn't copy the chat into this side chat,
   so it reads the chat first." A chat moved to another agent and not yet run
   on it reads the same way. **Tested** live with the self-test on each agent
-  (`HARNESS_AUTOTEST_MODEL=<agent>:<model>`, then a secret word, two `/btw`
+  (`TILDE_AUTOTEST_MODEL=<agent>:<model>`, then a secret word, two `/btw`
   questions, a main-chat question): every side chat answered from the copy;
   none created the file it was asked to (Cursor and Antigravity said they
   couldn't; Codex's sandbox refused); the main chat's history held none of the
@@ -1617,8 +1618,8 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   for a small test page; the GPU and network processes are shared). It starts
   on `about:blank`; on Mac its start-up scripts are then replaced with the
   bridge alone (`mac::only_bridge`), because Tauri's own (`__TAURI_INTERNALS__`,
-  `isTauri`, locked in place) made a Tauri app's dev page, Harness's included,
-  believe it ran inside Harness. On Windows they stay for now; calls through
+  `isTauri`, locked in place) made a Tauri app's dev page, Tilde's included,
+  believe it ran inside Tilde. On Windows they stay for now; calls through
   them are refused, as no capability covers `browser-*` views.
 - **Placing it:** `BrowserView.svelte` sends the panel body's rect
   (`.slot`, CSS px = logical px) with `browser_place` on every layout change,
@@ -1629,11 +1630,11 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   the same size, so Claude's reads and screenshots match what the user would see. Leaving the view
   (another view, chat or the panel hidden) unmounts the component, which parks it.
 - **Claude's tools** are an in-process MCP server over the existing pipe:
-  `--mcp-config {"mcpServers":{"harness_browser":{"type":"sdk",...}}}`, and
+  `--mcp-config {"mcpServers":{"tilde_browser":{"type":"sdk",...}}}`, and
   Claude Code sends `control_request` `mcp_message` lines that
   `claude_code.rs` answers (`answer_tool_message`) with `mcp_response`. No
   port, no token; each process's calls belong to its chat. `--settings` allows
-  `mcp__harness_browser`, so they never ask. Tested on CLI 2.1.322: no
+  `mcp__tilde_browser`, so they never ask. Tested on CLI 2.1.322: no
   `initialize` from the host is needed first; the tools come as deferred tools
   (Claude loads them with ToolSearch). Agent-agnostic side: `AppTools` in
   `agent/mod.rs`, made per chat by `SessionManager::set_app_tools`.
@@ -1649,7 +1650,7 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   answered through `eval_with_callback` as a JSON string, async ones (`run`)
   collected by polling `__hb.take(id)`. The page has no way to call the app.
   `read` lists visible buttons, links and fields as `[n]`, marking each with
-  `data-harness-ref="n"` for `click`/`type`. `type` goes through
+  `data-tilde-ref="n"` for `click`/`type`. `type` goes through
   `execCommand("insertText")` so frameworks see real input, with the value
   setter as fallback. Errors and warnings (console, uncaught, failed loads of
   scripts and images) are kept in `sessionStorage`, so they outlast a reload;
@@ -1659,7 +1660,7 @@ default browser (`on_navigation`). The side chat gets no browser tools.
   (gone 15 to 30 s later); the chat keeps the address and the window keeps
   its tab. The agent's next tool call, showing the view, or ↻ loads it again,
   so page state (form input, scroll) is lost, as a reload would. Checked every
-  30 s; `HARNESS_BROWSER_IDLE_SECONDS` overrides the 10 minutes. The user
+  30 s; `TILDE_BROWSER_IDLE_SECONDS` overrides the 10 minutes. The user
   asked for this (2026-11-14): they leave chats sitting with a page open and
   don't want to remember to close it. **Tested** with 5 s.
 - **Screenshots:** Mac only, `WKWebView takeSnapshotWithConfiguration`, drawn
@@ -1761,7 +1762,7 @@ first time the tab shows (`read_notes`).
   `closeBrackets`, which can't track the Cmd+B/I/K marks and adds a package.
   Tested with key presses (typing through CodeMirror's input hook).
 - Stored in the chat's own folder in the home folder,
-  `~/.harness/projects/<key>/chats/<chat id>/notes.md` (`notes.rs`; see "The
+  `~/.tilde/projects/<key>/chats/<chat id>/notes.md` (`notes.rs`; see "The
   home folder"), never in the repo; written to a side file then moved into
   place; 1 MB cap. Purged with the chat when the trash is emptied; swept at
   start for chats that don't exist (a new chat never sent), like images.
@@ -1823,14 +1824,14 @@ read-only.
   tabs at once; live with the self-test (Haiku): Claude wrote a doc,
   `@docedit <text>` saved an edit through the core, Claude's next Edit
   landed on top, and tab, file and Claude agreed. The self-test's
-  `HARNESS_AUTOTEST_MODEL` now also picks the agent (a plain name is Claude
+  `TILDE_AUTOTEST_MODEL` now also picks the agent (a plain name is Claude
   Code) and marks the model as picked: since new chats take the project's
   last pick, tests had been running on Cursor.
 
 **Docs in the chat folder** (2026-11-16, branch `harness/docs-in-harness-98cbdf`).
 Asking for notes, a write-up or "put it in the docs" used to make a Claude
 Doc on claude.ai: its connector tells Claude to make docs there "not a local
-file, even when coding", and Harness said nothing about its own panel.
+file, even when coding", and Tilde said nothing about its own panel.
 
 - **Every agent is told** (`docs_rule` in `agent/mod.rs`, part of the
   writable `notes_instruction`, so Claude and Cursor get the same words):
@@ -1844,7 +1845,7 @@ file, even when coding", and Harness said nothing about its own panel.
   project's docs folder in the home folder (named in full), delete the old
   file and keep editing the new one; into the repo itself only when the user
   asks for that in so many words. Answers and discussion stay in the chat.
-- **Claude Docs is off in Harness only** (`launch_settings`):
+- **Claude Docs is off in Tilde only** (`launch_settings`):
   `deniedMcpServers: [{serverName: "claude.ai Claude Docs"}]` drops the
   server, its tools and its instructions, while other claude.ai connectors
   stay. A permission deny alone hid the tools but left the instructions
@@ -1864,7 +1865,7 @@ file, even when coding", and Harness said nothing about its own panel.
 - **Save to project**: a chat-folder doc's tab has a "Save to project"
   button at its foot, styled like Approve plan (grey while the agent works; one shared `button.primary` rule in `app.css` for every accent button). `save_doc_to_project`
   (`docs::save_to_project`) copies it into the project's docs folder in the
-  home folder (`~/.harness/projects/<key>/docs/`; the project's main folder
+  home folder (`~/.tilde/projects/<key>/docs/`; the project's main folder
   names it, never a worktree, so every chat of the project shares it),
   adding `-2`, `-3`… rather than overwriting, and removes the original. The
   notes tab has the same button (`save_notes_to_project`): the notes become a
@@ -2087,7 +2088,7 @@ untracked copy could block a pull, and a doc saved from a worktree chat
 existed only on that worktree's branch.
 
 ```
-~/.harness/
+~/.tilde/
   projects/<key>/docs/               the project's docs, shared by all its chats
   projects/<key>/chats/<chat id>/    that chat's notes.md and its own docs
   unsent/<chat id>/                  notes typed before a chat's first message
@@ -2102,9 +2103,9 @@ existed only on that worktree's branch.
   (`/Users/me/tailai/harness` → `-Users-me-tailai-harness`), the way Claude
   Code names its own project folders. Two paths can give one key
   (`/a/b-c`, `/a/b/c`); they would share a folder.
-- **Which folder** (`Home::resolve`): `HARNESS_HOME` when set; else, when
-  `HARNESS_DATA_DIR` is set, `<data folder>/home`, so a test or a test copy
-  of the app never touches the real one; else `~/.harness`.
+- **Which folder** (`Home::resolve`): `TILDE_HOME` when set; else, when
+  `TILDE_DATA_DIR` is set, `<data folder>/home`, so a test or a test copy
+  of the app never touches the real one; else `~/.tilde`.
 - **Chat folders** (`notes.rs`): `Notes` finds a chat's project in the store.
   A chat has none until its first message makes it, so notes typed before
   then are in `unsent/<chat id>/` and move in at that moment (`adopt`,
@@ -2114,13 +2115,13 @@ existed only on that worktree's branch.
 - **A project's docs** are where "Save to project" puts a doc or the notes
   (`save_doc_to_project`, `save_notes_to_project`: the window sends the
   project's main folder, never the worktree). Agents are told the folder in
-  `docs_rule` and to look there for a doc that isn't in the chat. Harness
+  `docs_rule` and to look there for a doc that isn't in the chat. Tilde
   never deletes anything in it.
 - **Access.** Claude Code: `--add-dir` and `Edit(//<folder>/**)` for the
   chat's folder and for the project's docs folder (a side chat: `--add-dir`
   only). Cursor has no such switch; its own global settings
   (`~/.cursor/cli-config.json`, `~/.cursor/permissions.json`) allow reading
-  and writing `~/.harness/**`.
+  and writing `~/.tilde/**`.
 - **The one-time move.** Chat folders used to be `<data folder>/notes/<chat
   id>/`. At start (`SessionManager::move_chat_folders`, before the sweep)
   each existing chat's folder is renamed into its project; one that can't be
@@ -2140,7 +2141,7 @@ existed only on that worktree's branch.
   folder moved from … to …".
 - **Not here:** the database, images, skills and worktrees stay in the app's
   data folder; they aren't for reading. The to-do list
-  (`~/.harness/projects/-Users-tailaiying-tailai-harness/docs/TODO.md`) and
+  (`~/.tilde/projects/-Users-tailaiying-tailai-harness/docs/TODO.md`) and
   the research doc moved out of this repo on 2026-11-17; this plan doc
   stays in it.
 - **Tested:** Rust tests (layout, early notes, sweep, the move, old paths,
@@ -2183,7 +2184,7 @@ existed only on that worktree's branch.
     a note with frontmatter and an index line; a Claude chat started after
     that recalled both.
 - **The user's preferences, for every agent** (2026-11-17, branch
-  `harness/home-preferences-2cc4f2`): `~/.harness/preferences.md`, standing
+  `harness/home-preferences-2cc4f2`): `~/.tilde/preferences.md`, standing
   instructions whatever the project. Before this they were in Claude Code's
   own `~/.claude/CLAUDE.md`, which no other agent reads.
   - **In each agent's instructions** (`preferences_instruction`,
@@ -2208,7 +2209,7 @@ existed only on that worktree's branch.
     and its helper did not). So the instruction tells the agent to pass on
     the ones that matter, and in a test it put them in the helper's prompt.
   - **The switch-over is by hand, last**, once a build with this is running:
-    copy the text of `~/.claude/CLAUDE.md` to `~/.harness/preferences.md`,
+    copy the text of `~/.claude/CLAUDE.md` to `~/.tilde/preferences.md`,
     empty that file (or Claude Code gets the text twice) and remove the
     `UserPromptSubmit` hook in `~/.claude/settings.json` that reminds Claude
     Code of it, each with a backup. Claude Code run outside the app then has
@@ -2225,7 +2226,7 @@ existed only on that worktree's branch.
   - **What is tied to the path:** `projects.path` (chats point at the
     project by id, so they follow); `terminals.project` and `.folder` and the
     live tabs; each chat's saved worktree (`repo_root`, `subpath`) and git's
-    own links between the repo and its worktrees; `~/.harness/projects/<key>`;
+    own links between the repo and its worktrees; `~/.tilde/projects/<key>`;
     the window's `foldedProjects`, `projectOrder` and `projectModels`; and
     paths inside saved events, which are history and are not rewritten.
   - **Noticing.** The `sidebar` command marks a project `missing` when its
@@ -2310,7 +2311,7 @@ Patterns canvas "Terminal" (file `tHBjJsfaSXZFYgQhxfUVbS`).
   view the panel shows is still per chat (`Chat.terminalOn`).
 - **Shells:** `portable-pty`. The user's `$SHELL -l` (so their profile sets
   PATH; `/bin/zsh` if unset), in the main folder or a chat's worktree folder,
-  with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=Harness`,
+  with `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=Tilde`,
   `LANG=en_US.UTF-8` if unset, and no `ANTHROPIC_API_KEY`/`_AUTH_TOKEN` (so
   `claude` run there uses the subscription). Windows: `new_default_prog`.
   A reader thread per shell keeps the last 512 KB of raw output (`tail`) and
@@ -2325,7 +2326,7 @@ Patterns canvas "Terminal" (file `tHBjJsfaSXZFYgQhxfUVbS`).
 - **Closing:** × or Cmd+W asks "<name> is running. Close it?" when
   something runs, else closes at once. Closing hangs up the shell's process
   group and the job in front, waits 2 s, then kills what is left.
-- **Unused for a day** (`HARNESS_TERMINAL_IDLE_SECONDS` for tests): checked
+- **Unused for a day** (`TILDE_TERMINAL_IDLE_SECONDS` for tests): checked
   every 30 s with `Instant` (doesn't count Mac sleep). Use = typing, the tab
   on screen (`terminal_place`), Claude's `read`; output never counts. The
   shell closes; the tab keeps its output plus a dimmed `── closed after a day
@@ -2342,7 +2343,7 @@ Patterns canvas "Terminal" (file `tHBjJsfaSXZFYgQhxfUVbS`).
   `closed: worktree removed (<why>)` and start again in the main folder
   (`TerminalHooks::gone`, called from `trash`, the sweep's merged and gone
   arms, and `purge`).
-- **Claude:** a second in-process tool server, `harness_terminal`, with
+- **Claude:** a second in-process tool server, `tilde_terminal`, with
   `tabs` and `read {tab?, lines?}` (default the tab on show, else the newest;
   200 lines, at most 2,000). `read` returns plain text: escape sequences
   dropped, `\r` overwrites, backspace, erase-line and clear-screen applied; a
@@ -2354,7 +2355,7 @@ Patterns canvas "Terminal" (file `tHBjJsfaSXZFYgQhxfUVbS`).
   xterm lives in `src/lib/state/terminals.svelte.ts`, outside the panel
   (which is made again per chat), and its element is moved into
   `TerminalView`. Theme roles map to ANSI colours (`xtermTheme`); theme and
-  text size changes come through the `harness-look` event.
+  text size changes come through the `tilde-look` event.
 - **Keys** (only while the terminal has the keys): Cmd+T new tab in the main
   folder, Cmd+Shift+[ / ] previous / next tab, Cmd+K clear, Cmd+W close tab.
   Cmd+W elsewhere closes the window as before. Ctrl keys always go to the shell.
@@ -2471,7 +2472,7 @@ picked ones listed with "remove", plus one "add a model" box that finds the
 rest as you type (every word must be in the name or id; Enter adds the first
 match). The first pick is Auto alone; a model Cursor lists later that wasn't
 seen before joins the menu by itself. Kept in the window's storage
-(`harness.models.cursor.picked`: `shown`, `known`); effort levels are read
+(`tilde.models.cursor.picked`: `shown`, `known`); effort levels are read
 only for shown models, and for one when it is added. `agent/mcp_http.rs` serves the browser and terminal tools over HTTP
 on 127.0.0.1 (one random token per chat process); calls to them are allowed
 without a card. A chat's agent is saved in `sessions.agent` when it is made
@@ -2611,7 +2612,7 @@ Antigravity, Cursor. **Tested live** with the self-test on Gemini 3.8 Flash: a
 command, a read and a write approved; a plan shown in the panel, approved and
 built in Default mode; the context meter; titles; resume after a restart
 (history and instructions kept); the worktree card through
-`mcp__harness_worktree__ask`; a write to the chat's notes; a question card
+`mcp__tilde_worktree__ask`; a write to the chat's notes; a question card
 answered; a subagent whose result came after the turn and was kept. A Cursor
 run (command, plan approved and built) still passed. ACP `authenticate` on a
 signed-out data folder returned in seconds once the browser finished, with no
@@ -2708,10 +2709,10 @@ also accepts them with it). One app-server per chat, ~140 MB idle.
   prompt as `baseInstructions` and the user's MCP servers off.
 - Sign-in: `account/read` with no account → `SignInNeeded`; the card runs
   `codex login`. Settings → Usage lists Codex's windows by length.
-- Found at `HARNESS_CODEX_PATH`, Homebrew's `/opt/homebrew/bin` or
+- Found at `TILDE_CODEX_PATH`, Homebrew's `/opt/homebrew/bin` or
   `/usr/local/bin`, `~/.local/bin`, then the login shell.
 
-**Tested live** in the app (self-test, `HARNESS_DATA_DIR` + `HARNESS_HOME`,
+**Tested live** in the app (self-test, `TILDE_DATA_DIR` + `TILDE_HOME`,
 `gpt-6-luna`): shell and file edits, an approval card for a write outside
 the project, the earlier-chats tool with no card, plan → approve → built in
 one turn (it then asked for a worktree, as told), close and resume with
@@ -2808,7 +2809,7 @@ so a reopened chat shows run times from `TaskEnded.duration_ms` and no "ago".
   `TodoWrite` (whole list each time) is still read.
 - `get_context_usage` with `detail: "summary"` answers in about 20 ms. The
   app asks after each `result` (main chats only) with request ID
-  `harness-context-usage`; an error answer is ignored. Only categories of
+  `tilde-context-usage`; an error answer is ignored. Only categories of
   kind `used` with tokens are kept, largest first.
 
 **What Cursor sends** (probed live, CLI 2026.11.13, with
@@ -2841,7 +2842,7 @@ Gemini reports only start and end).
 
 ### Skills (`skills.rs`, built 2026-11-16)
 
-Harness's own skills, which every chat can use whatever its agent. Claude Code's
+Tilde's own skills, which every chat can use whatever its agent. Claude Code's
 and Cursor's own skills keep working beside them; the user deletes doubles
 from those by hand.
 
@@ -2858,7 +2859,7 @@ from those by hand.
   name replaces the old copy (how a skill is updated). Remove asks yes/no.
 - **Header**: read by a small parser (`parse_header`), not a YAML library:
   plain, quoted and block (`>`, `>-`, `|`) values for `name` and `description`.
-- **The tool**: an app tool group `harness_skills` with one tool, `skill`
+- **The tool**: an app tool group `tilde_skills` with one tool, `skill`
   (`name`, optional `file`). Without `file` it returns the skill's folder, its
   other files and SKILL.md; with `file`, that file as text (256 KB cap, must
   stay inside the skill). So no agent needs access to the folder. The group is
@@ -2883,10 +2884,10 @@ it again: the agent finds the earlier chat in this project and reads it. It
 is the same for every agent, and a Cursor chat can read a Claude chat. The
 research and the tests behind each choice are in "ADE chat search and
 memory.md", in this project's docs folder in the home folder
-(`~/.harness/projects/-Users-tailaiying-tailai-harness/docs/`), not in the
+(`~/.tilde/projects/-Users-tailaiying-tailai-harness/docs/`), not in the
 repo.
 
-- **The tools** are a fourth app tool group, `harness_chats`, in every main
+- **The tools** are a fourth app tool group, `tilde_chats`, in every main
   chat (side chats get none), made in `lib.rs` beside the browser's:
   - `search {query, chat?}`: the project's chats that match, best first, 8
     at most and a count of the rest. With `chat`, the matching turns of that
@@ -2941,7 +2942,7 @@ repo.
     before, for Cursor's titles (next item).
 - **Cursor's first prompt** now has the user's message first and the app's
   intro last (`acp.rs`). Cursor titles a chat from the start of its first
-  prompt, and with the intro first chats were being titled "Harness Agent"
+  prompt, and with the intro first chats were being titled "Tilde Agent"
   and "Panel Tools Guide".
 - **Cursor's tool calls are saved fuller** (`acp.rs`):
   - A call is shown when it starts, often before Cursor has sent its input,
@@ -3003,7 +3004,7 @@ working. One for the whole app: sleep is machine-wide.
   eye were tried; the user kept the cup (it means "caffeinate"). A text line in the sidebar's
   foot looked messy (user, 2026-11-17); an icon in the foot row was also
   tried. It can also start from any chat's
-  agent through the `harness_keep_awake` tools (`keep_awake` with optional
+  agent through the `tilde_keep_awake` tools (`keep_awake` with optional
   `until` "HH:MM", `stop_keep_awake`). Their descriptions point agents there
   instead of running `caffeinate`; running it directly isn't blocked.
 - **Holds** idle system sleep only, so the screen still sleeps and locks.
@@ -3037,7 +3038,7 @@ working. One for the whole app: sleep is machine-wide.
   only) and ended 10 s (test setting) after the turn; with a 5 s away time
   the user's own input ended it; `kill -9` of the app left no `caffeinate`.
   Not tested: overnight end and unplugging live, Windows.
-- `HARNESS_KEEP_AWAKE_{LIMIT,AWAY,QUIET,TICK}_SECONDS` override the times.
+- `TILDE_KEEP_AWAKE_{LIMIT,AWAY,QUIET,TICK}_SECONDS` override the times.
 - Not covered: coming back after a restart.
 
 ### Showing things in the panel (`panel.rs`, built 2026-11-17)
@@ -3045,7 +3046,7 @@ working. One for the whole app: sleep is machine-wide.
 "Pull up the to-do list" used to need a reply link and a click: a file only
 opened by itself when the agent wrote or edited it.
 
-- **The tool**: an app tool group, `harness_panel`, in every chat, with one
+- **The tool**: an app tool group, `tilde_panel`, in every chat, with one
   tool, `show`. It takes `path` (a markdown file, full path) or `view`
   (`notes`, `plan`, `browser`, `terminal`, `info`). It opens the panel if
   hidden and picks that tab or view. Its instruction line tells the agent to
@@ -3059,23 +3060,23 @@ opened by itself when the agent wrote or edited it.
   fill the panel with files read only to understand the code.
 - Tried by the user in a test copy (2026-11-17): works.
 
-### Agents open terminal tabs (`harness-tab`, built 2026-11-17)
+### Agents open terminal tabs (`tilde-tab`, built 2026-11-17)
 
 To work together through the terminal: the agent runs a command in a new
 tab that the user can watch and type into (a dev server, a sign-in prompt,
 "run it in the terminal"). The agent still can't type into the user's tabs.
 
-- **A shell command, not an app tool.** Harness writes
-  `<home>/bin/harness-tab` at start (`Home::write_tab_command`; `.cmd` on
+- **A shell command, not an app tool.** Tilde writes
+  `<home>/bin/tilde-tab` at start (`Home::write_tab_command`; `.cmd` on
   Windows, untested). The agent runs it with its own shell tool, so the
-  agent's own checks decide whether to ask. Harness adds no risk rules (the
+  agent's own checks decide whether to ask. Tilde adds no risk rules (the
   user's call: that belongs to the model and mode). App tools are allowed
   without a card, so a tool here would have skipped those checks.
 - **Approvals, tested 2026-11-17** with a stand-in in a test copy: Claude
   Code's auto mode treated wrapped and plain commands alike. Cursor (agent
   mode, auto-review) asked about risky ones both ways and asks once for any
-  `harness-tab` call, since it isn't on its allowed list. Deny means no tab.
-- **The link**: each main chat's process gets `HARNESS_TAB_URL` (a token on
+  `tilde-tab` call, since it isn't on its allowed list. Deny means no tab.
+- **The link**: each main chat's process gets `TILDE_TAB_URL` (a token on
   the app's local server, `mcp_http::open_tab`, dropped with the process).
   The script posts its arguments as one command line with curl; the reply
   is plain text. Side chats get none.
@@ -3102,7 +3103,7 @@ or carry on when one agent's usage runs out.
 - **The handoff is a reread.** No note from the old agent, so it works when
   that agent is out of usage. The new agent's first message carries a
   pending note (`handoff_note` in `sessions.rs`) telling it to read this
-  whole chat with the `harness_chats` read tool by the chat's full ID, every
+  whole chat with the `tilde_chats` read tool by the chat's full ID, every
   part. The cost of the reread is the user's to accept by switching.
 - **Between turns only.** While a turn runs, other agents' models are greyed
   out (`locked` in `Composer.svelte`); `switch_agent` also refuses a busy
@@ -3134,8 +3135,8 @@ or carry on when one agent's usage runs out.
 
 ### App icon (built 2026-11-21, branch `harness/tilde-app-icon-c377a5`)
 
-The app is being renamed Tilde; its icon is `~/` (the home folder) on a
-rounded tile. The rename itself has not started.
+The app's icon is `~/` (the home folder) on a rounded tile. It came just
+before the rename (see "Renamed to Tilde").
 
 - **The drawing** is code, `src/lib/appIcon.ts`: a gentle wave for the
   tilde with its ends cut level, a slash cut level the same way, both in one
@@ -3147,7 +3148,7 @@ rounded tile. The rename itself has not started.
   for by the user). The user picks
   the icon by hand in Settings ("App icon"); it does not follow the theme on
   show.
-- **The files the app ships** (`src-tauri/icons`) are Harness Dark's icon,
+- **The files the app ships** (`src-tauri/icons`) are Tilde Dark's icon,
   made by `npm run icons` from the same drawing. Windows' files fill their
   square; a Mac's keep the margin every Dock icon has.
 - **While the app runs** the window draws the picked icon to a PNG and the
@@ -3159,6 +3160,54 @@ rounded tile. The rename itself has not started.
   of hazard stripes on whichever icon is picked, so it is told apart from
   the real app in the Dock.
 - Not covered: Windows has the new files but no picker and no stripes.
+
+### Renamed to Tilde (2026-11-21, branch `harness/rename-to-tilde`)
+
+The app was called Harness until this date. Everything a person or an agent
+sees or types now says Tilde, and a new install has no trace of the old
+name. An install from before keeps its saved chats and worktrees in place.
+
+- **Renamed outright**: the app and its program (`Tilde.app`, `tilde`), the
+  app ID (`com.tailaiying.tilde`), theme names and ids, saved-settings keys
+  (`tilde.*`), the tool groups (`tilde_browser` and the rest), `tilde-tab`,
+  new worktree branches (`tilde/…`), the environment variables (`TILDE_*`),
+  and what agents are told.
+- **New name, old one still honoured**:
+  - *Data folder*: `Tilde` under the system's app-data folder, unless
+    `com.harness.app` is there, which is then used as it is
+    (`home::data_folder`). Nothing is moved: worktree paths are saved in the
+    database and in each repo's git folder.
+  - *Database*: `tilde.db`, unless the folder holds `harness.db`.
+  - *Home folder*: `~/.tilde`. An older `~/.harness` is renamed once at
+    start and a link is left at the old path (`home::move_old_home`), so
+    paths saved in chats, memory and docs still open and an older build
+    still running finds its files. Never done when the data or home folder
+    is set by the environment.
+  - *Saved edits*: `refs/tilde/saved/<chat>`; `refs/harness/saved/<chat>`
+    is still read and cleaned up.
+  - *Environment variables*: `HARNESS_<name>` is read when `TILDE_<name>`
+    isn't set (`home::app_env`), so a test copy set up before the rename
+    never falls through to the real folders.
+  - *`harness-tab`*: where the old file exists it passes its arguments on
+    to `tilde-tab`. Never made on a new install.
+  - *Tool names in saved chats*: the window reads `mcp__harness_*` as
+    `mcp__tilde_*` (`currentToolName` in `tools.ts`), so old chats keep
+    their wording and links. The core never matches names in saved history.
+  - *Branches*: ones already made keep `harness/`; the name saved with the
+    chat is what every later step uses. The panel shortens both prefixes.
+- **Agents are told once**: each chat saved before the rename gets a note
+  with its next message naming the new tool groups, command and folder
+  (`note_rename`, flag `renamed_to_tilde` in settings). Three agents get
+  their instructions fresh at every start anyway; Cursor is told only once
+  per conversation, so the note is what reaches it.
+- **Cost, accepted by the user**: window settings are filed by the system
+  under the app ID, so on an install from before they start over once
+  (theme, sizes, model picks, icon pick, sidebar order), and macOS asks for
+  its permissions again. `Tilde.app` installs beside `Harness.app`, which is
+  deleted by hand; both use one data folder, so they shouldn't run together.
+- Not covered: the name of an existing install's data folder; Windows when
+  it refuses the link (old paths in old chats then stop opening).
+- Branch names in older headings here are the real ones from the time.
 
 ### If the approval channel breaks
 
@@ -3254,14 +3303,14 @@ before building it. Only `claude_code.rs` would change.
    sidebar, from 0), `@close` (shut the open chat's process down), `@exited`
    (wait for it to exit), `@wait <ms>`, `@image <word>` (attach a picture
    of that word to the next message, through the same code a paste uses) and
-   `@file <path>` (add that file to the next message, as a drop would). Set `HARNESS_DATA_DIR` so a test
-   never touches the real saved chats, and `HARNESS_IDLE_SECONDS` to test idle
+   `@file <path>` (add that file to the next message, as a drop would). Set `TILDE_DATA_DIR` so a test
+   never touches the real saved chats, and `TILDE_IDLE_SECONDS` to test idle
    shutdown quickly. With the window hidden or the screen locked the page is
    frozen while nothing happens, so `@wait` never ends there: wait on an event
    instead. The report's `shown` leaves out blocks that aren't laid out;
    `text` has them all. Start the built binary with
-   `HARNESS_AUTOTEST_FOLDER`, `HARNESS_AUTOTEST_MESSAGES` (JSON array) and
-   `HARNESS_AUTOTEST_REPORT` set, and read memory with `ps` and `top`. WebKit's
+   `TILDE_AUTOTEST_FOLDER`, `TILDE_AUTOTEST_MESSAGES` (JSON array) and
+   `TILDE_AUTOTEST_REPORT` set, and read memory with `ps` and `top`. WebKit's
    helper processes (`com.apple.WebKit.WebContent`, `.GPU`, `.Networking`) are
    not children of the app; count the ones that appear after launch.
 8. **Windows pass.** Build and run on the Windows laptop. Check binary

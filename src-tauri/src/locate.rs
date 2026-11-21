@@ -87,7 +87,7 @@ fn from_path() -> Option<PathBuf> {
 /// the PATH may hold an older npm copy.
 pub fn find_claude() -> Option<PathBuf> {
     let installed = || home().and_then(|h| existing(h.join(".local").join("bin").join(BINARY)));
-    let found = std::env::var_os("HARNESS_CLAUDE_PATH").and_then(existing);
+    let found = crate::home::app_env("CLAUDE_PATH").and_then(existing);
     if cfg!(windows) {
         found.or_else(installed).or_else(|| from_login_shell("claude"))
     } else {
@@ -104,7 +104,7 @@ pub fn find_claude() -> Option<PathBuf> {
 pub fn find_cursor() -> Option<PathBuf> {
     let exe = |name: &str| if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
     let local = |name: &str| home().and_then(|h| existing(h.join(".local").join("bin").join(exe(name))));
-    std::env::var_os("HARNESS_CURSOR_PATH")
+    crate::home::app_env("CURSOR_PATH")
         .and_then(existing)
         .or_else(|| local("cursor-agent"))
         .or_else(|| from_login_shell("cursor-agent"))
@@ -124,7 +124,7 @@ pub fn find_codex() -> Option<PathBuf> {
     } else {
         vec!["/opt/homebrew/bin/codex".into(), "/usr/local/bin/codex".into()]
     };
-    std::env::var_os("HARNESS_CODEX_PATH")
+    crate::home::app_env("CODEX_PATH")
         .and_then(existing)
         .or_else(|| usual.iter().find_map(existing))
         .or_else(|| home().and_then(|h| existing(h.join(".local").join("bin").join(exe))))
@@ -134,7 +134,7 @@ pub fn find_codex() -> Option<PathBuf> {
 /// Antigravity's CLI, `agy`. Its installer puts it in `~/.local/bin`.
 pub fn find_antigravity() -> Option<PathBuf> {
     let exe = if cfg!(windows) { "agy.exe" } else { "agy" };
-    std::env::var_os("HARNESS_ANTIGRAVITY_PATH")
+    crate::home::app_env("ANTIGRAVITY_PATH")
         .and_then(existing)
         .or_else(|| home().and_then(|h| existing(h.join(".local").join("bin").join(exe))))
         .or_else(|| from_login_shell("agy"))
@@ -165,12 +165,12 @@ pub fn git() -> &'static Path {
 }
 
 /// GitHub's command line tool, if installed. Without it, pull request status
-/// is off. `HARNESS_GH` names another program to use (tests put a stand-in
+/// is off. `TILDE_GH` names another program to use (tests put a stand-in
 /// for GitHub there).
 pub fn gh() -> Option<&'static Path> {
     static GH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     GH.get_or_init(|| {
-        std::env::var_os("HARNESS_GH")
+        crate::home::app_env("GH")
             .map(PathBuf::from)
             .or_else(|| {
                 let usual: &[&str] = if cfg!(windows) {
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn npm_shell_shims_are_not_taken_for_programs_on_windows() {
-        let dir = std::env::temp_dir().join(format!("harness-locate-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tilde-locate-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for name in ["tool", "tool.cmd", "tool.exe"] {
             std::fs::write(dir.join(name), "").unwrap();

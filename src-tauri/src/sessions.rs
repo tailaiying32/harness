@@ -42,7 +42,7 @@ pub struct TerminalHooks {
     pub moved: Arc<dyn Fn(&str, &str) + Send + Sync>,
     /// A chat was deleted: the idle tabs its agent opened go with it.
     pub chat_gone: Arc<dyn Fn(&str) + Send + Sync>,
-    /// An agent's `harness-tab`: a new tab of the project (main folder, as
+    /// An agent's `tilde-tab`: a new tab of the project (main folder, as
     /// the window names it) for a chat, in `worktree` if given, with the command typed in.
     /// The last argument puts the new tab on screen, before its shell starts.
     #[allow(clippy::type_complexity)]
@@ -97,11 +97,10 @@ struct Timings {
     keep: Option<Duration>,
 }
 
-/// The idle time from `HARNESS_IDLE_SECONDS`, the `idle_seconds` setting, or
+/// The idle time from `TILDE_IDLE_SECONDS`, the `idle_seconds` setting, or
 /// the default. None = never. Side chats use it too.
 pub fn configured_idle(store: &Store) -> Option<Duration> {
-    let seconds = std::env::var("HARNESS_IDLE_SECONDS")
-        .ok()
+    let seconds = crate::home::app_env_text("IDLE_SECONDS")
         .or_else(|| store.setting("idle_seconds"))
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_IDLE_SECONDS);
@@ -183,7 +182,7 @@ struct Session {
     /// Tool calls that run `gh pr create`, until their results arrive: what
     /// they print names the chat's new pull request.
     pr_calls: HashSet<String>,
-    /// The live process's `harness-tab` route; gone with the process.
+    /// The live process's `tilde-tab` route; gone with the process.
     tab: Option<crate::agent::mcp_http::TabEndpoint>,
 }
 
@@ -211,7 +210,7 @@ struct Inner {
     images: Images,
     /// Each chat's own folder: its notes and docs.
     notes: Notes,
-    /// Where chats' folders and projects' docs are kept (`~/.harness`).
+    /// Where chats' folders and projects' docs are kept (`~/.tilde`).
     home: Home,
     /// The app's own skills, offered to every chat's agent.
     skills: Skills,
@@ -331,8 +330,37 @@ impl SessionManager {
                 to.display()
             );
             if let Err(e) = self.0.store.add_pending_note(&chat, &note) {
-                eprintln!("harness: couldn't note a chat's moved folder: {e}");
+                eprintln!("tilde: couldn't note a chat's moved folder: {e}");
             }
+        }
+    }
+
+    /// The app was called Harness until 2026-11-21. A chat begun before then
+    /// has the old names in its agent's memory of the conversation, and
+    /// Cursor is only told the app's instructions once per conversation, so
+    /// every chat saved before the rename has its agent told the new names
+    /// with its next message. Done once: a new database has no chats to tell.
+    pub fn note_rename(&self) {
+        const DONE: &str = "renamed_to_tilde";
+        if self.0.store.setting(DONE).is_some() {
+            return;
+        }
+        let home = self.0.home.root();
+        let folder = match home.parent().map(|parent| parent.join(".harness")) {
+            Some(old) if home.ends_with(".tilde") => {
+                format!(" Its folder moved from {} to {}, so use the new paths.", old.display(), home.display())
+            }
+            _ => String::new(),
+        };
+        let note = format!(
+            "The app this chat runs in was renamed from Harness to Tilde. Its tools are now named tilde_* where they were \
+             harness_* (tilde_browser, tilde_chats and so on). Its command for opening a terminal tab is now {} where it \
+             was harness-tab.{folder}",
+            self.0.home.tab_command().display(),
+        );
+        let noted = self.0.store.add_pending_note_to_all(&note).and_then(|()| self.0.store.set_setting(DONE, "1"));
+        if let Err(e) = noted {
+            eprintln!("tilde: couldn't note the app's new name: {e}");
         }
     }
 
@@ -348,12 +376,12 @@ impl SessionManager {
                 self.0.images.sweep(&ids);
                 self.0.notes.sweep(&ids);
             }
-            Err(e) => eprintln!("harness: couldn't list chats to tidy images and notes: {e}"),
+            Err(e) => eprintln!("tilde: couldn't list chats to tidy images and notes: {e}"),
         }
     }
 
     /// Idle time before a chat's process is closed. None = never.
-    /// Order: test override, `HARNESS_IDLE_SECONDS`, the `idle_seconds` setting,
+    /// Order: test override, `TILDE_IDLE_SECONDS`, the `idle_seconds` setting,
     /// then the default. Zero means never.
     fn idle_time(&self) -> Option<Duration> {
         if let Some(fixed) = self.0.timings.idle {
@@ -366,7 +394,7 @@ impl SessionManager {
     fn record(&self, session_id: &str, event: AgentEvent) {
         if event.is_saved() {
             if let Err(e) = self.0.store.append_event(session_id, &event) {
-                eprintln!("harness: could not save an event: {e}");
+                eprintln!("tilde: could not save an event: {e}");
             }
         }
         (self.0.out)(Envelope {
@@ -467,7 +495,7 @@ impl SessionManager {
             if let Some(from) = self.find_moved(&project_path).await {
                 match self.relocate_project(&from, &project).await {
                     Ok(_) => moved_from = Some(from),
-                    Err(e) => eprintln!("harness: couldn't bring {from} along to {project}: {e}"),
+                    Err(e) => eprintln!("tilde: couldn't bring {from} along to {project}: {e}"),
                 }
             }
         }
@@ -536,7 +564,7 @@ impl SessionManager {
             let folder = self.work_folder(session_id, &project_path).await;
             self.note_repo(session_id, &folder).await;
             let tab = self.tab_route(session_id, &project_path, &folder);
-            let env = tab.iter().map(|t| ("HARNESS_TAB_URL".to_string(), t.url.clone())).collect();
+            let env = tab.iter().map(|t| ("TILDE_TAB_URL".to_string(), t.url.clone())).collect();
             // Not under the sessions lock: starting reports "starting" through
             // the sink, which takes that lock.
             let agent = adapter.spawn(
@@ -674,7 +702,7 @@ impl SessionManager {
         // The chats' worktrees point at the repo where it was.
         if let Some((root, _)) = repo {
             if let Err(e) = blocking(move || worktree::repair(&root)).await {
-                eprintln!("harness: couldn't link the moved repo's worktrees again: {e}");
+                eprintln!("tilde: couldn't link the moved repo's worktrees again: {e}");
             }
         }
         crate::github::forget_under(Path::new(from));
@@ -964,17 +992,17 @@ impl SessionManager {
             *part = match kept {
                 Ok(image) => serde_json::json!({ "type": "image_ref", "n": image.n, "media_type": image.media_type }),
                 Err(e) => {
-                    eprintln!("harness: couldn't keep an image from a tool: {e}");
+                    eprintln!("tilde: couldn't keep an image from a tool: {e}");
                     serde_json::json!({ "type": "text", "text": "[image could not be saved]" })
                 }
             };
         }
     }
 
-    /// The `harness-tab` route for a chat process about to start in
+    /// The `tilde-tab` route for a chat process about to start in
     /// `folder`: a tab it opens sits there (its worktree, or the main folder)
     /// and is shown in the chat's panel. None without a terminal, or if the
-    /// app's local server couldn't start; `harness-tab` then just fails.
+    /// app's local server couldn't start; `tilde-tab` then just fails.
     fn tab_route(&self, session_id: &str, project: &Path, folder: &Path) -> Option<crate::agent::mcp_http::TabEndpoint> {
         let run = self.0.terminal.get()?.run.clone();
         let out = self.0.out.clone();
@@ -998,7 +1026,7 @@ impl SessionManager {
                     .map_err(|e| e.to_string())??;
                 // By ID: the tab's name changes to what runs in it.
                 Ok(format!(
-                    "Opened a terminal tab running: {}\nRead its output with the harness_terminal read tool, tab \"{}\".",
+                    "Opened a terminal tab running: {}\nRead its output with the tilde_terminal read tool, tab \"{}\".",
                     command.trim(),
                     tab.id
                 ))
@@ -1448,7 +1476,7 @@ mod tests {
 
     fn rig_with(idle: Duration, worktree_idle: Duration, keep: Duration, lookup: PrLookup) -> Rig {
         let fake = Arc::new(Fake::default());
-        let dir = std::env::temp_dir().join(format!("harness-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("tilde-test-{}", uuid::Uuid::new_v4()));
         let store = Arc::new(Store::open(&dir).unwrap());
         let seen: Arc<Mutex<Vec<AgentEvent>>> = Arc::default();
         let out: Out = {
@@ -1588,7 +1616,7 @@ mod tests {
         assert!(
             told[1].starts_with(
                 "say same deal as the login fix\n\n(From the app, not the user: Recent chats in this project \
-(id, last used, title), readable with the harness_chats tools: s1 · just now · "
+(id, last used, title), readable with the tilde_chats tools: s1 · just now · "
             ),
             "{}",
             told[1]
@@ -1649,6 +1677,32 @@ are there now, so use the new paths.)\n\ncarry on",
             )
         );
         assert_eq!(told[2], "say and again");
+    }
+
+    #[tokio::test]
+    async fn a_chat_from_before_the_rename_has_its_agent_told_the_new_names_once() {
+        let rig = rig(LONG);
+        rig.send("hello").await;
+
+        rig.manager.note_rename();
+        // A later start adds nothing.
+        rig.manager.note_rename();
+
+        rig.send("carry on").await;
+        rig.send("and again").await;
+        let told = rig.told();
+        assert!(told[1].starts_with("say (From the app, not the user: The app this chat runs in was renamed from Harness to Tilde."), "{}", told[1]);
+        assert!(told[1].contains("tilde_browser"), "{}", told[1]);
+        assert!(told[1].contains(&rig.manager.home().tab_command().display().to_string()), "{}", told[1]);
+        assert_eq!(told[1].matches("renamed from Harness").count(), 1);
+        assert!(told[1].ends_with("\n\ncarry on"), "{}", told[1]);
+        assert_eq!(told[2], "say and again");
+    }
+
+    #[test]
+    fn the_worktree_and_new_chats_calls_are_named_after_their_groups() {
+        assert_eq!(worktrees::CALL_NAME, format!("mcp__{}__ask", worktrees::SERVER));
+        assert_eq!(new_chats::CALL_NAME, format!("mcp__{}__start", new_chats::SERVER));
     }
 
     #[tokio::test]
@@ -1969,7 +2023,7 @@ are there now, so use the new paths.)\n\ncarry on",
 
     /// A scratch git repo with one commit on main.
     fn scratch_repo() -> PathBuf {
-        let root = std::env::temp_dir().join(format!("harness-repo-{}", uuid::Uuid::new_v4().simple()));
+        let root = std::env::temp_dir().join(format!("tilde-repo-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&root).unwrap();
         let root = crate::worktree::canonical(&root).unwrap();
         let git = |args: &[&str]| {
@@ -2136,7 +2190,7 @@ are there now, so use the new paths.)\n\ncarry on",
     #[tokio::test]
     async fn a_request_outside_a_repo_is_turned_down_at_once() {
         let rig = rig(LONG);
-        let folder = std::env::temp_dir().join(format!("harness-plain-{}", uuid::Uuid::new_v4().simple()));
+        let folder = std::env::temp_dir().join(format!("tilde-plain-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&folder).unwrap();
         rig.send_at(&folder, "auto", "hi").await;
         assert!(rig.ask("x").await.contains("isn't in a git repo"));
@@ -2191,7 +2245,7 @@ are there now, so use the new paths.)\n\ncarry on",
         let at = |what: &str| told.iter().position(|t| t.starts_with(what)).unwrap_or_else(|| panic!("{what} in {told:?}"));
         assert!(at("stop") < at("kill") && at("kill") < at("say You now work"));
         // Named after the agent's suggestion.
-        assert!(wt.branch.starts_with("harness/fix-it-"), "{}", wt.branch);
+        assert!(wt.branch.starts_with("tilde/fix-it-"), "{}", wt.branch);
         let note = &told[at("say You now work")];
         assert!(note.contains(&wt.work_path().display().to_string()) && note.contains(&wt.branch));
 
@@ -2455,7 +2509,7 @@ are there now, so use the new paths.)\n\ncarry on",
         // It is told to reread the chat, before the user's words.
         let told = cursor.told.lock().unwrap().last().unwrap().clone();
         assert!(told.contains("handed to you from Claude Code"), "{told}");
-        assert!(told.contains("harness_chats read tool (id s1)"), "{told}");
+        assert!(told.contains("tilde_chats read tool (id s1)"), "{told}");
         assert!(told.find("handed to you").unwrap() < told.find("again").unwrap(), "{told}");
         // The switch is a saved line in the chat, above the message.
         let switched = AgentEvent::AgentSwitched {
@@ -2678,7 +2732,7 @@ are there now, so use the new paths.)\n\ncarry on",
 
         // Outside a repo.
         let rig = rig_with(LONG, LONG, LONG, PrLookup::none());
-        let plain = std::env::temp_dir().join(format!("harness-plain-{}", uuid::Uuid::new_v4().simple()));
+        let plain = std::env::temp_dir().join(format!("tilde-plain-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&plain).unwrap();
         rig.send_at(&plain, "auto", "split it up").await;
         assert!(rig.ask_chats(two_parts()).await.contains("isn't in a git repo"));

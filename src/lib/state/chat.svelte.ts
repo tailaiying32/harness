@@ -58,7 +58,7 @@ import {
 } from "../ipc";
 import { defaultMode, modeFor, modelName } from "../models";
 import { FILE_LINK, fileWord, linkable, toLinks, type FileRef } from "../chat/files";
-import { chatsTool, docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
+import { chatsTool, currentToolName, docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
 import { ChatInfo } from "./chatInfo.svelte";
 import { terminals } from "./terminals.svelte";
 
@@ -66,7 +66,7 @@ import { terminals } from "./terminals.svelte";
 export type PanelView = "docs" | "side" | "browser" | "terminal" | "info";
 
 /** The browser tool that opens a page (see browser.rs). */
-const BROWSER_OPEN = "mcp__harness_browser__open";
+const BROWSER_OPEN = "mcp__tilde_browser__open";
 
 /** How a chat picked with @ is kept among a message's files: `chat:<id>`. */
 const CHAT_PATH = "chat:";
@@ -1400,7 +1400,7 @@ export class Chat {
         } else if (block.type === "thinking") {
           this.push({ type: "thinking", text: block.text });
         } else {
-          this.push({ type: "tool", toolId: block.tool_id, name: block.name, input: block.input });
+          this.push({ type: "tool", toolId: block.tool_id, name: currentToolName(block.name), input: block.input });
         }
         break;
       }
@@ -1409,7 +1409,7 @@ export class Chat {
         // The call was shown before its real name and input arrived.
         const tool = this.items.find((i): i is ToolItem => i.type === "tool" && i.toolId === event.tool_id);
         if (tool) {
-          tool.name = event.name;
+          tool.name = currentToolName(event.name);
           tool.input = event.input;
         }
         break;
@@ -1445,7 +1445,7 @@ export class Chat {
           type: "approval",
           requestId: event.request_id,
           approval: event.approval,
-          toolName: event.tool_name,
+          toolName: currentToolName(event.tool_name),
           title: event.title,
           input: event.input,
           toolId: event.tool_id,
@@ -1646,7 +1646,7 @@ export class Chat {
         break;
 
       // The agent asked to show something in the panel, or opened a terminal
-      // tab (harness-tab); a side chat's opens in its chat's panel.
+      // tab (tilde-tab); a side chat's opens in its chat's panel.
       case "show_panel": {
         const chat = this.owner ?? this;
         if (event.tab) terminals.reveal(chat.projectPath.trim(), event.tab);

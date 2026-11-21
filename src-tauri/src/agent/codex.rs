@@ -60,7 +60,7 @@ const FORGET_TIMEOUT: Duration = Duration::from_secs(20);
 /// (`collaborationMode`) and questions (`item/tool/requestUserInput`).
 fn initialize_params() -> Value {
     json!({
-        "clientInfo": { "name": "harness", "title": "Harness", "version": env!("CARGO_PKG_VERSION") },
+        "clientInfo": { "name": "tilde", "title": "Tilde", "version": env!("CARGO_PKG_VERSION") },
         "capabilities": { "experimentalApi": true, "requestAttestation": false },
     })
 }
@@ -269,7 +269,7 @@ impl AgentAdapter for CodexAdapter {
                 rpc.call("thread/delete", json!({ "threadId": id }), deadline)
             });
             if let Err(e) = deleted {
-                eprintln!("harness: couldn't delete Codex thread {id}: {e}");
+                eprintln!("tilde: couldn't delete Codex thread {id}: {e}");
             }
         });
     }
@@ -611,7 +611,7 @@ fn spawn(opts: SpawnOptions, sink: EventSink) -> Result<Box<dyn RunningAgent>, S
         match mcp_http::open(opts.tools.clone()) {
             Ok(endpoint) => Some(endpoint),
             Err(e) => {
-                eprintln!("harness: the app's tools aren't available to Codex: {e}");
+                eprintln!("tilde: the app's tools aren't available to Codex: {e}");
                 None
             }
         }
@@ -2295,7 +2295,7 @@ mod tests {
             sink,
             items: items_tx,
             stop_tx: Mutex::new(None),
-            own_tools: vec!["harness_browser".into()],
+            own_tools: vec!["tilde_browser".into()],
         });
         Rig { shared, out, items, seen }
     }
@@ -2447,7 +2447,7 @@ mod tests {
     #[test]
     fn the_apps_own_tools_never_ask() {
         let mut r = rig();
-        r.feed(json!({ "id": 3, "method": "mcpServer/elicitation/request", "params": { "threadId": "t1", "serverName": "harness_browser", "mode": "form", "message": "Allow?", "_meta": { "tool_name": "open" } } }));
+        r.feed(json!({ "id": 3, "method": "mcpServer/elicitation/request", "params": { "threadId": "t1", "serverName": "tilde_browser", "mode": "form", "message": "Allow?", "_meta": { "tool_name": "open" } } }));
         assert!(r.events().is_empty());
         assert_eq!(r.sent()[0]["result"]["action"], "accept");
         // Another server's tool asks with a card.
@@ -2455,7 +2455,7 @@ mod tests {
         let events = r.events();
         assert!(matches!(&events[0], AgentEvent::ApprovalRequest { tool_name, .. } if tool_name == "mcp__github__merge"));
         // Its result comes from Codex's item.
-        r.feed(note("item/completed", json!({ "threadId": "t1", "item": { "type": "mcpToolCall", "id": "c1", "server": "harness_browser", "tool": "read", "arguments": {}, "status": "completed", "error": null, "result": { "content": [{ "type": "text", "text": "page text" }] } } })));
+        r.feed(note("item/completed", json!({ "threadId": "t1", "item": { "type": "mcpToolCall", "id": "c1", "server": "tilde_browser", "tool": "read", "arguments": {}, "status": "completed", "error": null, "result": { "content": [{ "type": "text", "text": "page text" }] } } })));
         let events = r.events();
         assert!(events.contains(&AgentEvent::ToolResult { tool_id: "c1".into(), content: json!("page text"), is_error: false, parent_tool_id: None }));
         // An unknown request is refused, so Codex never waits on it.
@@ -2715,8 +2715,8 @@ mod tests {
         assert_eq!(mode_policy("plan", &roots).1["type"], "workspaceWrite");
         assert_eq!(mode_policy("read-only", &roots), ("on-request", json!({ "type": "readOnly", "networkAccess": false })));
         assert_eq!(mode_policy("full-access", &roots), ("never", json!({ "type": "dangerFullAccess" })));
-        let config = thread_config(&[("harness_chats".into(), "http://x/mcp".into())], &roots, false);
-        assert_eq!(config["mcp_servers.harness_chats.default_tools_approval_mode"], "approve");
+        let config = thread_config(&[("tilde_chats".into(), "http://x/mcp".into())], &roots, false);
+        assert_eq!(config["mcp_servers.tilde_chats.default_tools_approval_mode"], "approve");
     }
 
     #[test]
@@ -2761,10 +2761,10 @@ mod tests {
         assert_eq!(goal_text("thread/goal/set", &json!({ "objective": "Ship", "status": "paused" })), "Goal (paused): Ship");
         assert_eq!(goal_text("thread/goal/clear", &Value::Null), "Goal cleared.");
         let reply = json!({ "data": [
-            { "name": "harness_chats", "runtimeStatus": "connected", "tools": { "a": {}, "b": {} } },
+            { "name": "tilde_chats", "runtimeStatus": "connected", "tools": { "a": {}, "b": {} } },
             { "name": "linear", "runtimeStatus": "authenticationRequired" },
         ]});
-        assert_eq!(mcp_text(&reply), "MCP servers:\n\n- **harness_chats**: connected, 2 tools\n- **linear**: needs sign-in");
+        assert_eq!(mcp_text(&reply), "MCP servers:\n\n- **tilde_chats**: connected, 2 tools\n- **linear**: needs sign-in");
         assert_eq!(mcp_text(&json!({ "data": [] })), "No MCP servers.");
     }
 
@@ -2773,10 +2773,10 @@ mod tests {
         assert_eq!(mode_sandbox(SIDE_MODE), ("never", "read-only"));
         let (approval, sandbox) = mode_policy(SIDE_MODE, &["/notes".into()]);
         assert_eq!((approval, sandbox["type"].as_str()), ("never", Some("readOnly")));
-        let config = thread_config(&[("harness_chats".into(), "http://x/mcp".into())], &["/notes".into()], true);
+        let config = thread_config(&[("tilde_chats".into(), "http://x/mcp".into())], &["/notes".into()], true);
         assert_eq!(
             config,
-            json!({ "mcp_servers": { "harness_chats": { "url": "http://x/mcp", "default_tools_approval_mode": "approve" } } })
+            json!({ "mcp_servers": { "tilde_chats": { "url": "http://x/mcp", "default_tools_approval_mode": "approve" } } })
         );
         // No tools: none of the user's either.
         assert_eq!(thread_config(&[], &[], true), json!({ "mcp_servers": {} }));
@@ -2784,7 +2784,7 @@ mod tests {
 
     #[test]
     fn a_threads_saved_file_is_found_by_its_id_in_any_day_folder() {
-        let folder = std::env::temp_dir().join(format!("harness-codex-rollouts-{}", uuid::Uuid::new_v4()));
+        let folder = std::env::temp_dir().join(format!("tilde-codex-rollouts-{}", uuid::Uuid::new_v4()));
         let day = folder.join("2026/11/19");
         std::fs::create_dir_all(&day).unwrap();
         std::fs::write(day.join("rollout-2026-11-19T10-44-09-01a1f47a-c80f.jsonl"), "").unwrap();

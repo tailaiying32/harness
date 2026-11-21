@@ -391,7 +391,7 @@ function sameFolder(a: string, b: string): boolean {
 export type Limit = { utilization: number; resetsAt: number | null };
 export type Limits = Partial<Record<AgentId, Record<string, Limit>>>;
 
-const LIMITS_KEY = "harness.limits";
+const LIMITS_KEY = "tilde.limits";
 
 function loadLimits(): Limits {
   try {

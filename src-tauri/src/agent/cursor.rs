@@ -85,7 +85,7 @@ impl AgentAdapter for CursorAdapter {
     /// was current is put back after, since Cursor starts every new session on
     /// the last one.
     fn list_models(&self, binary: &Path, efforts_for: Option<&[String]>) -> Result<Vec<ModelInfo>, String> {
-        let folder = std::env::temp_dir().join("harness-cursor-models");
+        let folder = std::env::temp_dir().join("tilde-cursor-models");
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         let mut rpc = SyncRpc::start(binary, &["acp"], "Cursor", &folder)?;
         let deadline = Instant::now() + LIST_TIMEOUT;
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn a_session_is_copied_whole_under_a_new_id_and_a_bad_id_is_refused() {
-        let sessions = std::env::temp_dir().join(format!("harness-cursor-copy-{}", uuid::Uuid::new_v4()));
+        let sessions = std::env::temp_dir().join(format!("tilde-cursor-copy-{}", uuid::Uuid::new_v4()));
         let from = sessions.join("s-1");
         std::fs::create_dir_all(&from).unwrap();
         let db = rusqlite::Connection::open(from.join("store.db")).unwrap();

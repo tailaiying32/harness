@@ -1,4 +1,4 @@
-//! Harness's own skills: folders with a SKILL.md (instructions for a kind of
+//! Tilde's own skills: folders with a SKILL.md (instructions for a kind of
 //! task), kept in the app's data folder and offered to every chat's agent,
 //! whatever the agent. The user imports them in Settings (a folder, a .zip of
 //! one, or a lone .md file) as copies; nothing in an agent's own skill folders
@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 /// The name the agent knows the tool group by.
-pub const SERVER: &str = "harness_skills";
+pub const SERVER: &str = "tilde_skills";
 const FILE: &str = "SKILL.md";
 /// Largest skill an import copies, all files together.
 const MAX_IMPORT_BYTES: u64 = 50 * 1024 * 1024;
@@ -139,7 +139,7 @@ impl Skills {
         let unknown = || {
             let names: Vec<String> = self.list().into_iter().map(|s| s.name).collect();
             let names = if names.is_empty() { "none".to_string() } else { names.join(", ") };
-            format!("No Harness skill named {name}. Skills: {names}")
+            format!("No Tilde skill named {name}. Skills: {names}")
         };
         let folder = self.folder(name).map_err(|_| unknown())?;
         let text = std::fs::read_to_string(folder.join(FILE)).map_err(|_| unknown())?;
@@ -208,14 +208,14 @@ impl Skills {
         let skill = self.load(name).ok()?;
         let request = request.trim();
         let request = if request.is_empty() { "(none given)" } else { request };
-        Some(format!("Use this Harness skill for the request below.\n\n{skill}\n\nRequest: {request}"))
+        Some(format!("Use this Tilde skill for the request below.\n\n{skill}\n\nRequest: {request}"))
     }
 }
 
 /// The line added to the agent's instructions: the skills, and when to load one.
 pub fn instruction(skills: &[SkillInfo]) -> String {
     format!(
-        "Harness skills (load one with the {SERVER} skill tool before a task that matches it):\n{}",
+        "Tilde skills (load one with the {SERVER} skill tool before a task that matches it):\n{}",
         skill_lines(skills)
     )
 }
@@ -225,7 +225,7 @@ pub fn tools(skills: &[SkillInfo]) -> Value {
     json!([{
         "name": "skill",
         "description": format!(
-            "Load a Harness skill: instructions for a kind of task. Call it before starting a task \
+            "Load a Tilde skill: instructions for a kind of task. Call it before starting a task \
 that matches one. Give `file` to read one of the skill's other files instead. Skills:\n{}",
             skill_lines(skills)
         ),
@@ -433,7 +433,7 @@ mod tests {
     use std::io::Write;
 
     fn temp(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("harness-skills-{label}-{}", uuid::Uuid::new_v4().simple()));
+        let dir = std::env::temp_dir().join(format!("tilde-skills-{label}-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

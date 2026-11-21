@@ -10,12 +10,12 @@ use crate::events::{AgentEvent, Envelope};
 use crate::sessions::Out;
 
 /// The name the agent knows the tool group by.
-pub const SERVER: &str = "harness_panel";
+pub const SERVER: &str = "tilde_panel";
 
 /// The line added to the agent's instructions.
 pub const INSTRUCTION: &str = "When the user asks to see, show, open or pull up something the side \
 panel can show (a markdown file, the plan, their notes, the browser, the terminal, chat info), \
-open it with the harness_panel show tool instead of pasting it into the chat or only linking it.";
+open it with the tilde_panel show tool instead of pasting it into the chat or only linking it.";
 
 /// The views the tool can open besides a file.
 const VIEWS: [&str; 5] = ["notes", "plan", "browser", "terminal", "info"];
@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn opens_a_markdown_file() {
-        let dir = std::env::temp_dir().join(format!("harness-panel-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tilde-panel-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("TODO.md");
         std::fs::write(&file, "# to-do").unwrap();

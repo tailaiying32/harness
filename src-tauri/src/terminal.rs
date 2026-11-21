@@ -42,14 +42,14 @@ use crate::sessions::Out;
 use crate::store::{SavedTerminal, Store, now_ms};
 
 /// Name the agent knows the terminal's tools by.
-pub const SERVER: &str = "harness_terminal";
+pub const SERVER: &str = "tilde_terminal";
 
 /// The lines for the agent's instructions. `tab_command` is the full path of
-/// `harness-tab` (see `Home::write_tab_command`).
+/// `tilde-tab` (see `Home::write_tab_command`).
 pub fn instruction(tab_command: &Path) -> String {
     format!(
         "The user has a terminal in this app's side panel for this project, with one or more tabs. \
-When they mention their terminal or what it shows, read it with the harness_terminal tools (tabs, read). \
+When they mention their terminal or what it shows, read it with the tilde_terminal tools (tabs, read). \
 To run a command in a new tab where the user can watch it and type into it (a dev server, a sign-in \
 prompt, or when they ask you to run something in the terminal), run `{} \"<command>\"` with your shell \
 tool. It opens the tab in this chat's folder, shows it, and returns at once with the tab's name; read the \
@@ -70,7 +70,7 @@ const TAIL_MAX: usize = 512 * 1024;
 /// Raw output saved per tab at quit.
 const SAVE_MAX: usize = 256 * 1024;
 /// How long a tab may sit unused before its shell is closed
-/// (`HARNESS_TERMINAL_IDLE_SECONDS` overrides it, for tests).
+/// (`TILDE_TERMINAL_IDLE_SECONDS` overrides it, for tests).
 const IDLE: Duration = Duration::from_secs(24 * 60 * 60);
 /// How often running commands are checked.
 const TICK: Duration = Duration::from_secs(1);
@@ -273,8 +273,7 @@ impl Terminals {
     /// Brings back the tabs saved at the last quit, closed, and starts the
     /// checks that run every second.
     pub fn new(out: Out, store: Arc<Store>) -> Self {
-        let idle = std::env::var("HARNESS_TERMINAL_IDLE_SECONDS")
-            .ok()
+        let idle = crate::home::app_env_text("TERMINAL_IDLE_SECONDS")
             .and_then(|s| s.parse().ok())
             .map(Duration::from_secs)
             .unwrap_or(IDLE);
@@ -384,7 +383,7 @@ impl Terminals {
             .ok_or_else(|| "The tab closed at once".to_string())
     }
 
-    /// An agent's `harness-tab`, for the chat `chat`: a new tab in the chat's
+    /// An agent's `tilde-tab`, for the chat `chat`: a new tab in the chat's
     /// folder (`worktree`, or the project's main folder), with `command` typed into it once the
     /// shell has printed something (its prompt), up to `PROMPT_WAIT`. Typed
     /// sooner, the line still runs but shows twice: echoed before the prompt,
@@ -925,7 +924,7 @@ pub fn tools() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "tab": { "type": "string", "description": "The tab's name from tabs, or the ID harness-tab gave" },
+                    "tab": { "type": "string", "description": "The tab's name from tabs, or the ID tilde-tab gave" },
                     "lines": { "type": "number", "description": "How many of the last lines to read (default 200, at most 2000)" },
                 },
             },
@@ -1209,12 +1208,12 @@ fn start_shell(folder: &Path, size: PtySize) -> Result<(Live, Box<dyn Read + Sen
     cmd.cwd(folder);
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
-    cmd.env("TERM_PROGRAM", "Harness");
+    cmd.env("TERM_PROGRAM", "Tilde");
     if std::env::var_os("LANG").is_none() {
         // Apps started from Finder get no locale.
         cmd.env("LANG", "en_US.UTF-8");
     }
-    // So `claude` run here signs in the way Harness's chats do.
+    // So `claude` run here signs in the way Tilde's chats do.
     cmd.env_remove("ANTHROPIC_API_KEY");
     cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
     let child = pair.slave.spawn_command(cmd).map_err(|e| format!("Can't start the shell: {e}"))?;
@@ -1707,7 +1706,7 @@ mod tests {
     #[test]
     fn a_worktree_going_closes_only_its_tabs() {
         let (t, _) = rig(IDLE);
-        let base = std::env::temp_dir().join(format!("harness-term-{}", uuid::Uuid::new_v4().simple()));
+        let base = std::env::temp_dir().join(format!("tilde-term-{}", uuid::Uuid::new_v4().simple()));
         let wt = base.join("wt");
         std::fs::create_dir_all(wt.join("sub")).unwrap();
         let project = folder();

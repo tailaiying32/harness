@@ -209,7 +209,7 @@ fn rig_in(dir: &Path, worktree_idle: Duration, keep: Duration, lookup: PrLookup)
 }
 
 fn data_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("harness-bb-{}", uuid::Uuid::new_v4()))
+    std::env::temp_dir().join(format!("tilde-bb-{}", uuid::Uuid::new_v4()))
 }
 
 /// A chat in its own worktree, with the fake GitHub.
@@ -344,7 +344,7 @@ async fn old_chat(state: &str) -> (PathBuf, PathBuf, Worktree, Gh) {
         close(&rig).await;
         (wt, tip)
     };
-    let db = rusqlite::Connection::open(dir.join("harness.db")).unwrap();
+    let db = rusqlite::Connection::open(dir.join("tilde.db")).unwrap();
     db.busy_timeout(Duration::from_secs(5)).unwrap();
     let has_old_column = db.prepare("SELECT pr FROM sessions").is_ok();
     if !has_old_column {
@@ -890,7 +890,7 @@ async fn m4_moving_onto_a_project_that_is_already_there_makes_them_one() {
     tokio::time::sleep(Duration::from_millis(20)).await;
     // Not a repo the app can recognise it by: a plain copy made elsewhere,
     // already used for a chat before the old project is pointed at it.
-    let new = std::env::temp_dir().join(format!("harness-plain-{}", uuid::Uuid::new_v4().simple()));
+    let new = std::env::temp_dir().join(format!("tilde-plain-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&new).unwrap();
     send_in(&rig, "s2", &new, "already here", "m2").await;
     std::fs::remove_dir_all(&old).unwrap();
@@ -931,8 +931,8 @@ async fn m6_a_put_away_worktree_is_kept_while_its_project_is_missing() {
 #[test]
 fn m5_a_folder_on_a_drive_that_isnt_connected_is_not_gone() {
     assert!(!folder_gone(&std::env::temp_dir()));
-    assert!(folder_gone(&std::env::temp_dir().join(format!("harness-none-{}", uuid::Uuid::new_v4()))));
+    assert!(folder_gone(&std::env::temp_dir().join(format!("tilde-none-{}", uuid::Uuid::new_v4()))));
     if !cfg!(windows) {
-        assert!(!folder_gone(Path::new("/Volumes/harness-no-such-drive/code/app")));
+        assert!(!folder_gone(Path::new("/Volumes/tilde-no-such-drive/code/app")));
     }
 }

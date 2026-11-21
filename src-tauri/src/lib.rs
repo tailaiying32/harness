@@ -984,24 +984,26 @@ fn close_session(state: State<'_, AppState>, session_id: String) {
 
 /// Self-test settings, read from the environment. Used to smoke-test and measure
 /// the real window without a person typing:
-///   HARNESS_AUTOTEST_FOLDER    folder to chat in (turns the self-test on)
-///   HARNESS_AUTOTEST_MESSAGES  JSON array of messages (optional)
-///   HARNESS_AUTOTEST_REPORT    file the window writes its transcript to
-///   HARNESS_AUTOTEST_THEME     theme id to show (optional, not saved)
-///   HARNESS_AUTOTEST_SIZE      compact, regular or roomy (optional, not saved)
-///   HARNESS_AUTOTEST_MODEL     model to start on (optional, not saved)
+///   TILDE_AUTOTEST_FOLDER    folder to chat in (turns the self-test on)
+///   TILDE_AUTOTEST_MESSAGES  JSON array of messages (optional)
+///   TILDE_AUTOTEST_REPORT    file the window writes its transcript to
+///   TILDE_AUTOTEST_THEME     theme id to show (optional, not saved)
+///   TILDE_AUTOTEST_SIZE      compact, regular or roomy (optional, not saved)
+///   TILDE_AUTOTEST_MODEL     model to start on (optional, not saved)
 /// Messages starting with `@` steer the test; see `runSelfTest` in App.svelte.
-/// Two more variables help tests without touching real data:
-///   HARNESS_DATA_DIR           where the saved chats live (default: the app data folder)
-///   HARNESS_HOME               where chats' folders and projects' docs live (default: ~/.harness;
-///                              with HARNESS_DATA_DIR set and this not, a `home` folder inside that)
-///   HARNESS_IDLE_SECONDS       idle time before a chat's process is closed
-///   HARNESS_WORKTREE_IDLE_SECONDS  time without a message before a worktree is put away
-///   HARNESS_TRASH_SECONDS      how long put-away branches and trashed chats are kept
-///   HARNESS_GH                 a program to use in place of GitHub's `gh`
-///   HARNESS_BROWSER_IDLE_SECONDS  time a browser sits off screen and unused before its page is put away
-///   HARNESS_TERMINAL_IDLE_SECONDS  time a terminal tab sits unused before its shell is closed
-///   HARNESS_KEEP_AWAKE_{LIMIT,AWAY,QUIET,TICK}_SECONDS  keep awake's longest run, no-input time
+/// Every name here is also read with the old `HARNESS_` prefix (`home::app_env`).
+/// More variables help tests without touching real data:
+///   TILDE_DATA_DIR           where the saved chats live (default: the app data folder)
+///   TILDE_HOME               where chats' folders and projects' docs live (default: ~/.tilde;
+///                              with TILDE_DATA_DIR set and this not, a `home` folder inside that)
+///   TILDE_IDLE_SECONDS       idle time before a chat's process is closed
+///   TILDE_WORKTREE_IDLE_SECONDS  time without a message before a worktree is put away
+///   TILDE_TRASH_SECONDS      how long put-away branches and trashed chats are kept
+///   TILDE_GH                 a program to use in place of GitHub's `gh`
+///   TILDE_{CLAUDE,CURSOR,CODEX,ANTIGRAVITY}_PATH  an agent's program, in place of the one found
+///   TILDE_BROWSER_IDLE_SECONDS  time a browser sits off screen and unused before its page is put away
+///   TILDE_TERMINAL_IDLE_SECONDS  time a terminal tab sits unused before its shell is closed
+///   TILDE_KEEP_AWAKE_{LIMIT,AWAY,QUIET,TICK}_SECONDS  keep awake's longest run, no-input time
 ///                              that means the user left, no-work time that means done, and check interval
 #[derive(serde::Serialize)]
 struct AutoTest {
@@ -1014,17 +1016,16 @@ struct AutoTest {
 
 #[tauri::command]
 fn autotest() -> Option<AutoTest> {
-    let folder = std::env::var("HARNESS_AUTOTEST_FOLDER").ok()?;
-    let messages = std::env::var("HARNESS_AUTOTEST_MESSAGES")
-        .ok()
+    let folder = crate::home::app_env_text("AUTOTEST_FOLDER")?;
+    let messages = crate::home::app_env_text("AUTOTEST_MESSAGES")
         .and_then(|m| serde_json::from_str(&m).ok())
         .unwrap_or_else(|| vec!["Reply with the single word: one".to_string()]);
     Some(AutoTest {
         folder,
         messages,
-        theme: std::env::var("HARNESS_AUTOTEST_THEME").ok(),
-        size: std::env::var("HARNESS_AUTOTEST_SIZE").ok(),
-        model: std::env::var("HARNESS_AUTOTEST_MODEL").ok(),
+        theme: crate::home::app_env_text("AUTOTEST_THEME"),
+        size: crate::home::app_env_text("AUTOTEST_SIZE"),
+        model: crate::home::app_env_text("AUTOTEST_MODEL"),
     })
 }
 
@@ -1038,8 +1039,7 @@ async fn autotest_wait(ms: u64) {
 /// Writes only to the path named in the environment, never one the window picks.
 #[tauri::command]
 fn autotest_report(text: String) -> Result<(), String> {
-    let path = std::env::var("HARNESS_AUTOTEST_REPORT")
-        .map_err(|_| "HARNESS_AUTOTEST_REPORT is not set".to_string())?;
+    let path = crate::home::app_env_text("AUTOTEST_REPORT").ok_or_else(|| "TILDE_AUTOTEST_REPORT is not set".to_string())?;
     std::fs::write(path, text).map_err(|e| e.to_string())
 }
 
@@ -1139,9 +1139,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             launched();
-            let dir = match std::env::var_os("HARNESS_DATA_DIR") {
+            let dir = match crate::home::app_env("DATA_DIR") {
                 Some(dir) => PathBuf::from(dir),
-                None => app.path().app_data_dir()?,
+                None => home::data_folder(&app.path().data_dir()?),
             };
             let store = Arc::new(Store::open(&dir)?);
             let channel: Arc<Mutex<Option<Channel<Envelope>>>> = Arc::default();
@@ -1208,7 +1208,7 @@ pub fn run() {
             let home = Home::resolve(&dir);
             // The command agents run to open a terminal tab; rewritten if changed.
             if let Err(e) = home.write_tab_command() {
-                eprintln!("harness: couldn't write harness-tab: {e}");
+                eprintln!("tilde: couldn't write tilde-tab: {e}");
             }
             let tab_command = home.tab_command();
             let side = SideChats::new(agents.clone(), store.clone(), out.clone(), home.clone(), &dir);
@@ -1355,6 +1355,7 @@ pub fn run() {
                 let sessions = sessions.clone();
                 tauri::async_runtime::spawn_blocking(move || {
                     sessions.move_chat_folders();
+                    sessions.note_rename();
                     sessions.sweep_chat_files();
                 });
             }

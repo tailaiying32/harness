@@ -21,14 +21,14 @@ use crate::store::{SessionRow, Store, now_ms, search_words};
 use crate::worktree;
 
 /// The name the agent knows the tool group by.
-pub const SERVER: &str = "harness_chats";
+pub const SERVER: &str = "tilde_chats";
 
 /// The line added to the agent's instructions. The same on every launch, so
 /// it never disturbs prompt caching; the list of recent chats goes with a
 /// chat's first message instead (`titles_note`).
 pub const INSTRUCTION: &str = "Earlier chats in this project are saved. When the user refers to \
 earlier work, a past discussion, a decision or something that was tried, and it is not in this chat, \
-look it up with the harness_chats tools (search, recent, read) before you answer. Don't look when the \
+look it up with the tilde_chats tools (search, recent, read) before you answer. Don't look when the \
 message stands on its own. A message may name a chat as [@Title](<chat:ID>): read that chat by its ID.";
 
 /// How many chats `recent` lists, and how many titles a new chat is told.
@@ -640,8 +640,8 @@ mod tests {
         assert_eq!(tool_line("Agent", &json!({ "description": "Look around", "prompt": "long" })), "Agent: Look around");
         assert_eq!(tool_line("ExitPlanMode", &json!({ "plan": "the plan" })), "ExitPlanMode");
         assert_eq!(
-            tool_line("mcp__harness_browser__open", &json!({ "url": "http://localhost:1420" })),
-            "harness_browser open: http://localhost:1420"
+            tool_line("mcp__tilde_browser__open", &json!({ "url": "http://localhost:1420" })),
+            "tilde_browser open: http://localhost:1420"
         );
         assert_eq!(tool_line("a tool", &Value::Null), "a tool");
         let long = tool_line("Bash", &json!({ "command": "x".repeat(300) }));
@@ -765,7 +765,7 @@ mod tests {
 
     #[test]
     fn docs_a_chat_wrote_are_listed_and_only_they_can_be_read() {
-        let dir = std::env::temp_dir().join(format!("harness-chats-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("tilde-chats-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let report = dir.join("report.md");
         std::fs::write(&report, "the findings").unwrap();
@@ -841,7 +841,7 @@ mod tests {
         store.touch_session("bbbb2222-x", "/p", "The asking chat", "default", "default").unwrap();
         store.append_event("bbbb2222-x", &user("same deal as the tabs", "u1")).unwrap();
         store.touch_session("cccc3333-x", "/other", "Tabs elsewhere", "default", "default").unwrap();
-        let home = crate::home::Home::new(std::env::temp_dir().join(format!("harness-chats-{}", uuid::Uuid::new_v4())));
+        let home = crate::home::Home::new(std::env::temp_dir().join(format!("tilde-chats-{}", uuid::Uuid::new_v4())));
         let chats = Chats::new(store.clone(), Arc::new(Notes::for_store(home, store.clone())));
         let text = |out: Vec<Value>| out[0]["text"].as_str().unwrap().to_string();
         let call = |tool: &'static str, args: Value| {

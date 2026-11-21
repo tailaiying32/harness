@@ -136,7 +136,25 @@ fn resolve(dir: &Path, rev: &str) -> Option<String> {
 
 /// Where a chat's uncommitted edits wait while its folder is put away.
 fn saved_ref(chat_id: &str) -> String {
+    format!("refs/tilde/saved/{chat_id}")
+}
+
+/// Where they were kept when the app was called Harness. Edits saved then
+/// are still found here; nothing new is written to it.
+fn old_saved_ref(chat_id: &str) -> String {
     format!("refs/harness/saved/{chat_id}")
+}
+
+/// The ref a chat's saved edits are under, if it has any: the current name, else the old one.
+fn found_saved_ref(repo_root: &Path, chat_id: &str) -> Option<String> {
+    [saved_ref(chat_id), old_saved_ref(chat_id)].into_iter().find(|name| resolve(repo_root, name).is_some())
+}
+
+/// Deletes a chat's saved edits, under either name.
+fn drop_saved_refs(repo_root: &Path, chat_id: &str) {
+    for name in [saved_ref(chat_id), old_saved_ref(chat_id)] {
+        let _ = git(repo_root, ["update-ref", "-d", &name]);
+    }
 }
 
 /// `Path::canonicalize`, but without Windows' `\\?\` prefix. git can't take
@@ -226,7 +244,7 @@ pub fn create(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".to_string());
     let path = worktrees_dir.join(format!("{repo_name}-{id}"));
-    let branch = format!("harness/{}-{id}", slug(title, 30));
+    let branch = format!("tilde/{}-{id}", slug(title, 30));
     std::fs::create_dir_all(worktrees_dir).map_err(|e| format!("Can't make the worktrees folder: {e}"))?;
     git(
         repo_root,
@@ -424,7 +442,7 @@ fn clone_path(_src: &Path, _dst: &Path) -> bool {
 /// worktree's own staging area. Returns whether there was anything to save.
 pub fn save_edits(wt: &Path, chat_id: &str) -> Result<bool, String> {
     let git_dir = PathBuf::from(git(wt, ["rev-parse", "--absolute-git-dir"])?);
-    let index = git_dir.join("harness-index");
+    let index = git_dir.join("tilde-index");
     struct Remove<'a>(&'a Path);
     impl Drop for Remove<'_> {
         fn drop(&mut self) {
@@ -447,15 +465,15 @@ pub fn save_edits(wt: &Path, chat_id: &str) -> Result<bool, String> {
         wt,
         [
             "-c",
-            "user.name=Harness",
+            "user.name=Tilde",
             "-c",
-            "user.email=harness@localhost",
+            "user.email=tilde@localhost",
             "commit-tree",
             &tree,
             "-p",
             "HEAD",
             "-m",
-            "Harness: saved edits",
+            "Tilde: saved edits",
         ],
     )?;
     git(wt, ["update-ref", &saved_ref(chat_id), &commit])?;
@@ -505,11 +523,10 @@ pub fn restore(wt: &Worktree, chat_id: &str) -> Result<(), String> {
         &wt.repo_root,
         [OsStr::new("worktree"), OsStr::new("add"), wt.path.as_os_str(), OsStr::new(&wt.branch)],
     )?;
-    let saved = saved_ref(chat_id);
-    if resolve(&wt.repo_root, &saved).is_some() {
+    if let Some(saved) = found_saved_ref(&wt.repo_root, chat_id) {
         // No-overlay: files deleted before saving stay deleted.
         git(&wt.path, ["restore", "--source", &saved, "--worktree", "--", "."])?;
-        git(&wt.repo_root, ["update-ref", "-d", &saved])?;
+        drop_saved_refs(&wt.repo_root, chat_id);
     }
     copy_ignored(&wt.repo_root, &wt.path);
     Ok(())
@@ -535,7 +552,7 @@ fn merge_targets(wt: &Worktree) -> Vec<String> {
 
 /// Whether a put-away worktree has uncommitted edits waiting.
 pub fn has_saved_edits(repo_root: &Path, chat_id: &str) -> bool {
-    resolve(repo_root, &saved_ref(chat_id)).is_some()
+    found_saved_ref(repo_root, chat_id).is_some()
 }
 
 /// Whether the worktree's work has landed. Never while any of the chat's
@@ -581,7 +598,7 @@ pub fn is_merged(wt: &Worktree, prs: &[PrInfo], chat_id: &str) -> Result<Merged,
 /// folder's current branch, and can't see squash merges.
 pub fn drop_branch(repo_root: &Path, branch: &str, chat_id: &str) {
     let _ = git(repo_root, ["branch", "-D", branch]);
-    let _ = git(repo_root, ["update-ref", "-d", &saved_ref(chat_id)]);
+    drop_saved_refs(repo_root, chat_id);
     let _ = git(repo_root, ["worktree", "prune"]);
 }
 
@@ -617,7 +634,7 @@ mod tests {
     impl Repo {
         fn new() -> Self {
             let dir = std::env::temp_dir()
-                .join(format!("harness-wt-{}", uuid::Uuid::new_v4().simple()))
+                .join(format!("tilde-wt-{}", uuid::Uuid::new_v4().simple()))
                 .canonicalize_or_create();
             let root = dir.join("app");
             std::fs::create_dir_all(&root).unwrap();
@@ -706,7 +723,7 @@ mod tests {
         let wt = repo.create(Some("main"));
         assert_eq!(wt.base_commit, main_tip);
         assert_eq!(wt.base_branch.as_deref(), Some("main"));
-        assert!(wt.branch.starts_with("harness/fix-the-login-bug-"));
+        assert!(wt.branch.starts_with("tilde/fix-the-login-bug-"));
         assert_eq!(std::fs::read_to_string(wt.path.join("app.py")).unwrap(), "two\n");
 
         // A deleted start branch falls back to the commit.
@@ -769,6 +786,37 @@ mod tests {
         assert!(resolve(&repo.root, &saved_ref("chat1")).is_none());
         restore(&wt, "chat1").unwrap();
         assert!(wt.path.join("app.py").exists());
+    }
+
+    #[test]
+    fn edits_saved_under_the_old_name_are_still_restored() {
+        let repo = Repo::new();
+        let wt = repo.create(Some("main"));
+        std::fs::write(wt.path.join("app.py"), "changed\n").unwrap();
+        put_away(&wt, "chat1").unwrap();
+        // As a build from before the rename left them.
+        let saved = repo.git(&["rev-parse", &saved_ref("chat1")]);
+        repo.git(&["update-ref", &old_saved_ref("chat1"), &saved]);
+        repo.git(&["update-ref", "-d", &saved_ref("chat1")]);
+
+        assert!(has_saved_edits(&repo.root, "chat1"));
+        restore(&wt, "chat1").unwrap();
+        assert_eq!(std::fs::read_to_string(wt.path.join("app.py")).unwrap(), "changed\n");
+        assert!(!has_saved_edits(&repo.root, "chat1"));
+        assert!(resolve(&repo.root, &old_saved_ref("chat1")).is_none());
+    }
+
+    #[test]
+    fn dropping_a_branch_drops_edits_saved_under_the_old_name() {
+        let repo = Repo::new();
+        let wt = repo.create(Some("main"));
+        std::fs::write(wt.path.join("app.py"), "changed\n").unwrap();
+        put_away(&wt, "chat1").unwrap();
+        let saved = repo.git(&["rev-parse", &saved_ref("chat1")]);
+        repo.git(&["update-ref", &old_saved_ref("chat1"), &saved]);
+
+        drop_branch(&repo.root, &wt.branch, "chat1");
+        assert!(!has_saved_edits(&repo.root, "chat1"));
     }
 
     #[test]

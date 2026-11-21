@@ -566,7 +566,7 @@ pub fn spawn(binary: PathBuf, cfg: AcpConfig, opts: SpawnOptions, sink: EventSin
         match mcp_http::open(recording(&opts.tools, &served)) {
             Ok(endpoint) => Some(endpoint),
             Err(e) => {
-                eprintln!("harness: the app's tools aren't available to {label}: {e}");
+                eprintln!("tilde: the app's tools aren't available to {label}: {e}");
                 None
             }
         }
@@ -740,7 +740,7 @@ async fn drive(
                     "elicitation": if dialect.forms { json!({ "form": {} }) } else { Value::Null },
                     "_meta": client_meta,
                 },
-                "clientInfo": { "name": "harness", "version": env!("CARGO_PKG_VERSION") },
+                "clientInfo": { "name": "tilde", "version": env!("CARGO_PKG_VERSION") },
             }),
         )
         .await;
@@ -931,7 +931,7 @@ async fn drive(
             prompt.extend(body);
             // The intro goes last: Cursor titles a chat from the start of its
             // first prompt, and with the intro first the title was about the
-            // app's notes ("Harness Agent"), not what the user asked.
+            // app's notes ("Tilde Agent"), not what the user asked.
             if let Some(text) = intro {
                 prompt.push(json!({ "type": "text", "text": text }));
             }
@@ -2055,7 +2055,7 @@ mod tests {
 
     #[test]
     fn a_new_conversation_is_told_about_the_projects_memory() {
-        let dir = std::env::temp_dir().join(format!("harness-acp-memory-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("tilde-acp-memory-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let index: String = (1..=250).map(|n| format!("- [Note {n}](n{n}.md) — fact {n}\n")).collect();
         std::fs::write(dir.join("MEMORY.md"), index).unwrap();
@@ -2121,7 +2121,7 @@ mod tests {
             sink,
             items,
             stop_tx: Mutex::new(None),
-            own_tools: vec!["harness_browser".into()],
+            own_tools: vec!["tilde_browser".into()],
             label: "Cursor",
             dialect,
             side,
@@ -2423,8 +2423,8 @@ mod tests {
             (tool("search", "grep \"x\"", json!({ "pattern": "x" })), "Grep", json!({ "pattern": "x", "path": null })),
             (tool("search", "Find `*.md`", json!({ "pattern": "*.md" })), "Glob", json!({ "pattern": "*.md", "path": null })),
             (
-                tool("other", "harness_browser: open", json!({ "providerIdentifier": "harness_browser", "toolName": "open", "args": { "url": "x" } })),
-                "mcp__harness_browser__open",
+                tool("other", "tilde_browser: open", json!({ "providerIdentifier": "tilde_browser", "toolName": "open", "args": { "url": "x" } })),
+                "mcp__tilde_browser__open",
                 json!({ "url": "x" }),
             ),
             (tool("other", "Create Plan", json!({ "_toolName": "createPlan", "plan": "P" })), "ExitPlanMode", json!({ "plan": "P" })),
@@ -2467,9 +2467,9 @@ mod tests {
     #[test]
     fn the_apps_own_tools_are_allowed_without_a_card() {
         let (shared, mut rx, seen) = rig();
-        upd(&shared, r#"{"sessionUpdate":"tool_call_update","toolCallId":"t","title":"harness_browser: open","kind":"other","rawInput":{"providerIdentifier":"harness_browser","toolName":"open","args":{}}}"#);
+        upd(&shared, r#"{"sessionUpdate":"tool_call_update","toolCallId":"t","title":"tilde_browser: open","kind":"other","rawInput":{"providerIdentifier":"tilde_browser","toolName":"open","args":{}}}"#);
         take(&seen);
-        line(&shared, r#"{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t","title":"harness_browser-open: open","kind":"other"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}"#);
+        line(&shared, r#"{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t","title":"tilde_browser-open: open","kind":"other"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}"#);
         assert!(take(&seen).iter().all(|e| !matches!(e, AgentEvent::ApprovalRequest { .. })));
         assert_eq!(written(&mut rx)[0]["result"]["outcome"]["optionId"], "allow-once");
     }
@@ -2505,7 +2505,7 @@ mod tests {
     async fn the_apps_own_answer_is_saved_as_its_tools_result() {
         let (shared, _rx, seen) = rig();
         let echo = AppTools {
-            server: "harness_chats",
+            server: "tilde_chats",
             instruction: String::new(),
             list: json!([]),
             call: Arc::new(|tool, args| {
@@ -2527,7 +2527,7 @@ mod tests {
         // Cursor then reports each as done, with no output of its own.
         let done = |id: &str, tool: &str, args: &str| {
             upd(&shared, &format!(
-                r#"{{"sessionUpdate":"tool_call","toolCallId":"{id}","title":"harness_chats: {tool}","kind":"other","status":"completed","rawInput":{{"providerIdentifier":"harness_chats","toolName":"{tool}","args":{args}}},"rawOutput":{{"success":true}}}}"#
+                r#"{{"sessionUpdate":"tool_call","toolCallId":"{id}","title":"tilde_chats: {tool}","kind":"other","status":"completed","rawInput":{{"providerIdentifier":"tilde_chats","toolName":"{tool}","args":{args}}},"rawOutput":{{"success":true}}}}"#
             ));
             let events = take(&seen);
             let Some(AgentEvent::ToolResult { content, is_error, .. }) = events.last().cloned() else {
@@ -2643,8 +2643,8 @@ mod tests {
         line(&shared, r#"{"jsonrpc":"2.0","id":2,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"u","title":"x","kind":"edit"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"}]}}"#);
         line(&shared, r#"{"jsonrpc":"2.0","id":3,"method":"cursor/ask_question","params":{"toolCallId":"q","questions":[{"id":"a","prompt":"Which?","options":[{"id":"1","label":"One"}]}]}}"#);
         line(&shared, r#"{"jsonrpc":"2.0","id":4,"method":"cursor/create_plan","params":{"toolCallId":"p","plan":"do it"}}"#);
-        upd(&shared, r#"{"sessionUpdate":"tool_call_update","toolCallId":"b","title":"harness_browser: open","kind":"other","rawInput":{"providerIdentifier":"harness_browser","toolName":"open","args":{}}}"#);
-        line(&shared, r#"{"jsonrpc":"2.0","id":5,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"b","title":"harness_browser-open: open","kind":"other"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"}]}}"#);
+        upd(&shared, r#"{"sessionUpdate":"tool_call_update","toolCallId":"b","title":"tilde_browser: open","kind":"other","rawInput":{"providerIdentifier":"tilde_browser","toolName":"open","args":{}}}"#);
+        line(&shared, r#"{"jsonrpc":"2.0","id":5,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"b","title":"tilde_browser-open: open","kind":"other"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"}]}}"#);
         assert!(take(&seen).iter().all(|e| !matches!(e, AgentEvent::ApprovalRequest { .. })));
         assert!(shared.state.lock().unwrap().waiting.is_empty());
         let out = written(&mut rx);
@@ -2657,7 +2657,7 @@ mod tests {
 
     #[test]
     fn a_side_chat_is_told_it_is_one_and_may_only_read_the_notes() {
-        let dir = std::env::temp_dir().join(format!("harness-acp-side-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("tilde-acp-side-{}", uuid::Uuid::new_v4()));
         let opts = SpawnOptions {
             binary: "agent".into(),
             project_path: "/p".into(),
