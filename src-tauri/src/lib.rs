@@ -902,6 +902,39 @@ fn title_bar(window: tauri::Window, bg: String, fg: String, dark: bool) -> Resul
     Ok(())
 }
 
+/// Whether the app was built for working on it (`npm run tauri dev`). The
+/// window then puts hazard stripes on the icon, so it is told apart from the
+/// real app in the Dock.
+#[tauri::command]
+fn dev_build() -> bool {
+    cfg!(debug_assertions)
+}
+
+/// Shows a picture (a PNG, base64) as the app's Dock icon while it runs. It
+/// lasts until the app quits: the icon the app ships with is never changed
+/// (that would break the app's signature), so the window sets its pick again
+/// at each start. Mac only for now; elsewhere it does nothing.
+#[tauri::command]
+fn set_app_icon(app: tauri::AppHandle, png: String) -> Result<(), String> {
+    let bytes = images::decode_base64(&png)?;
+    #[cfg(target_os = "macos")]
+    app.run_on_main_thread(move || {
+        use objc2::AnyThread;
+        use objc2_app_kit::{NSApplication, NSImage};
+        use objc2_foundation::NSData;
+        // SAFETY: this runs on the main thread.
+        let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
+        if let Some(image) = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(&bytes)) {
+            // SAFETY: a picture that loaded.
+            unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, bytes);
+    Ok(())
+}
+
 /// The models an agent offers (Claude Code if none is named). Starts a
 /// short-lived agent process, so it runs off the main thread: about 7 seconds
 /// for Claude Code; for Cursor a few seconds plus about one per model named in
@@ -1432,6 +1465,8 @@ pub fn run() {
             terminal_text,
             close_window,
             title_bar,
+            dev_build,
+            set_app_icon,
             save_image,
             read_image,
             read_image_file,

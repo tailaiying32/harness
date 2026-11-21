@@ -58,6 +58,7 @@
   import { installHistoryKeys, runHistory } from "./lib/history";
   import type { Chat } from "./lib/state/chat.svelte";
   import {
+    applyAppIcon,
     applyCommentButton,
     applyFontSize,
     applyPanelWidth,
@@ -81,6 +82,7 @@
   applyFontSize(prefs.fontSize);
   applyPanelWidth(prefs.panelWidth);
   applyCommentButton(prefs.commentButton);
+  void applyAppIcon(prefs.appIcon, true);
 
   const app = new AppState();
   app.defaultAgent = prefs.agent as AgentId;
