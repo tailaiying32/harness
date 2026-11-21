@@ -243,6 +243,12 @@
     overflow-y: auto;
     /* Scrolling down only: a pixel of overhang must not add a sideways bar. */
     overflow-x: hidden;
+    /* The scroll bar sits in the sidebar's right padding, at its edge, clear
+       of the branch marks; the gutter is kept so rows don't shift when the
+       list starts to scroll. */
+    margin-right: calc(var(--pad-x) * -0.6);
+    padding-right: max(0px, calc(var(--pad-x) * 0.6 - 10px));
+    scrollbar-gutter: stable;
     display: flex;
     flex-direction: column;
     gap: calc(var(--gap) * 1.6);
