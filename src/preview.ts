@@ -1218,6 +1218,8 @@ Object.assign(commands, {
   terminal_text: (args: Args) => termOutput.get(String(args.tab)) ?? "",
   close_window: () => {},
   title_bar: () => {},
+  dev_build: () => false,
+  set_app_icon: () => {},
 });
 
 (window as any).__TAURI_INTERNALS__ = {

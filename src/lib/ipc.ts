@@ -558,3 +558,7 @@ export const terminalText = (tab: string, lines: number) => invoke<string>("term
 export const closeWindow = () => invoke<void>("close_window");
 /** Colours Windows' title bar like the theme; nothing elsewhere. */
 export const titleBar = (bg: string, fg: string, dark: boolean) => invoke<void>("title_bar", { bg, fg, dark });
+/** Whether the app was built for working on it (`npm run tauri dev`). */
+export const devBuild = () => invoke<boolean>("dev_build");
+/** Shows a picture (a PNG, base64) as the Dock icon while the app runs. Mac only; nothing elsewhere. */
+export const setAppIcon = (png: string) => invoke<void>("set_app_icon", { png });

@@ -3,7 +3,8 @@
 // See PLAN.md, "Look" and "Appearance settings".
 
 import { isAgent } from "./agents";
-import { titleBar } from "./ipc";
+import { iconUrl, type IconColours } from "./appIcon";
+import { devBuild, setAppIcon, titleBar } from "./ipc";
 
 export type Theme = {
   id: string;
@@ -247,6 +248,52 @@ export function applySize(size: Size): void {
   document.documentElement.dataset.size = size;
 }
 
+/** An icon on offer: its colours, and the side of the picker it sits on. */
+export type AppIcon = IconColours & { id: string; name: string; dark: boolean };
+/** The app's own two first, then plain white on black and black on white, then one in each other theme's colours. */
+const own = (t: Theme) => t.id === "harness-dark" || t.id === "harness-light";
+export const appIcons: AppIcon[] = [
+  ...themes.filter(own),
+  // Off-white and dark grey: pure white on black, or black on white, glares.
+  { id: "black", name: "Black", dark: true, bg: "#000000", accent: "#d9d9d9", faint: "#6e6e6e" },
+  { id: "white", name: "White", dark: false, bg: "#ffffff", accent: "#333333", faint: "#b4b4b4" },
+  ...themes.filter((t) => !own(t)),
+];
+/** The icon the app ships with. Any other is put up while the app runs. */
+export const DEFAULT_APP_ICON = "harness-dark";
+/** Picking an icon changes the Dock's, which only a Mac has so far. */
+export const APP_ICONS = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
+
+let dev: Promise<boolean> | null = null;
+let iconAsked = 0;
+
+/**
+ * Shows an icon in the Dock: the user's own pick, whatever theme is on
+ * show. It lasts while the app runs, so it is set again at each start
+ * (`starting`). A build run from source wears hazard stripes on whichever icon
+ * is picked, to tell it from the real app.
+ */
+export async function applyAppIcon(id: string, starting = false): Promise<void> {
+  if (!APP_ICONS) return;
+  const asked = ++iconAsked;
+  try {
+    const stripes = await (dev ??= devBuild());
+    // At the start the Dock already shows the icon the app ships with.
+    if (starting && id === DEFAULT_APP_ICON && !stripes) return;
+    const picture = new Image();
+    picture.src = iconUrl(appIcons.find((icon) => icon.id === id) ?? themes[0], { dev: stripes });
+    await picture.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1024;
+    canvas.getContext("2d")!.drawImage(picture, 0, 0, 1024, 1024);
+    // A later pick has been made meanwhile: that one shows.
+    if (asked !== iconAsked) return;
+    await setAppIcon(canvas.toDataURL("image/png").split(",")[1]);
+  } catch {
+    // The Dock keeps the icon it has.
+  }
+}
+
 // Windows draws text on whole pixels (ClearType hinting), and its displays
 // mostly run at 100-150%, where a half-pixel size lands between pixels and
 // blurs; a Mac's Retina screen doubles every size, so halves are sharp there.
@@ -304,6 +351,8 @@ type Prefs = {
   commentListOpen: boolean;
   /** The "+ comment" button under selected text; Cmd+Enter works either way. */
   commentButton: boolean;
+  /** The app's icon, one of `appIcons`. Picked by hand: it doesn't follow the theme on show. */
+  appIcon: string;
 };
 export const DEFAULT_PANEL_WIDTH = 0.46;
 
@@ -362,9 +411,10 @@ export function loadPrefs(): Prefs {
       overnightUntil: overnightTimes.includes(saved.overnightUntil as string) ? saved.overnightUntil! : DEFAULT_OVERNIGHT,
       commentListOpen: saved.commentListOpen === true,
       commentButton: saved.commentButton !== false,
+      appIcon: appIcons.some((icon) => icon.id === saved.appIcon) ? saved.appIcon! : DEFAULT_APP_ICON,
     };
   } catch {
-    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", agent: "claude-code", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH, foldedProjects: [], sidebarHidden: false, projectOrder: [], projectModels: {}, overnightUntil: DEFAULT_OVERNIGHT, commentListOpen: false, commentButton: true };
+    return { darkTheme: DEFAULT_DARK_THEME, lightTheme: DEFAULT_LIGHT_THEME, appearance: DEFAULT_APPEARANCE, size: DEFAULT_SIZE, model: "default", agent: "claude-code", fontSize: DEFAULT_FONT_SIZE, mode: DEFAULT_MODE, panelWidth: DEFAULT_PANEL_WIDTH, foldedProjects: [], sidebarHidden: false, projectOrder: [], projectModels: {}, overnightUntil: DEFAULT_OVERNIGHT, commentListOpen: false, commentButton: true, appIcon: DEFAULT_APP_ICON };
   }
 }
 
