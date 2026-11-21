@@ -781,7 +781,8 @@ impl SessionManager {
         }
     }
 
-    /// Moves a chat to the trash. Its worktree folder, if any, is put away.
+    /// Moves a chat to the trash. Its worktree folder, if any, is put away,
+    /// and the idle terminal tabs its agent opened are closed.
     pub(super) async fn trash(&self, session_id: &str) -> Result<(), String> {
         let store = &self.0.store;
         store.chat_git(session_id)?.ok_or("That chat no longer exists")?;
@@ -796,6 +797,7 @@ impl SessionManager {
                 Err(e) => eprintln!("harness: couldn't put a worktree away: {e}"),
             }
         }
+        self.terminal_chat_gone(session_id);
         store.set_trashed(session_id, Some(now_ms()))
     }
 

@@ -40,12 +40,14 @@ pub struct TerminalHooks {
     pub gone: Arc<dyn Fn(&Path, &str) + Send + Sync>,
     /// A project's folder moved, from one path to another: its tabs follow.
     pub moved: Arc<dyn Fn(&str, &str) + Send + Sync>,
+    /// A chat was deleted: the idle tabs its agent opened go with it.
+    pub chat_gone: Arc<dyn Fn(&str) + Send + Sync>,
     /// An agent's `harness-tab`: a new tab of the project (main folder, as
-    /// the window names it), in `worktree` if given, with the command typed in.
+    /// the window names it) for a chat, in `worktree` if given, with the command typed in.
     /// The last argument puts the new tab on screen, before its shell starts.
     #[allow(clippy::type_complexity)]
     pub run: Arc<
-        dyn Fn(&str, Option<String>, &str, &dyn Fn(&crate::terminal::TabInfo)) -> Result<crate::terminal::TabInfo, String>
+        dyn Fn(&str, &str, Option<String>, &str, &dyn Fn(&crate::terminal::TabInfo)) -> Result<crate::terminal::TabInfo, String>
             + Send
             + Sync,
     >,
@@ -287,6 +289,13 @@ impl SessionManager {
     /// Whether a terminal shell sits in this worktree folder.
     fn terminal_in(&self, root: &Path) -> bool {
         self.0.terminal.get().is_some_and(|t| (t.in_use)(root))
+    }
+
+    /// Tells the terminal a chat was deleted.
+    fn terminal_chat_gone(&self, session_id: &str) {
+        if let Some(t) = self.0.terminal.get() {
+            (t.chat_gone)(session_id);
+        }
     }
 
     /// Tells the terminal a worktree folder is gone.
@@ -977,13 +986,14 @@ impl SessionManager {
             Box::pin(async move {
                 let line = command.trim().to_string();
                 // Shown before its shell starts, so the panel can give it its size.
+                let owner = chat.clone();
                 let show = move |tab: &crate::terminal::TabInfo| {
                     out(Envelope {
                         session_id: chat.clone(),
                         event: AgentEvent::ShowPanel { path: None, view: Some("terminal".into()), tab: Some(tab.id.clone()) },
                     })
                 };
-                let tab = tokio::task::spawn_blocking(move || run(&project, worktree, &line, &show))
+                let tab = tokio::task::spawn_blocking(move || run(&project, &owner, worktree, &line, &show))
                     .await
                     .map_err(|e| e.to_string())??;
                 // By ID: the tab's name changes to what runs in it.
@@ -2239,13 +2249,20 @@ are there now, so use the new paths.)\n\ncarry on",
         let wt = rig.into_worktree(&repo).await;
         let shell_in: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
         let told: Arc<Mutex<Vec<(PathBuf, String)>>> = Arc::default();
+        let chats_gone: Arc<Mutex<Vec<String>>> = Arc::default();
         {
             let (shell_in, told) = (shell_in.clone(), told.clone());
             rig.manager.set_terminal_hooks(TerminalHooks {
                 in_use: Arc::new(move |_: &Path| *shell_in.lock().unwrap()),
                 gone: Arc::new(move |root: &Path, why: &str| told.lock().unwrap().push((root.to_path_buf(), why.to_string()))),
                 moved: Arc::new(|_: &str, _: &str| {}),
-                run: Arc::new(|_: &str, _: Option<String>, _: &str, _: &dyn Fn(&crate::terminal::TabInfo)| Err("no terminal".into())),
+                chat_gone: {
+                    let gone = chats_gone.clone();
+                    Arc::new(move |chat: &str| gone.lock().unwrap().push(chat.to_string()))
+                },
+                run: Arc::new(|_: &str, _: &str, _: Option<String>, _: &str, _: &dyn Fn(&crate::terminal::TabInfo)| {
+                    Err("no terminal".into())
+                }),
             });
         }
         rig.manager.close("s1");
@@ -2257,6 +2274,7 @@ are there now, so use the new paths.)\n\ncarry on",
         rig.manager.delete("s1").await.unwrap();
         assert!(!wt.path.exists());
         assert_eq!(*told.lock().unwrap(), vec![(wt.path.clone(), "chat deleted".to_string())]);
+        assert_eq!(*chats_gone.lock().unwrap(), vec!["s1".to_string()]);
     }
 
     #[tokio::test]

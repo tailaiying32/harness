@@ -1303,11 +1303,17 @@ pub fn run() {
                         let terminals = terminals.clone();
                         Arc::new(move |from: &str, to: &str| terminals.project_moved(from, to))
                     },
+                    chat_gone: {
+                        let terminals = terminals.clone();
+                        Arc::new(move |chat: &str| terminals.chat_gone(chat))
+                    },
                     run: {
                         let terminals = terminals.clone();
-                        Arc::new(move |project: &str, worktree: Option<String>, command: &str, show: &dyn Fn(&terminal::TabInfo)| {
-                            terminals.run_for_agent(project, worktree, command, show)
-                        })
+                        Arc::new(
+                            move |project: &str, chat: &str, worktree: Option<String>, command: &str, show: &dyn Fn(&terminal::TabInfo)| {
+                                terminals.run_for_agent(project, chat, worktree, command, show)
+                            },
+                        )
                     },
                 });
             }
