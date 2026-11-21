@@ -24,11 +24,11 @@ use crate::events::{AgentEvent, BrowserTab, Envelope};
 use crate::sessions::Out;
 
 /// Name the agent knows the browser's tools by.
-pub const SERVER: &str = "harness_browser";
+pub const SERVER: &str = "tilde_browser";
 
 /// A line for the agent's instructions.
 pub const INSTRUCTION: &str = "This app has a browser in its side panel for localhost pages. To \
-check a web UI you are building, use the harness_browser tools (open, read, click, type, console, \
+check a web UI you are building, use the tilde_browser tools (open, read, click, type, console, \
 screenshot, resize, tabs, close); the user sees the same pages. It has tabs: open loads into the \
 tab on show unless you ask for a new one, and every tool takes an optional tab id (see tabs). The \
 panel is narrow, so pages show their small-screen layout; use resize to give a page a window \
@@ -46,7 +46,7 @@ const CLICK_SETTLE: Duration = Duration::from_millis(400);
 /// Where a hidden page is parked: far left of the window, out of sight.
 const PARK_X: f64 = -20_000.0;
 /// How long a page may sit off screen and unused before it is put away
-/// (`HARNESS_BROWSER_IDLE_SECONDS` overrides it, for tests).
+/// (`TILDE_BROWSER_IDLE_SECONDS` overrides it, for tests).
 const PUT_AWAY_AFTER: Duration = Duration::from_secs(10 * 60);
 /// How often put-away is checked.
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
@@ -918,7 +918,7 @@ impl Browsers {
 
         // Tauri gives every web view its own app hooks (`window.__TAURI_INTERNALS__`,
         // `isTauri`), locked in place. In this browser they would make a Tauri
-        // app's dev page, Harness's own included, think it runs inside Harness.
+        // app's dev page, Tilde's own included, think it runs inside Tilde.
         // On Mac they are taken out, leaving only the bridge; elsewhere they stay
         // for now (calls through them are refused: no capability covers this view).
         #[cfg(target_os = "macos")]
@@ -1222,8 +1222,7 @@ fn tabs_lines(list: &[BrowserTab], shown: Option<&str>, on_screen: bool) -> Stri
 }
 
 fn put_away_after() -> Duration {
-    std::env::var("HARNESS_BROWSER_IDLE_SECONDS")
-        .ok()
+    crate::home::app_env_text("BROWSER_IDLE_SECONDS")
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
         .unwrap_or(PUT_AWAY_AFTER)
@@ -1487,7 +1486,7 @@ mod mac {
 }
 
 /// Where the page keeps its errors and warnings, so they outlast a reload.
-const LOG_KEY: &str = "__harness_browser_log";
+const LOG_KEY: &str = "__tilde_browser_log";
 
 /// Runs at the start of every page load in the browser. Keeps errors and
 /// warnings, and answers the agent's actions. Each action answers with a JSON
@@ -1495,7 +1494,7 @@ const LOG_KEY: &str = "__harness_browser_log";
 const BRIDGE_JS: &str = r#"
 (() => {
   if (window.__hb || window.top !== window) return;
-  const KEY = "__harness_browser_log";
+  const KEY = "__tilde_browser_log";
   const MAX_LOG = 200;
   const MAX_TEXT = 20000;
   const show = (p) => {
@@ -1571,8 +1570,8 @@ const BRIDGE_JS: &str = r#"
     (isField(el) ? "" : el.innerText || el.value) || el.placeholder ||
     el.getAttribute("title") || el.getAttribute("alt") || el.name || el.id || "").trim().replace(/\s+/g, " ").slice(0, 80);
   const refOf = (el) => {
-    let r = el.getAttribute("data-harness-ref");
-    if (!r) { r = String(nextRef++); el.setAttribute("data-harness-ref", r); }
+    let r = el.getAttribute("data-tilde-ref");
+    if (!r) { r = String(nextRef++); el.setAttribute("data-tilde-ref", r); }
     return r;
   };
   const describe = (el) => {
@@ -1620,7 +1619,7 @@ const BRIDGE_JS: &str = r#"
       const items = interactive().slice(0, 150)
         .map((el) => "[" + refOf(el) + "] " + describe(el));
       return "URL: " + location.href + "\nTitle: " + document.title + "\n\n" + (cut || "(no text)") +
-        "\n\nElements (select with [data-harness-ref=\"n\"]):\n" + (items.join("\n") || "(none)");
+        "\n\nElements (select with [data-tilde-ref=\"n\"]):\n" + (items.join("\n") || "(none)");
     },
     click({ selector, text }) {
       let el;

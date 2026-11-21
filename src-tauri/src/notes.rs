@@ -154,7 +154,7 @@ impl Notes {
             if move_folder(&from, &to) {
                 moved.push((chat, from, to));
             } else {
-                eprintln!("harness: couldn't move {} to {}", from.display(), to.display());
+                eprintln!("tilde: couldn't move {} to {}", from.display(), to.display());
                 left = true;
             }
         }
@@ -225,7 +225,7 @@ mod tests {
     }
 
     fn rig() -> Rig {
-        let root = std::env::temp_dir().join(format!("harness-notes-test-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("tilde-notes-test-{}", uuid::Uuid::new_v4()));
         let chats: Arc<Mutex<HashMap<String, String>>> = Arc::default();
         let project_of: ProjectOf = {
             let chats = chats.clone();

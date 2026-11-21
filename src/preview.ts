@@ -47,7 +47,7 @@ const now = Date.now();
 const part = (number: number, state: PrInfo["state"], branch: string): PrInfo => ({
   number,
   state,
-  url: `https://github.com/you/harness/pull/${number}`,
+  url: `https://github.com/you/tilde/pull/${number}`,
   head: "abc",
   branch,
 });
@@ -68,7 +68,7 @@ const row = (
   effort: "default",
   agent_session_id: "agent-" + id,
   last_used_at: now - minutesAgo * 60_000,
-  work_path: branch ? `${home}/Library/Application Support/harness/worktrees/${id}` : null,
+  work_path: branch ? `${home}/Library/Application Support/Tilde/worktrees/${id}` : null,
   branch,
   wt_status: branch ? "live" : null,
   prs: !pr ? [] : typeof pr === "string" ? [part(40 + minutesAgo, pr, branch ?? "")] : pr,
@@ -78,9 +78,9 @@ const row = (
 
 /** A task split into pull requests: one landed, two open, the last built on the second. */
 const split = [
-  part(61, "merged", "harness/split-task-part-1"),
-  part(62, "open", "harness/split-task-part-2"),
-  part(63, "open", "harness/split-task-part-3"),
+  part(61, "merged", "tilde/split-task-part-1"),
+  part(62, "open", "tilde/split-task-part-2"),
+  part(63, "open", "tilde/split-task-part-3"),
 ];
 
 /** The app's own skills, for Settings. */
@@ -95,56 +95,56 @@ let skills = [
 
 /** Chats in the trash, for the sidebar's trash list. */
 let trash: SessionRow[] = [
-  { ...row("trashed1", `${home}/code/harness`, "Try a blur on the side panel", 4000), trashed_at: now - 3 * 86_400_000 },
-  { ...row("trashed2", `${home}/code/harness`, "Old spike: Electron comparison", 9000, "harness/old-spike-1a2b3c"), trashed_at: now - 29.5 * 86_400_000 },
+  { ...row("trashed1", `${home}/code/tilde`, "Try a blur on the side panel", 4000), trashed_at: now - 3 * 86_400_000 },
+  { ...row("trashed2", `${home}/code/tilde`, "Old spike: Electron comparison", 9000, "tilde/old-spike-1a2b3c"), trashed_at: now - 29.5 * 86_400_000 },
 ];
 
 let projects: ProjectRow[] = [
   {
     id: "p1",
-    path: `${home}/code/harness`,
+    path: `${home}/code/tilde`,
     sessions: [
-      row("planning", `${home}/code/harness`, "Idle timeout for chat processes", 1),
-      row("agents", `${home}/code/harness`, "Find where idle chats get closed", 1.2),
-      row("images", `${home}/code/harness`, "Settings list cut off", 1.5),
-      row("saved", `${home}/code/harness`, "Add a sidebar with saved chats", 2, "harness/add-a-sidebar-9f2c1e", "open"),
-      row("working", `${home}/code/harness`, "Why is the idle timer late when hidden?", 9, "harness/idle-timer-late-4be0a1"),
-      row("waiting", `${home}/code/harness`, "Bump dependencies and run the tests", 30),
-      row("unseen", `${home}/code/harness`, "Tidy the footer so it stays on one line", 55, "harness/tidy-the-footer-77d3aa", "merged"),
-      row("looks", `${home}/code/harness`, "Move the idle timer to the core", 70, "harness/idle-timer-core-c01d5e", "draft"),
-      row("split", `${home}/code/harness`, "Several pull requests per chat", 80, "harness/split-task-part-3", split),
-      row("landed", `${home}/code/harness`, "Rename the settings keys", 90, null, [
-        part(71, "merged", "harness/rename-keys-1"),
-        part(72, "closed", "harness/rename-keys-2"),
-        part(73, "closed", "harness/rename-keys-3"),
+      row("planning", `${home}/code/tilde`, "Idle timeout for chat processes", 1),
+      row("agents", `${home}/code/tilde`, "Find where idle chats get closed", 1.2),
+      row("images", `${home}/code/tilde`, "Settings list cut off", 1.5),
+      row("saved", `${home}/code/tilde`, "Add a sidebar with saved chats", 2, "tilde/add-a-sidebar-9f2c1e", "open"),
+      row("working", `${home}/code/tilde`, "Why is the idle timer late when hidden?", 9, "tilde/idle-timer-late-4be0a1"),
+      row("waiting", `${home}/code/tilde`, "Bump dependencies and run the tests", 30),
+      row("unseen", `${home}/code/tilde`, "Tidy the footer so it stays on one line", 55, "tilde/tidy-the-footer-77d3aa", "merged"),
+      row("looks", `${home}/code/tilde`, "Move the idle timer to the core", 70, "tilde/idle-timer-core-c01d5e", "draft"),
+      row("split", `${home}/code/tilde`, "Several pull requests per chat", 80, "tilde/split-task-part-3", split),
+      row("landed", `${home}/code/tilde`, "Rename the settings keys", 90, null, [
+        part(71, "merged", "tilde/rename-keys-1"),
+        part(72, "closed", "tilde/rename-keys-2"),
+        part(73, "closed", "tilde/rename-keys-3"),
       ]),
-      row("dropped", `${home}/code/harness`, "Try a native menu bar", 95, null, [
-        part(74, "closed", "harness/native-menu-1"),
-        part(75, "closed", "harness/native-menu-2"),
+      row("dropped", `${home}/code/tilde`, "Try a native menu bar", 95, null, [
+        part(74, "closed", "tilde/native-menu-1"),
+        part(75, "closed", "tilde/native-menu-2"),
       ]),
       // Past the sidebar's cap of eight: hidden behind "more", except the
       // one with an open pull request.
-      row("old1", `${home}/code/harness`, "Pick a monospace font", 2000),
-      row("old2", `${home}/code/harness`, "Check memory against the desktop app", 3000),
-      row("oldpr", `${home}/code/harness`, "Windows build script", 3500, "harness/windows-build-5e6f7a", "open"),
-      row("old3", `${home}/code/harness`, "First window", 5000),
-      row("old4", `${home}/code/harness`, "Font size setting", 5200),
-      row("old5", `${home}/code/harness`, "Theme list: twenty palettes", 5400),
-      row("old6", `${home}/code/harness`, "Keep a chat process alive briefly", 5600),
-      row("old7", `${home}/code/harness`, "Resume by session ID", 5800),
-      row("old8", `${home}/code/harness`, "Sign-in card when login fails", 6000),
-      row("old9", `${home}/code/harness`, "Trash and purge after 30 days", 6200),
-      row("old10", `${home}/code/harness`, "Code block tint per theme", 6400),
-      row("old11", `${home}/code/harness`, "Tool calls folded into one line", 6600),
-      row("old12", `${home}/code/harness`, "Window buttons in the sidebar", 6800),
-      row("old13", `${home}/code/harness`, "Native picker for folders", 7000),
+      row("old1", `${home}/code/tilde`, "Pick a monospace font", 2000),
+      row("old2", `${home}/code/tilde`, "Check memory against the desktop app", 3000),
+      row("oldpr", `${home}/code/tilde`, "Windows build script", 3500, "tilde/windows-build-5e6f7a", "open"),
+      row("old3", `${home}/code/tilde`, "First window", 5000),
+      row("old4", `${home}/code/tilde`, "Font size setting", 5200),
+      row("old5", `${home}/code/tilde`, "Theme list: twenty palettes", 5400),
+      row("old6", `${home}/code/tilde`, "Keep a chat process alive briefly", 5600),
+      row("old7", `${home}/code/tilde`, "Resume by session ID", 5800),
+      row("old8", `${home}/code/tilde`, "Sign-in card when login fails", 6000),
+      row("old9", `${home}/code/tilde`, "Trash and purge after 30 days", 6200),
+      row("old10", `${home}/code/tilde`, "Code block tint per theme", 6400),
+      row("old11", `${home}/code/tilde`, "Tool calls folded into one line", 6600),
+      row("old12", `${home}/code/tilde`, "Window buttons in the sidebar", 6800),
+      row("old13", `${home}/code/tilde`, "Native picker for folders", 7000),
     ],
   },
   {
     id: "p2",
     path: `${home}/code/a-rather-long-folder-name/website`,
     sessions: [
-      row("old1", `${home}/code/a-rather-long-folder-name/website`, "Fix the broken image links on the pricing page", 600, "harness/fix-the-broken-image-0aa1b2", "closed"),
+      row("old1", `${home}/code/a-rather-long-folder-name/website`, "Fix the broken image links on the pricing page", 600, "tilde/fix-the-broken-image-0aa1b2", "closed"),
       row("old2", `${home}/code/a-rather-long-folder-name/website`, "Draft the launch post", 2000),
       row("long", `${home}/code/a-rather-long-folder-name/website`, "A very long chat (300 turns)", 3000),
     ],
@@ -238,10 +238,10 @@ const agentsChat: AgentEvent[] = [
   { kind: "batch_titled", tool_id: "ag1", title: "Tracing how chats close" },
   sub("ag1", "s1", "Grep", { pattern: "kill|close_idle|shutdown", path: "src-tauri" }),
   subResult("ag1", "s1", "sessions.rs:512   fn close_idle(&self, id: &SessionId)\nsessions.rs:688   child.kill().await\nterminal.rs:97    fn shutdown_all(&mut self)"),
-  sub("ag1", "s2", "Read", { file_path: `${home}/code/harness/src-tauri/src/sessions.rs` }),
+  sub("ag1", "s2", "Read", { file_path: `${home}/code/tilde/src-tauri/src/sessions.rs` }),
   subResult("ag1", "s2", ""),
   subSaid("ag1", "`close_idle` is the only timer path. The kill at 688 is for quit."),
-  sub("ag1", "s3", "Read", { file_path: `${home}/code/harness/src-tauri/src/terminal.rs` }),
+  sub("ag1", "s3", "Read", { file_path: `${home}/code/tilde/src-tauri/src/terminal.rs` }),
   subResult("ag1", "s3", ""),
   subSaid("ag1", "Chats close in two places: `close_idle` (sessions.rs:512) after the idle timer, and `child.kill()` (sessions.rs:688) on quit. Terminals close their own shells separately."),
   { kind: "task_ended", task_id: "t1", tool_id: "ag1", status: "completed", summary: "Chats close in two places: `close_idle` (sessions.rs:512) after the idle timer, and `child.kill()` (sessions.rs:688) on quit. Terminals close their own shells separately.", duration_ms: 108000 },
@@ -273,7 +273,7 @@ function playAgents() {
     { id: "t2", kind: "local_agent", description: "measure an idle chat" },
   ] }, 160);
   say(sub("ag2", "s5", "Bash", { command: "cargo build --release" }), 300);
-  say(subResult("ag2", "s5", "   Compiling harness v0.4.0\n    Finished `release` profile [optimized] target(s) in 1m 48s"), 600);
+  say(subResult("ag2", "s5", "   Compiling tilde v0.4.0\n    Finished `release` profile [optimized] target(s) in 1m 48s"), 600);
   say(sub("ag2", "s6", "Bash", { command: "ps -o pid,rss,command | grep claude" }), 800);
   say(subResult("ag2", "s6", "4412  268144  claude --output-format stream-json\n4419  259872  claude --output-format stream-json"), 1000);
   say(subSaid("ag2", "About 260 MB each at rest. Sampling once a minute to see whether it grows."), 1200);
@@ -285,30 +285,30 @@ function playAgents() {
 const askingChat: AgentEvent[] = [
   { kind: "user_message", text: "Bump dependencies and run the tests." },
   { kind: "session_started", agent_session_id: "agent-waiting", model: "claude-fable-5-2", mode: "auto" },
-  tool("w1", "Read", { file_path: `${home}/code/harness/package.json` }),
+  tool("w1", "Read", { file_path: `${home}/code/tilde/package.json` }),
   result("w1", "…"),
-  tool("w2", "mcp__harness_worktree__ask", { name: "bump dependencies" }),
-  { kind: "worktree_ask", request_id: "wt-1", repo_root: `${home}/code/harness`, tool_id: "w2", name: "bump dependencies" },
+  tool("w2", "mcp__tilde_worktree__ask", { name: "bump dependencies" }),
+  { kind: "worktree_ask", request_id: "wt-1", repo_root: `${home}/code/tilde`, tool_id: "w2", name: "bump dependencies" },
 ];
 
 /** A chat that moved to a worktree, then was put away and brought back. */
 const movedChat: AgentEvent[] = [
   { kind: "user_message", text: "Why is the idle timer late when hidden?" },
   { kind: "session_started", agent_session_id: "agent-working", model: "claude-fable-5-2", mode: "auto" },
-  tool("v1", "mcp__harness_worktree__ask", { name: "idle timer late" }),
-  { kind: "worktree_ask", request_id: "wt-2", repo_root: `${home}/code/harness`, tool_id: "v1", name: "idle timer late" },
+  tool("v1", "mcp__tilde_worktree__ask", { name: "idle timer late" }),
+  { kind: "worktree_ask", request_id: "wt-2", repo_root: `${home}/code/tilde`, tool_id: "v1", name: "idle timer late" },
   { kind: "worktree_chosen", choice: "worktree" },
-  { kind: "worktree_changed", status: "created", branch: "harness/idle-timer-late-4be0a1" },
+  { kind: "worktree_changed", status: "created", branch: "tilde/idle-timer-late-4be0a1" },
   result("v1", "The user is being asked whether to do this work in a new worktree. End your turn now and make no changes. Their answer comes as your next message."),
   text("v2", "Moved. The timer runs in the window, which the system slows down when hidden."),
   ended,
-  { kind: "worktree_changed", status: "put_away", branch: "harness/idle-timer-late-4be0a1" },
+  { kind: "worktree_changed", status: "put_away", branch: "tilde/idle-timer-late-4be0a1" },
   { kind: "user_message", text: "Move it to the core then." },
-  { kind: "worktree_changed", status: "restored", branch: "harness/idle-timer-late-4be0a1" },
+  { kind: "worktree_changed", status: "restored", branch: "tilde/idle-timer-late-4be0a1" },
   text("v3", "Done: the core now times it."),
   ended,
   { kind: "user_message", text: "Split the follow-ups into separate chats." },
-  tool("v4", "mcp__harness_new_chats__start", { parts: [] }),
+  tool("v4", "mcp__tilde_new_chats__start", { parts: [] }),
   { kind: "new_chats_ask", request_id: "nc-1", tool_id: "v4", from: "main", parts: [
     { title: "Idle timer in the core", summary: "Move the timer out of the window.", why: "The window is slowed down when hidden.", brief: "Move the idle timer from the window into the core.\n\n- Files: `src-tauri/src/sessions.rs`\n- Done when the tests pass." },
     { title: "Timer setting", summary: "A setting for the idle time.", why: "Users asked to change it.", brief: "Add an idle time setting to Settings.", agent: "cursor" },
@@ -325,7 +325,7 @@ const movedChat: AgentEvent[] = [
     ],
   },
   { kind: "user_message", text: "Now one more, branched off this chat." },
-  tool("v5", "mcp__harness_new_chats__start", { parts: [] }),
+  tool("v5", "mcp__tilde_new_chats__start", { parts: [] }),
   { kind: "new_chats_ask", request_id: "nc-2", tool_id: "v5", from: "this_chat", parts: [
     { title: "Idle timer in the core", summary: "Move the timer out of the window.", why: "The window is slowed down when hidden.", brief: "Move the idle timer from the window into the core.\n\n- Files: `src-tauri/src/sessions.rs`\n- Done when the tests pass." },
     { title: "Timer setting", summary: "A setting for the idle time.", why: "Users asked to change it.", brief: "Add an idle time setting to Settings.", agent: "cursor" },
@@ -336,13 +336,13 @@ const movedChat: AgentEvent[] = [
 const imagesChat: AgentEvent[] = [
   {
     kind: "user_message",
-    text: "The theme list on the settings page gets cut off at the bottom (reported in https://github.com/you/harness/issues/12). [image 1]",
+    text: "The theme list on the settings page gets cut off at the bottom (reported in https://github.com/you/tilde/issues/12). [image 1]",
     images: [{ n: 1, media_type: "image/png" }],
   },
   { kind: "session_started", agent_session_id: "agent-images", model: "claude-opus-5-5", mode: "default" },
   text("i1", "I see it: the list stops at Tokyo Night and there's no way to scroll. Checking the layout."),
   // A look at earlier chats: a search (opened, it lists the chats found) and a read.
-  tool("ic1", "mcp__harness_chats__search", { query: "settings list height" }),
+  tool("ic1", "mcp__tilde_chats__search", { query: "settings list height" }),
   result(
     "ic1",
     "looks  3 days ago  Move the idle timer to the core  (Claude Code, 4 turns, PR #31 draft)\n" +
@@ -351,18 +351,18 @@ const imagesChat: AgentEvent[] = [
       "    turn 5: …height of the list follows the window…\n" +
       "(2 more matches not shown)\n",
   ),
-  tool("ic2", "mcp__harness_chats__read", { id: "looks" }),
+  tool("ic2", "mcp__tilde_chats__read", { id: "looks" }),
   result("ic2", "# Move the idle timer to the core · Claude Code · last used 3 days ago · 4 turns · PR #31 draft\n\n## Turn 1 of 4\n\n### User\n\n…"),
-  tool("it1", "Read", { file_path: `${home}/code/harness/src/lib/Settings.svelte` }),
+  tool("it1", "Read", { file_path: `${home}/code/tilde/src/lib/Settings.svelte` }),
   result("it1", "…"),
   text("i2", "The list had a fixed height taller than the window. It now fills the space left and scrolls. Here's the page after the change:"),
   tool("it2", "Edit", {
-    file_path: `${home}/code/harness/src/lib/Settings.svelte`,
+    file_path: `${home}/code/tilde/src/lib/Settings.svelte`,
     old_string: "  height: 640px;",
     new_string: "  flex: 1;\n  min-height: 0;\n  overflow-y: auto;",
   }),
   result("it2", "ok"),
-  tool("it3", "Read", { file_path: `${home}/code/harness/after.png` }),
+  tool("it3", "Read", { file_path: `${home}/code/tilde/after.png` }),
   {
     kind: "tool_result",
     tool_id: "it3",
@@ -371,7 +371,7 @@ const imagesChat: AgentEvent[] = [
     parent_tool_id: null,
   },
   // A long address, to show the page line cut short with "…".
-  tool("it4", "mcp__harness_browser__open", {
+  tool("it4", "mcp__tilde_browser__open", {
     url: "localhost:5173/settings/themes/6ad870ba-ad9b-4475-9f7c-2abca1a5dec3/preview/13facc18-24ed-44d9-a7b8-2019fc4c5bae",
   }),
   result("it4", "Opened."),
@@ -392,7 +392,7 @@ async function sampleImage(n: number): Promise<ArrayBuffer> {
   ctx.fillStyle = "#1a1b17";
   ctx.fillRect(380, 200, 420, n === 1 ? 700 : 470);
   ctx.font = "20px Menlo, monospace";
-  ["Harness Dark", "Harness Light", "Solarized Dark", "Solarized Light", "Gruvbox Dark", "Gruvbox Light", "Dracula", "Nord", "Tokyo Ni"]
+  ["Tilde Dark", "Tilde Light", "Solarized Dark", "Solarized Light", "Gruvbox Dark", "Gruvbox Light", "Dracula", "Nord", "Tokyo Ni"]
     .slice(0, n === 1 ? 9 : 8)
     .forEach((name, i) => {
       ctx.fillStyle = i === 0 ? "#d9a35b" : "#cfccc2";
@@ -408,12 +408,12 @@ async function sampleImage(n: number): Promise<ArrayBuffer> {
 const savedChat: AgentEvent[] = [
   { kind: "user_message", text: "Add a sidebar with saved chats. Keep the look." },
   { kind: "session_started", agent_session_id: "agent-saved", model: "claude-fable-5-2", mode: "default" },
-  tool("t1", "Read", { file_path: `${home}/code/harness/src/App.svelte` }),
+  tool("t1", "Read", { file_path: `${home}/code/tilde/src/App.svelte` }),
   result("t1", "…"),
   tool("t2", "Grep", { pattern: "projectPath" }),
   result("t2", "src/lib/state/chat.svelte.ts:63\nsrc/lib/chat/Composer.svelte:39"),
   tool("t3", "Edit", {
-    file_path: `${home}/code/harness/src/App.svelte`,
+    file_path: `${home}/code/tilde/src/App.svelte`,
     old_string: "<main>\n  <ChatView />",
     new_string: "<div class=\"app\">\n  <Sidebar {app} />\n  <main>\n    <ChatView />",
   }),
@@ -423,7 +423,7 @@ const savedChat: AgentEvent[] = [
     approval: "tool",
     tool_name: "Edit",
     title: "src/App.svelte",
-    input: { file_path: `${home}/code/harness/src/App.svelte`, old_string: "<main>", new_string: "<div class=\"app\">" },
+    input: { file_path: `${home}/code/tilde/src/App.svelte`, old_string: "<main>", new_string: "<div class=\"app\">" },
     tool_id: "t3",
     always_label: "Allow all edits this chat",
   },
@@ -455,11 +455,11 @@ const savedChat: AgentEvent[] = [
 
 // A chat in plan mode: it wrote two documents, then presented a plan that is
 // still waiting for an answer. For the side panel.
-const notesPath = `${home}/code/harness/docs/memory-notes.md`;
+const notesPath = `${home}/code/tilde/docs/memory-notes.md`;
 // In the chat's own folder, so its tab has the save-to-project button.
 // Written when chat folders were still under the app's data folder: the chat's
 // folder has moved since (see `chatFolder`), and its tab shows it from there.
-const testPlanPath = `${home}/Library/Application Support/com.harness.app/notes/planning/test-plan.md`;
+const testPlanPath = `${home}/Library/Application Support/Tilde/notes/planning/test-plan.md`;
 const planPath = `${home}/.claude/plans/idle-timeout.md`;
 const notesText =
   "# Memory per chat\n\nWhat each part of the app holds, measured on this Mac with a release build and the window hidden.\n\n## Readings\n\n- A waiting chat's process holds about 260 MB.\n- After a few turns it rises to about 310 MB.\n- The app alone, with a short chat open: 105 to 160 MB.\n\n## Takeaway\n\nFour idle chats cost over 1 GB today. With `IDLE_TIMEOUT` at five minutes they cost nothing.\n\n| Part | Memory |\n|---|---|\n| App alone | 105 to 160 MB |\n| One chat's process | 260 to 310 MB |\n";
@@ -482,7 +482,7 @@ const planningChat: AgentEvent[] = [
   { kind: "user_message", text: "Chats I've walked away from should stop using memory. Plan it out before changing anything." },
   { kind: "session_started", agent_session_id: "agent-planning", model: "claude-fable-5-2", mode: "plan" },
   text("p1", "I'll look at how chats are tracked, measure what an idle one holds, then write a plan."),
-  tool("pt1", "Read", { file_path: `${home}/code/harness/src-tauri/src/sessions.rs` }),
+  tool("pt1", "Read", { file_path: `${home}/code/tilde/src-tauri/src/sessions.rs` }),
   result("pt1", "…"),
   tool("pt2", "Grep", { pattern: "SessionState::Idle" }),
   result("pt2", "src-tauri/src/sessions.rs:88"),
@@ -529,7 +529,7 @@ const looksChat: AgentEvent[] = [
   { kind: "user_message", text: "Why is the idle timer late when the window is hidden?" },
   tool("k1", "Grep", { pattern: "setTimeout" }),
   result("k1", "src/lib/state/app.svelte.ts:112"),
-  tool("k2", "Read", { file_path: `${home}/code/harness/src/lib/state/app.svelte.ts` }),
+  tool("k2", "Read", { file_path: `${home}/code/tilde/src/lib/state/app.svelte.ts` }),
   result("k2", "…"),
   text(
     "k-m1",
@@ -540,9 +540,9 @@ const looksChat: AgentEvent[] = [
     kind: "user_message",
     text: "ok, move it to the core. last time a change like this broke the approvals flow and it took most of an evening to work out why, so please go slowly and check each step before moving on. a few things to keep in mind:\n\n- the timer should restart on any activity, not just my messages\n- an approval that is waiting on me should never be shut down\n- keep the 10 minutes as a setting we can change later\n\nalso here is the log from last night in case it helps:\n\n22:14:03 idle timer armed (600s)\n22:31:47 idle timer fired, 1064s after arming\n22:31:47 closing session agent-working",
   },
-  tool("k3", "Edit", { file_path: `${home}/code/harness/src-tauri/src/sessions.rs`, old_string: "a", new_string: "b" }),
+  tool("k3", "Edit", { file_path: `${home}/code/tilde/src-tauri/src/sessions.rs`, old_string: "a", new_string: "b" }),
   result("k3", "ok"),
-  tool("k4", "Edit", { file_path: `${home}/code/harness/src/lib/state/app.svelte.ts`, old_string: "a", new_string: "b" }),
+  tool("k4", "Edit", { file_path: `${home}/code/tilde/src/lib/state/app.svelte.ts`, old_string: "a", new_string: "b" }),
   result("k4", "ok"),
   text(
     "k-m2",
@@ -555,9 +555,10 @@ const looksChat: AgentEvent[] = [
   text("k-m3", "All 31 tests pass, including two new ones for the idle clock."),
   ended,
   { kind: "user_message", text: "and the window side?" },
+  // Saved before the app was renamed, under the tool's old name: it reads like the calls beside it.
   tool("k6", "mcp__harness_browser__open", { url: "localhost:1420" }),
-  result("k6", "Opened http://localhost:1420/ (Harness)"),
-  tool("k7", "mcp__harness_browser__screenshot", {}),
+  result("k6", "Opened http://localhost:1420/ (Tilde)"),
+  tool("k7", "mcp__tilde_browser__screenshot", {}),
   result("k7", ""),
   text("k-m4", "I opened the app in the browser and checked it: the chat's idle mark now clears on time."),
   ended,
@@ -630,11 +631,11 @@ let keepAwake: { mode: "away" | "overnight"; ends_at: number } | null = null;
 const docsByPath = new Map<string, string>();
 
 /** A project's folder in the app's home folder, named from its path as the core names it. */
-const projectHome = (project: string) => `${home}/.harness/projects/${project.replace(/[^A-Za-z0-9]/g, "-")}`;
+const projectHome = (project: string) => `${home}/.tilde/projects/${project.replace(/[^A-Za-z0-9]/g, "-")}`;
 /** A chat's own folder: its notes and docs, under its project. */
 const chatFolder = (project: string, chatId: string) => `${projectHome(project)}/chats/${chatId}`;
 const projectOf = (chatId: string) =>
-  [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === chatId)?.project_path ?? `${home}/code/harness`;
+  [...projects.flatMap((p) => p.sessions), ...trash].find((s) => s.id === chatId)?.project_path ?? `${home}/code/tilde`;
 
 /** Side chats that have answered once, so "@gone" can play a deleted copy (see side_send). */
 const sidesAnswered = new Set<string>();
@@ -694,10 +695,10 @@ const commands: Record<string, (args: Args) => unknown> = {
   choose_worktree: (args) => {
     emit(args.sessionId, { kind: "worktree_chosen", choice: args.choice });
     if (args.choice === "worktree") {
-      emit(args.sessionId, { kind: "worktree_changed", status: "created", branch: "harness/bump-dependencies-5e6f7a" });
+      emit(args.sessionId, { kind: "worktree_changed", status: "created", branch: "tilde/bump-dependencies-5e6f7a" });
       for (const p of projects)
         for (const s of p.sessions)
-          if (s.id === args.sessionId) Object.assign(s, row(s.id, s.project_path, s.title, 0, "harness/bump-dependencies-5e6f7a"));
+          if (s.id === args.sessionId) Object.assign(s, row(s.id, s.project_path, s.title, 0, "tilde/bump-dependencies-5e6f7a"));
     }
     finish(args.sessionId);
   },
@@ -1100,8 +1101,8 @@ function addTab(project: string, label: string, worktree: string | null, output 
   return tab;
 }
 {
-  const project = `${home}/code/harness`;
-  const shell = addTab(project, "harness", null);
+  const project = `${home}/code/tilde`;
+  const shell = addTab(project, "tilde", null);
   termOutput.set(
     shell.id,
     [
@@ -1113,7 +1114,7 @@ function addTab(project: string, label: string, worktree: string | null, output 
       promptFor(shell),
     ].join("\r\n"),
   );
-  const server = addTab(project, "harness", null);
+  const server = addTab(project, "tilde", null);
   server.running = "python3 -m http.server 8000";
   termOutput.set(
     server.id,
@@ -1126,7 +1127,7 @@ function addTab(project: string, label: string, worktree: string | null, output 
     ].join("\r\n"),
   );
   // A tab an agent opened, whose command failed.
-  const tests = addTab(project, "harness", null);
+  const tests = addTab(project, "tilde", null);
   tests.failed = true;
   termOutput.set(
     tests.id,

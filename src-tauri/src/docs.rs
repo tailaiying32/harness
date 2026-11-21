@@ -62,7 +62,7 @@ impl Docs {
         let (Some(folder), Some(name)) = (target.parent(), target.file_name()) else {
             return Err("That isn't a file.".into());
         };
-        let tmp = folder.join(format!(".{}.harness-save", name.to_string_lossy()));
+        let tmp = folder.join(format!(".{}.tilde-save", name.to_string_lossy()));
         let saved = fs::write(&tmp, text)
             .and_then(|_| fs::set_permissions(&tmp, meta.permissions()))
             .and_then(|_| fs::rename(&tmp, &target));
@@ -362,7 +362,7 @@ mod tests {
     use super::*;
 
     fn folder(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("harness-docs-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tilde-docs-{name}-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -400,7 +400,7 @@ mod tests {
         docs.read(&doc).unwrap();
         docs.write(&doc, "two").unwrap();
         assert_eq!(fs::read_to_string(&doc).unwrap(), "two");
-        assert!(!dir.join(".a.md.harness-save").exists());
+        assert!(!dir.join(".a.md.tilde-save").exists());
 
         fs::remove_file(&doc).unwrap();
         assert!(docs.write(&doc, "three").is_err(), "a deleted file isn't made again");
@@ -514,7 +514,7 @@ mod tests {
         fs::File::options().write(true).open(&old).unwrap().set_modified(past).unwrap();
         fs::write(places.chat.join("new.markdown"), "b").unwrap();
         fs::write(places.chat.join("a.txt"), "c").unwrap();
-        fs::write(places.chat.join(".new.md.harness-save"), "d").unwrap();
+        fs::write(places.chat.join(".new.md.tilde-save"), "d").unwrap();
         fs::write(places.chat.join(".hidden.md"), "d").unwrap();
         fs::create_dir_all(places.chat.join("folder.md")).unwrap();
         fs::write(places.project.join("TODO.md"), "e").unwrap();

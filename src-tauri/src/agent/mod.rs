@@ -121,7 +121,7 @@ pub struct SpawnOptions {
     /// (`preferences_instruction`). None when the user has none.
     pub preferences: Option<Preferences>,
     /// Extra environment for the agent's process, which its shell commands
-    /// inherit: `HARNESS_TAB_URL` for `harness-tab` in a main chat.
+    /// inherit: `TILDE_TAB_URL` for `tilde-tab` in a main chat.
     pub env: Vec<(String, String)>,
 }
 

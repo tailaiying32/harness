@@ -10,7 +10,7 @@
 //! closes after the same idle time as a chat's and resumes on the next
 //! question, so a forgotten side chat costs no memory. Ending it deletes the
 //! agent's saved copy too, and copies a crash left behind are deleted at the
-//! next start. Each running Harness keeps its own list of copies, so a second
+//! next start. Each running Tilde keeps its own list of copies, so a second
 //! one (a test build on the same data folder) never deletes the first's. If a
 //! side chat's copy is gone anyway, asking it again fails with [`GONE`] and
 //! the window moves the question to a new side chat.
@@ -42,7 +42,7 @@ const MARK: &str = "#side-";
 /// The error when a side chat's saved copy was deleted while it sat idle; the
 /// side chat is forgotten. The window knows this text (chat.svelte.ts).
 pub const GONE: &str = "side chat gone";
-/// The start of each running Harness's list of copies: `side_copies-<pid>.json`.
+/// The start of each running Tilde's list of copies: `side_copies-<pid>.json`.
 /// An older build kept one shared `side_copies.json`.
 const COPIES: &str = "side_copies";
 /// Shown in a side chat that couldn't copy its chat and reads it instead.
@@ -141,8 +141,8 @@ struct Inner {
 pub struct SideChats(Arc<Inner>);
 
 impl SideChats {
-    /// `dir` holds each running Harness's list of the agent's copies still to
-    /// delete. Lists left by a Harness that is no longer running are deleted
+    /// `dir` holds each running Tilde's list of the agent's copies still to
+    /// delete. Lists left by a Tilde that is no longer running are deleted
     /// now, with their copies; a running one's are left alone.
     pub fn new(agents: Agents, store: Arc<Store>, out: Out, home: Home, dir: &Path) -> Self {
         let pid = std::process::id();
@@ -217,7 +217,7 @@ impl SideChats {
             Some(agent) => agent,
             None => {
                 // Its copy was deleted while it sat idle (by hand, or by
-                // something outside Harness): it can't go on. Forgotten here;
+                // something outside Tilde): it can't go on. Forgotten here;
                 // the window starts a new side chat with the question.
                 if let Some(own) = &own_id {
                     if !adapter.has_session(own) {
@@ -335,7 +335,7 @@ impl SideChats {
                     }
                 }
                 Err(e) => {
-                    eprintln!("harness: couldn't copy chat {chat_id} for a side chat: {e}");
+                    eprintln!("tilde: couldn't copy chat {chat_id} for a side chat: {e}");
                     Ok(Start::Fresh { read: true })
                 }
             },
@@ -454,9 +454,9 @@ impl SideChats {
         }
     }
 
-    /// Deletes the copies listed by a Harness that is no longer running (a
+    /// Deletes the copies listed by a Tilde that is no longer running (a
     /// list under this process's own id is an earlier one's, since this one
-    /// has listed nothing yet), and those lists. A running Harness's copies
+    /// has listed nothing yet), and those lists. A running Tilde's copies
     /// may still be in use, so they stay.
     fn sweep(&self, dir: &Path, pid: u32) {
         let Ok(files) = std::fs::read_dir(dir) else {
@@ -662,7 +662,7 @@ mod tests {
         sinks: Mutex<Vec<EventSink>>,
         told: Arc<Mutex<Vec<String>>>,
         forgotten: Mutex<Vec<String>>,
-        /// Sessions deleted behind Harness's back.
+        /// Sessions deleted behind Tilde's back.
         missing: Mutex<Vec<String>>,
     }
 
@@ -794,7 +794,7 @@ mod tests {
 
     fn rig_with(idle: Option<Duration>, fake: Fake) -> Rig {
         let fake = Arc::new(fake);
-        let dir = std::env::temp_dir().join(format!("harness-side-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("tilde-side-{}", uuid::Uuid::new_v4()));
         let store = Arc::new(Store::open(&dir).unwrap());
         store.touch_session("c1", "/work", "hi", "default", "default").unwrap();
         store.set_agent_session_id("c1", "main-1").unwrap();
@@ -1044,9 +1044,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_start_leaves_a_running_harnesss_copies_alone() {
+    async fn a_start_leaves_a_running_tildes_copies_alone() {
         let rig = rig(None);
-        // A Harness that has quit (an older build's shared list, and one that
+        // A Tilde that has quit (an older build's shared list, and one that
         // ended), and one still running (pid 1 always is on Unix; Windows has
         // none, so a process that waits).
         let quick = if cfg!(windows) { ["cmd", "/c", "exit"] } else { ["sh", "-c", "true"] };
@@ -1195,7 +1195,7 @@ mod tests {
         let agents = Agents::default();
         agents.add(CLAUDE, claude.clone(), Some("claude".into()));
         agents.add(crate::agent::CODEX, codex.clone(), Some("codex".into()));
-        let dir = std::env::temp_dir().join(format!("harness-side-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("tilde-side-{}", uuid::Uuid::new_v4()));
         let store = Arc::new(Store::open(&dir).unwrap());
         store.touch_session("c1", "/work", "hi", "default", "default").unwrap();
         store.set_agent("c1", crate::agent::CODEX).unwrap();

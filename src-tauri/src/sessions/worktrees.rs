@@ -76,20 +76,20 @@ const PR_IN_SWEEP: Duration = Duration::from_secs(600);
 /// The app's worktree tool group, offered to every main chat's agent,
 /// whatever the agent: how it asks for a worktree. Claude Code's own
 /// worktree tools are turned off (see the adapter), so this is the only way.
-pub const SERVER: &str = "harness_worktree";
+pub const SERVER: &str = "tilde_worktree";
 /// The tool's one name, and the name the window sees it by, for every agent
 /// (Cursor's MCP calls are named this way too, see `acp::name_and_input`).
 const TOOL: &str = "ask";
-pub const CALL_NAME: &str = "mcp__harness_worktree__ask";
+pub const CALL_NAME: &str = "mcp__tilde_worktree__ask";
 
 /// When to ask, in the instructions. Worded firmly ("your first step... is
-/// to call"): a softer "ask for a worktree with the harness_worktree tool"
+/// to call"): a softer "ask for a worktree with the tilde_worktree tool"
 /// made Haiku skip it for a new module with tests, twice in two runs (CLI
 /// 2.1.326); this asked both times, and still not for a one-line fix.
 const WHEN: &str = "This app keeps separate pieces of work in separate git worktrees, so chats \
 working in the same repo don't get in each other's way. In a git repo, your first step for real work \
 (a feature, new files or a module, a fix that touches more than a line or two, a refactor, anything \
-you'd put on its own branch) is to call the ask tool of the harness_worktree server with a short name \
+you'd put on its own branch) is to call the ask tool of the tilde_worktree server with a short name \
 for the work, before you create or change any file, however you'd do it (edit tools or shell \
 commands). The user approves or declines. Skip it only for a tiny one-off change, for questions, \
 reviews or planning, or once this chat already works in a worktree.";
@@ -154,7 +154,7 @@ impl SessionManager {
     /// A length in ms: an environment override in seconds (for tests), else a
     /// setting in days, else the default.
     fn period_ms(&self, env: &str, setting: &str, default_days: u64) -> i64 {
-        if let Some(seconds) = std::env::var(env).ok().and_then(|v| v.trim().parse::<i64>().ok()) {
+        if let Some(seconds) = crate::home::app_env_text(env).and_then(|v| v.trim().parse::<i64>().ok()) {
             return seconds * 1000;
         }
         let days = self
@@ -170,14 +170,14 @@ impl SessionManager {
         if let Some(fixed) = self.0.timings.worktree_idle {
             return fixed.as_millis() as i64;
         }
-        self.period_ms("HARNESS_WORKTREE_IDLE_SECONDS", "worktree_idle_days", DEFAULT_IDLE_DAYS)
+        self.period_ms("WORKTREE_IDLE_SECONDS", "worktree_idle_days", DEFAULT_IDLE_DAYS)
     }
 
     fn keep_ms(&self) -> i64 {
         if let Some(fixed) = self.0.timings.keep {
             return fixed.as_millis() as i64;
         }
-        self.period_ms("HARNESS_TRASH_SECONDS", "trash_days", DEFAULT_TRASH_DAYS)
+        self.period_ms("TRASH_SECONDS", "trash_days", DEFAULT_TRASH_DAYS)
     }
 
     /// The folder a chat's agent starts in. A chat in the trash comes out of
@@ -748,7 +748,7 @@ impl SessionManager {
                     continue;
                 }
                 Err(e) => {
-                    eprintln!("harness: sweep skipped a chat: {e}");
+                    eprintln!("tilde: sweep skipped a chat: {e}");
                     continue;
                 }
                 Ok(Merged::No) => {}
@@ -770,7 +770,7 @@ impl SessionManager {
                         let _ = self.0.store.set_worktree(&id, &wt, "put_away");
                         changed("put_away");
                     }
-                    Err(e) => eprintln!("harness: couldn't put a worktree away: {e}"),
+                    Err(e) => eprintln!("tilde: couldn't put a worktree away: {e}"),
                 }
             } else if status == "put_away" && row.put_away_at.is_some_and(|at| now - at > keep) {
                 let _ = blocking(drop_all).await;
@@ -794,7 +794,7 @@ impl SessionManager {
                     store.set_worktree(session_id, &wt, "put_away")?;
                     self.terminal_gone(&wt.path, "chat deleted");
                 }
-                Err(e) => eprintln!("harness: couldn't put a worktree away: {e}"),
+                Err(e) => eprintln!("tilde: couldn't put a worktree away: {e}"),
             }
         }
         self.terminal_chat_gone(session_id);
@@ -832,7 +832,7 @@ impl SessionManager {
             .await;
         }
         if let Err(e) = self.0.store.delete_session(&row.id) {
-            eprintln!("harness: couldn't delete a chat: {e}");
+            eprintln!("tilde: couldn't delete a chat: {e}");
         }
         self.0.images.delete_session(&row.id);
         self.0.notes.delete_session(&row.id, &row.project_path);

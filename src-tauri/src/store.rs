@@ -380,10 +380,13 @@ fn turns_upto(conn: &Connection, session_id: &str, upto: Option<i64>) -> rusqlit
 }
 
 impl Store {
-    /// Opens (or creates) the store in `dir`.
+    /// Opens (or creates) the store in `dir`. A database made when the app
+    /// was called Harness keeps its file name, so an older build opens the same one.
     pub fn open(dir: &Path) -> Result<Self, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("Can't create {}: {e}", dir.display()))?;
-        Self::with(Connection::open(dir.join("harness.db")).map_err(err)?)
+        let old = dir.join("harness.db");
+        let file = if old.exists() { old } else { dir.join("tilde.db") };
+        Self::with(Connection::open(file).map_err(err)?)
     }
 
     #[cfg(test)]
@@ -793,6 +796,16 @@ impl Store {
         }
         tx.commit().map_err(err)?;
         Ok(chats.into_iter().map(|(id, _)| id).collect())
+    }
+
+    /// `add_pending_note` for every saved chat, the ones in the trash too.
+    pub fn add_pending_note_to_all(&self, note: &str) -> Result<(), String> {
+        self.exec(
+            "UPDATE sessions SET pending_note = CASE
+                 WHEN pending_note IS NULL OR pending_note = '' THEN ?1
+                 ELSE pending_note || char(10) || char(10) || ?1 END",
+            params![note],
+        )
     }
 
     /// Leaves something for the chat's agent to be told with the chat's next
@@ -1447,7 +1460,7 @@ mod tests {
             repo_root: "/one".into(),
             subpath: "web".into(),
             path: "/wts/one-abc".into(),
-            branch: "harness/x-abc".into(),
+            branch: "tilde/x-abc".into(),
             base_commit: "c1".into(),
             base_branch: Some("main".into()),
             seen: Vec::new(),
@@ -1463,7 +1476,7 @@ mod tests {
         store.set_worktree("a", &worktree(), "live").unwrap();
         let row = store.session("a").unwrap().unwrap();
         assert_eq!(row.work_path.as_deref().map(std::path::Path::new), Some(std::path::Path::new("/wts/one-abc/web")));
-        assert_eq!(row.branch.as_deref(), Some("harness/x-abc"));
+        assert_eq!(row.branch.as_deref(), Some("tilde/x-abc"));
         assert_eq!(row.project_path, "/one/web");
 
         let open = pr(4, "open");
@@ -1621,6 +1634,37 @@ mod tests {
         assert_eq!(store.session("s1").unwrap().unwrap().former_paths, ["/old/app", "/new/app"]);
         assert_eq!(swap_root("/old/app/x.md", "/old/app/", "/new/app"), Some("/new/app/x.md".to_string()));
         assert_eq!(swap_root("/old/application/x.md", "/old/app", "/new/app"), None);
+    }
+
+    #[test]
+    fn a_note_for_every_chat_reaches_each_one_after_what_was_waiting() {
+        let store = Store::in_memory();
+        store.touch_session("s1", "/p", "hi", "default", "default").unwrap();
+        store.touch_session("s2", "/p", "hi", "default", "default").unwrap();
+        store.add_pending_note("s1", "The folder moved.").unwrap();
+        store.add_pending_note_to_all("Renamed.").unwrap();
+        assert_eq!(store.take_pending_note("s1").unwrap().as_deref(), Some("The folder moved.\n\nRenamed."));
+        assert_eq!(store.take_pending_note("s2").unwrap().as_deref(), Some("Renamed."));
+    }
+
+    #[test]
+    fn a_database_keeps_the_file_name_it_was_made_with() {
+        let dir = std::env::temp_dir().join(format!("tilde-store-test-{}", uuid::Uuid::new_v4()));
+        // A new install.
+        Store::open(&dir).unwrap().set_setting("made", "new").unwrap();
+        assert!(dir.join("tilde.db").is_file());
+        assert!(!dir.join("harness.db").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // One made when the app was called Harness is opened where it is.
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let old = Store::with(Connection::open(dir.join("harness.db")).unwrap()).unwrap();
+            old.set_setting("made", "old").unwrap();
+        }
+        assert_eq!(Store::open(&dir).unwrap().setting("made").as_deref(), Some("old"));
+        assert!(!dir.join("tilde.db").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

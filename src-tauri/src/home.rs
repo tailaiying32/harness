@@ -1,11 +1,11 @@
 //! Where the app keeps what the user might read: one folder in their home
-//! directory, `~/.harness`, split by project. A project's docs are shared by
+//! directory, `~/.tilde`, split by project. A project's docs are shared by
 //! all its chats and worktrees, and each chat's notes and own docs sit under
 //! its project. Nothing here is inside a repo, so git never sees it and every
 //! worktree of a project sees the same files.
 //!
 //! ```text
-//! ~/.harness/
+//! ~/.tilde/
 //!   preferences.md                    the user's working preferences, for every agent
 //!   projects/<key>/docs/              the project's docs
 //!   projects/<key>/memory/            the project's memory, for every agent
@@ -24,6 +24,69 @@ use std::path::{Path, PathBuf};
 pub fn user_home() -> Option<PathBuf> {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(var).map(PathBuf::from)
+}
+
+/// A setting read from the environment, named `TILDE_<name>`. The app was
+/// called Harness until 2026-11-21, so `HARNESS_<name>` is still read when
+/// the new name isn't set: a script or test copy set up before the rename
+/// must keep pointing at its own folders, never fall through to the real ones.
+pub fn app_env(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(format!("TILDE_{name}")).or_else(|| std::env::var_os(format!("HARNESS_{name}")))
+}
+
+/// `app_env`, as text. None when unset or not valid text.
+pub fn app_env_text(name: &str) -> Option<String> {
+    app_env(name).and_then(|value| value.into_string().ok())
+}
+
+/// The app's data folder inside `base` (the system's folder for app data):
+/// the one made when the app was called Harness, if it is there, so its saved
+/// chats and worktrees stay where they are; else `Tilde`.
+pub fn data_folder(base: &Path) -> PathBuf {
+    let old = base.join("com.harness.app");
+    if old.is_dir() { old } else { base.join("Tilde") }
+}
+
+/// The home folder inside the user's home directory, `.tilde`. The app kept
+/// it at `.harness` before it was renamed: that folder is moved once, and a
+/// link is left at the old path so paths saved in chats, memory and docs
+/// still open, and an older build still running finds its files. Returns the
+/// folder to use: the old one, for this run, if it couldn't be moved, so
+/// nothing is split in two.
+pub fn move_old_home(user_home: &Path) -> PathBuf {
+    let (old, new) = (user_home.join(".harness"), user_home.join(".tilde"));
+    let old_is_folder = std::fs::symlink_metadata(&old).is_ok_and(|m| m.is_dir());
+    if new.exists() || !old_is_folder {
+        return new;
+    }
+    if let Err(e) = std::fs::rename(&old, &new) {
+        eprintln!("tilde: couldn't move {} to {}: {e}", old.display(), new.display());
+        return old;
+    }
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&new, &old);
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_dir(&new, &old);
+    if let Err(e) = linked {
+        eprintln!("tilde: couldn't leave a link at {}: {e}", old.display());
+    }
+    new
+}
+
+/// Writes a small command file, if it isn't there as it should be, and makes it runnable.
+fn write_command(path: &Path, text: &str) -> Result<(), String> {
+    if std::fs::read_to_string(path).ok().as_deref() != Some(text) {
+        if let Some(folder) = path.parent() {
+            std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(path, text).map_err(|e| e.to_string())?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// The most of the preferences file an agent is given, in characters.
@@ -50,20 +113,26 @@ impl Home {
         Self { root, claude_projects: None }
     }
 
+    /// The home folder itself.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// With Claude Code's own project folders at `dir`.
     pub fn with_claude_projects(mut self, dir: PathBuf) -> Self {
         self.claude_projects = Some(dir);
         self
     }
 
-    /// The folder to use: `HARNESS_HOME` when set; else, when the data folder
-    /// was set by `HARNESS_DATA_DIR`, a folder inside it, so a test or a test
-    /// copy of the app never touches the real one; else `~/.harness`.
+    /// The folder to use: `TILDE_HOME` when set; else, when the data folder
+    /// was set by `TILDE_DATA_DIR`, a folder inside it, so a test or a test
+    /// copy of the app never touches the real one; else `~/.tilde`, after
+    /// moving an older `~/.harness` there (`move_old_home`).
     pub fn resolve(data_dir: &Path) -> Self {
-        let own_data = std::env::var_os("HARNESS_DATA_DIR").is_some();
-        let home = match (std::env::var_os("HARNESS_HOME"), user_home().filter(|_| !own_data)) {
+        let own_data = app_env("DATA_DIR").is_some();
+        let home = match (app_env("HOME"), user_home().filter(|_| !own_data)) {
             (Some(root), _) => Self::new(PathBuf::from(root)),
-            (None, Some(home)) => Self::new(home.join(".harness")),
+            (None, Some(home)) => Self::new(move_old_home(&home)),
             (None, None) => Self::new(data_dir.join("home")),
         };
         let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
@@ -87,45 +156,49 @@ impl Home {
         self.root.join("bin")
     }
 
-    /// The full path of `harness-tab`, the command an agent runs to open a
+    /// The full path of `tilde-tab`, the command an agent runs to open a
     /// terminal tab (see `write_tab_command`).
     pub fn tab_command(&self) -> PathBuf {
-        self.bin_dir().join(if cfg!(windows) { "harness-tab.cmd" } else { "harness-tab" })
+        self.bin_dir().join(if cfg!(windows) { "tilde-tab.cmd" } else { "tilde-tab" })
     }
 
-    /// Writes `harness-tab`, if it isn't there as it should be. It holds no
-    /// path or port: each chat process gets its own `HARNESS_TAB_URL`, so the
+    /// Writes `tilde-tab`, if it isn't there as it should be. It holds no
+    /// path or port: each chat process gets its own `TILDE_TAB_URL`, so the
     /// script never goes stale. It posts its arguments as one command line;
-    /// curl prints Harness's answer, and fails with it when Harness refused.
+    /// curl prints Tilde's answer, and fails with it when Tilde refused.
     pub fn write_tab_command(&self) -> Result<(), String> {
         let path = self.tab_command();
         let text = if cfg!(windows) {
-            // One quoted argument (`harness-tab.cmd "npm run dev"`, as agents
+            // One quoted argument (`tilde-tab.cmd "npm run dev"`, as agents
             // are told) is taken without its quotes; several bare words are
             // joined as typed. Quoting `%*` instead split the quoted form into
             // words, which curl took for URLs. Tested from Git Bash and
             // PowerShell, with `&` inside the command too.
             "@echo off\r\n\
 setlocal DisableDelayedExpansion\r\n\
-if \"%HARNESS_TAB_URL%\"==\"\" (echo harness-tab: only works inside a Harness chat 1>&2 & exit /b 1)\r\n\
-if \"%~1\"==\"\" (echo usage: harness-tab \"command\" 1>&2 & exit /b 2)\r\n\
+if \"%TILDE_TAB_URL%\"==\"\" (echo tilde-tab: only works inside a Tilde chat 1>&2 & exit /b 1)\r\n\
+if \"%~1\"==\"\" (echo usage: tilde-tab \"command\" 1>&2 & exit /b 2)\r\n\
 if \"%~2\"==\"\" (set \"HT=%~1\") else (set \"HT=%*\")\r\n\
-curl.exe -sS --fail-with-body --max-time 20 --data-binary \"%HT%\" \"%HARNESS_TAB_URL%\"\r\n"
+curl.exe -sS --fail-with-body --max-time 20 --data-binary \"%HT%\" \"%TILDE_TAB_URL%\"\r\n"
         } else {
             "#!/bin/sh\n\
-# Opens a tab in Harness's side-panel terminal and runs the command there.\n\
-[ -n \"$HARNESS_TAB_URL\" ] || { echo \"harness-tab: only works inside a Harness chat\" >&2; exit 1; }\n\
-[ $# -gt 0 ] || { echo 'usage: harness-tab \"<command>\"' >&2; exit 2; }\n\
-exec curl -sS --fail-with-body --max-time 20 --data-binary \"$*\" \"$HARNESS_TAB_URL\"\n"
+# Opens a tab in Tilde's side-panel terminal and runs the command there.\n\
+[ -n \"$TILDE_TAB_URL\" ] || { echo \"tilde-tab: only works inside a Tilde chat\" >&2; exit 1; }\n\
+[ $# -gt 0 ] || { echo 'usage: tilde-tab \"<command>\"' >&2; exit 2; }\n\
+exec curl -sS --fail-with-body --max-time 20 --data-binary \"$*\" \"$TILDE_TAB_URL\"\n"
         };
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
-            std::fs::create_dir_all(self.bin_dir()).map_err(|e| e.to_string())?;
-            std::fs::write(&path, text).map_err(|e| e.to_string())?;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+        write_command(&path, text)?;
+        // The command's name before the app was renamed. A chat begun then may
+        // still call it, so where it exists it now passes its arguments on.
+        // Never made anew.
+        let old = self.bin_dir().join(if cfg!(windows) { "harness-tab.cmd" } else { "harness-tab" });
+        if old.exists() {
+            let pass_on = if cfg!(windows) {
+                "@echo off\r\n\"%~dp0tilde-tab.cmd\" %*\r\n"
+            } else {
+                "#!/bin/sh\n# The old name of tilde-tab.\nexec \"$(dirname \"$0\")/tilde-tab\" \"$@\"\n"
+            };
+            write_command(&old, pass_on)?;
         }
         Ok(())
     }
@@ -144,19 +217,19 @@ exec curl -sS --fail-with-body --max-time 20 --data-binary \"$*\" \"$HARNESS_TAB
     pub fn write_shell_hook(&self) -> Result<(), String> {
         let dir = self.zsh_hook_dir();
         let path = dir.join(".zshenv");
-        let text = "# Written by Harness; changes are overwritten.
+        let text = "# Written by Tilde; changes are overwritten.
 # A terminal tab an agent opened starts zsh here, so the tab can tell
 # whether the last command failed. Your own startup files load as usual.
-if [[ -n ${HARNESS_USER_ZDOTDIR+x} ]]; then
-  export ZDOTDIR=$HARNESS_USER_ZDOTDIR
+if [[ -n ${TILDE_USER_ZDOTDIR+x} ]]; then
+  export ZDOTDIR=$TILDE_USER_ZDOTDIR
 else
   unset ZDOTDIR
 fi
-unset HARNESS_USER_ZDOTDIR
+unset TILDE_USER_ZDOTDIR
 [[ -r ${ZDOTDIR:-$HOME}/.zshenv ]] && source ${ZDOTDIR:-$HOME}/.zshenv
 if [[ -o interactive ]]; then
-  __harness_status() { printf '\\033]7718;%s\\007' $? }
-  precmd_functions=(__harness_status $precmd_functions)
+  __tilde_status() { printf '\\033]7718;%s\\007' $? }
+  precmd_functions=(__tilde_status $precmd_functions)
 fi
 ";
         if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
@@ -199,7 +272,7 @@ fi
         let target = std::fs::canonicalize(&path).unwrap_or(path);
         let folder = target.parent().ok_or("The preferences file has no folder.")?;
         std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
-        let tmp = folder.join(".preferences.md.harness-save");
+        let tmp = folder.join(".preferences.md.tilde-save");
         let saved = std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &target));
         if saved.is_err() {
             let _ = std::fs::remove_file(&tmp);
@@ -235,7 +308,7 @@ fi
             let from = self.claude_projects.as_ref().map(|dir| dir.join(Self::key(project_path)).join("memory"));
             if let Some(from) = from.filter(|from| from.join("MEMORY.md").is_file()) {
                 if let Err(e) = copy_folder(&from, &memory) {
-                    eprintln!("harness: couldn't copy the memory in {}: {e}", from.display());
+                    eprintln!("tilde: couldn't copy the memory in {}: {e}", from.display());
                 }
             }
         }
@@ -362,7 +435,7 @@ mod tests {
 
     #[test]
     fn a_project_is_named_from_its_path() {
-        assert_eq!(Home::key("/Users/me/tailai/harness"), "-Users-me-tailai-harness");
+        assert_eq!(Home::key("/Users/me/tailai/tilde"), "-Users-me-tailai-tilde");
         assert_eq!(Home::key(" /Users/me/my app_v2.0/ "), "-Users-me-my-app-v2-0");
         assert_eq!(Home::key(r"C:\code\app"), "C--code-app");
     }
@@ -370,8 +443,8 @@ mod tests {
     /// The real script, run by a shell against the app's real route.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn harness_tab_reaches_the_app_and_prints_its_answer() {
-        let dir = std::env::temp_dir().join(format!("harness-home-test-{}", uuid::Uuid::new_v4()));
+    async fn tilde_tab_reaches_the_app_and_prints_its_answer() {
+        let dir = std::env::temp_dir().join(format!("tilde-home-test-{}", uuid::Uuid::new_v4()));
         let home = Home::new(dir.clone());
         home.write_tab_command().unwrap();
         home.write_tab_command().unwrap();
@@ -384,9 +457,9 @@ mod tests {
         let out = tokio::task::spawn_blocking(move || {
             let go = |args: &[&str], url: Option<&str>| {
                 let mut cmd = std::process::Command::new(&script);
-                cmd.args(args).env_remove("HARNESS_TAB_URL");
+                cmd.args(args).env_remove("TILDE_TAB_URL");
                 if let Some(url) = url {
-                    cmd.env("HARNESS_TAB_URL", url);
+                    cmd.env("TILDE_TAB_URL", url);
                 }
                 cmd.output().unwrap()
             };
@@ -404,7 +477,100 @@ mod tests {
         assert!(!out.2.status.success());
         assert!(String::from_utf8_lossy(&out.2.stdout).contains("Refused."), "{:?}", out.2);
         assert!(!out.3.status.success());
-        assert!(String::from_utf8_lossy(&out.3.stderr).contains("only works inside a Harness chat"));
+        assert!(String::from_utf8_lossy(&out.3.stderr).contains("only works inside a Tilde chat"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tilde-home-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_old_home_folder_moves_once_and_leaves_a_link() {
+        let user = scratch();
+        let (old, new) = (user.join(".harness"), user.join(".tilde"));
+        std::fs::create_dir_all(old.join("projects")).unwrap();
+        std::fs::write(old.join("preferences.md"), "be brief").unwrap();
+
+        assert_eq!(move_old_home(&user), new);
+        assert_eq!(std::fs::read_to_string(new.join("preferences.md")).unwrap(), "be brief");
+        // The old path still opens the same files.
+        #[cfg(unix)]
+        {
+            assert!(std::fs::symlink_metadata(&old).unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read_to_string(old.join("preferences.md")).unwrap(), "be brief");
+        }
+        // The next start changes nothing.
+        assert_eq!(move_old_home(&user), new);
+        assert!(new.join("projects").is_dir());
+        let _ = std::fs::remove_dir_all(user);
+    }
+
+    #[test]
+    fn a_new_install_gets_the_new_home_folder_and_nothing_is_moved() {
+        let user = scratch();
+        assert_eq!(move_old_home(&user), user.join(".tilde"));
+        assert!(!user.join(".harness").exists());
+        let _ = std::fs::remove_dir_all(user);
+    }
+
+    #[test]
+    fn two_home_folders_are_both_left_alone() {
+        let user = scratch();
+        let (old, new) = (user.join(".harness"), user.join(".tilde"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("kept.md"), "old").unwrap();
+
+        assert_eq!(move_old_home(&user), new);
+        assert_eq!(std::fs::read_to_string(old.join("kept.md")).unwrap(), "old");
+        assert!(!new.join("kept.md").exists());
+        let _ = std::fs::remove_dir_all(user);
+    }
+
+    #[test]
+    fn the_data_folder_stays_where_an_older_build_made_it() {
+        let base = scratch();
+        assert_eq!(data_folder(&base), base.join("Tilde"));
+        std::fs::create_dir_all(base.join("com.harness.app")).unwrap();
+        assert_eq!(data_folder(&base), base.join("com.harness.app"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn a_setting_is_read_under_its_new_name_then_its_old_one() {
+        // Names no other test or run uses, since the environment is shared.
+        assert_eq!(app_env("RENAME_TEST_UNSET"), None);
+        // SAFETY: only this test reads or writes these two names.
+        unsafe { std::env::set_var("HARNESS_RENAME_TEST", "old") };
+        assert_eq!(app_env_text("RENAME_TEST").as_deref(), Some("old"));
+        unsafe { std::env::set_var("TILDE_RENAME_TEST", "new") };
+        assert_eq!(app_env_text("RENAME_TEST").as_deref(), Some("new"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_old_tab_command_passes_on_to_the_new_one_where_it_exists() {
+        let dir = scratch();
+        let home = Home::new(dir.clone());
+        home.write_tab_command().unwrap();
+        let old = home.bin_dir().join("harness-tab");
+        // Never made on a new install.
+        assert!(!old.exists());
+
+        // As a build before the rename left it.
+        std::fs::write(&old, "#!/bin/sh\necho stale\n").unwrap();
+        home.write_tab_command().unwrap();
+        let run = |script: &Path| {
+            std::process::Command::new(script).arg("npm run dev").env_remove("TILDE_TAB_URL").output().unwrap()
+        };
+        let (through_old, direct) = (run(&old), run(&home.tab_command()));
+        // Outside a chat both refuse the same way: the old name reached the new command.
+        assert!(!through_old.status.success());
+        assert_eq!(through_old.stderr, direct.stderr);
+        assert!(String::from_utf8_lossy(&through_old.stderr).contains("only works inside a Tilde chat"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -419,7 +585,7 @@ mod tests {
 
     #[test]
     fn what_is_kept_for_a_project_follows_its_folder() {
-        let dir = std::env::temp_dir().join(format!("harness-home-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("tilde-home-test-{}", uuid::Uuid::new_v4()));
         let home = Home::new(dir.clone());
         let put = |path: PathBuf, text: &str| {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -463,7 +629,7 @@ mod tests {
 
     #[test]
     fn preferences_are_the_files_text_or_nothing() {
-        let dir = std::env::temp_dir().join(format!("harness-home-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("tilde-home-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let home = Home::new(dir.clone());
         assert_eq!(home.preferences(), None);
@@ -479,7 +645,7 @@ mod tests {
 
     #[test]
     fn preferences_are_edited_as_the_whole_file() {
-        let dir = std::env::temp_dir().join(format!("harness-home-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("tilde-home-test-{}", uuid::Uuid::new_v4()));
         let home = Home::new(dir.join("home"));
         // No file, and no home folder yet: nothing to show, and saving makes both.
         assert_eq!(home.read_preferences().unwrap(), "");
@@ -496,7 +662,7 @@ mod tests {
 
     #[test]
     fn a_projects_memory_starts_as_a_copy_of_what_claude_code_kept() {
-        let dir = std::env::temp_dir().join(format!("harness-home-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("tilde-home-test-{}", uuid::Uuid::new_v4()));
         let theirs = dir.join("claude/projects/-w-app/memory");
         std::fs::create_dir_all(theirs.join("more")).unwrap();
         std::fs::write(theirs.join("MEMORY.md"), "- [A](a.md) — a fact").unwrap();

@@ -1,5 +1,5 @@
 <script lang="ts">
-  // The user's working preferences file (~/.harness/preferences.md), which
+  // The user's working preferences file (~/.tilde/preferences.md), which
   // every agent is given. Edited in place and saved as you type; chats started
   // after that get the new text.
   import { onDestroy } from "svelte";

@@ -29,7 +29,7 @@
   --foot-y: calc(var(--pad-y) * 0.7);
   --foot-gap: calc(var(--gap) * 0.7);
 
-  /* Harness Dark, so the first paint is right before the theme is applied. */
+  /* Tilde Dark, so the first paint is right before the theme is applied. */
   --bg: #111210;
   --panel: #1a1b17;
   --fg: #cfccc2;

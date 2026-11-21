@@ -119,7 +119,7 @@ impl AgentAdapter for AntigravityAdapter {
     /// has none) and only show once a model is picked, so each model in
     /// `efforts_for` (all if None) is picked in turn.
     fn list_models(&self, binary: &Path, efforts_for: Option<&[String]>) -> Result<Vec<ModelInfo>, String> {
-        let folder = std::env::temp_dir().join("harness-antigravity-models");
+        let folder = std::env::temp_dir().join("tilde-antigravity-models");
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         let mut rpc = SyncRpc::start(binary, &["acp"], LABEL, &folder)?;
         let deadline = Instant::now() + LIST_TIMEOUT;
@@ -197,7 +197,7 @@ impl AgentAdapter for AntigravityAdapter {
             json!({
                 "protocolVersion": 1,
                 "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false },
-                "clientInfo": { "name": "harness", "version": env!("CARGO_PKG_VERSION") },
+                "clientInfo": { "name": "tilde", "version": env!("CARGO_PKG_VERSION") },
             }),
             deadline,
         )?;
@@ -587,17 +587,17 @@ mod tests {
     const LS: &str = r#"{"sessionUpdate":"tool_call","toolCallId":"call_1","name":"run_command","args":{"CommandLine":"ls -la","WaitMsBeforeAsync":5000,"toolSummary":"List directory contents"},"status":"in_progress","kind":"execute","title":"ls -la","rawInput":{"CommandLine":"ls -la","WaitMsBeforeAsync":5000,"toolSummary":"List directory contents"}}"#;
     const READ: &str = r#"{"sessionUpdate":"tool_call","toolCallId":"call_2","name":"read_file","status":"in_progress","kind":"read","title":"File hello.txt","locations":[{"path":"/w/hello.txt"}],"rawInput":{"Path":"/w/hello.txt"}}"#;
     const WRITE: &str = r#"{"sessionUpdate":"tool_call","toolCallId":"call_3","name":"write_file","status":"in_progress","kind":"edit","title":"File out.txt","locations":[{"path":"/w/out.txt"}],"rawInput":{"Content":"hi","Path":"/w/out.txt"}}"#;
-    const MCP: &str = r#"{"sessionUpdate":"tool_call","toolCallId":"call_4","name":"mcp_harness_worktree_ask","status":"in_progress","kind":"other","title":"Run mcp_harness_worktree_ask","rawInput":{"name":"fix it","toolSummary":"Ask for a worktree"}}"#;
+    const MCP: &str = r#"{"sessionUpdate":"tool_call","toolCallId":"call_4","name":"mcp_tilde_worktree_ask","status":"in_progress","kind":"other","title":"Run mcp_tilde_worktree_ask","rawInput":{"name":"fix it","toolSummary":"Ask for a worktree"}}"#;
     const PLAN: &str = r##"{"sessionUpdate":"tool_call","toolCallId":"call_5","name":"write_file","status":"in_progress","kind":"edit","title":"File readme_plan.md","rawInput":{"ArtifactMetadata":{"RequestFeedback":true,"Summary":"Plan","UserFacing":true},"Content":"# Plan\n- do it","Path":"/brain/s/readme_plan.md"}}"##;
 
     #[test]
     fn tools_get_the_names_the_window_words() {
-        let own = vec!["harness_worktree".to_string(), "harness_new_chats".to_string()];
+        let own = vec!["tilde_worktree".to_string(), "tilde_new_chats".to_string()];
         let cases = [
             (LS, "Bash", json!({ "command": "ls -la" })),
             (READ, "Read", json!({ "file_path": "/w/hello.txt" })),
             (WRITE, "Write", json!({ "file_path": "/w/out.txt" })),
-            (MCP, "mcp__harness_worktree__ask", json!({ "name": "fix it" })),
+            (MCP, "mcp__tilde_worktree__ask", json!({ "name": "fix it" })),
             (PLAN, "ExitPlanMode", json!({ "plan": "# Plan\n- do it", "planFilePath": "/brain/s/readme_plan.md" })),
         ];
         for (line, name, input) in cases {
@@ -618,18 +618,18 @@ mod tests {
             ("Agent".to_string(), json!({ "description": "File Reader", "prompt": "Read hello.txt", "subagent_type": "research" }))
         );
         // Someone else's MCP server keeps its own name.
-        let other = MCP.replace("mcp_harness_worktree_ask", "mcp_github_list_issues");
+        let other = MCP.replace("mcp_tilde_worktree_ask", "mcp_github_list_issues");
         assert_eq!(name_and_input(&tool(&other), &own).0, "mcp__github_list_issues");
     }
 
     #[test]
     fn the_apps_own_tools_are_known_by_their_whole_server_name() {
-        let own = vec!["harness_new_chats".to_string(), "harness_chats".to_string()];
-        assert_eq!(own_parts("mcp_harness_new_chats_start", &own), Some(("harness_new_chats", "start")));
-        assert_eq!(own_parts("mcp_harness_chats_read", &own), Some(("harness_chats", "read")));
-        assert_eq!(own_parts("mcp_harness_chatsy_read", &own), None);
-        assert!(own_tool(&tool(MCP), &["harness_worktree".to_string()]));
-        assert!(!own_tool(&tool(LS), &["harness_worktree".to_string()]));
+        let own = vec!["tilde_new_chats".to_string(), "tilde_chats".to_string()];
+        assert_eq!(own_parts("mcp_tilde_new_chats_start", &own), Some(("tilde_new_chats", "start")));
+        assert_eq!(own_parts("mcp_tilde_chats_read", &own), Some(("tilde_chats", "read")));
+        assert_eq!(own_parts("mcp_tilde_chatsy_read", &own), None);
+        assert!(own_tool(&tool(MCP), &["tilde_worktree".to_string()]));
+        assert!(!own_tool(&tool(LS), &["tilde_worktree".to_string()]));
     }
 
     #[test]
@@ -705,7 +705,7 @@ mod tests {
 
     #[test]
     fn a_conversation_is_copied_under_a_new_id_that_its_database_names_and_forgotten_whole() {
-        let data = std::env::temp_dir().join(format!("harness-agy-copy-{}", uuid::Uuid::new_v4()));
+        let data = std::env::temp_dir().join(format!("tilde-agy-copy-{}", uuid::Uuid::new_v4()));
         for folder in ["conversations", "annotations", "brain/c-1"] {
             std::fs::create_dir_all(data.join(folder)).unwrap();
         }
@@ -744,7 +744,7 @@ mod tests {
 
     #[test]
     fn a_conversation_with_only_a_database_still_copies_and_a_bad_one_leaves_nothing() {
-        let data = std::env::temp_dir().join(format!("harness-agy-copy-{}", uuid::Uuid::new_v4()));
+        let data = std::env::temp_dir().join(format!("tilde-agy-copy-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(data.join("conversations")).unwrap();
         let db = rusqlite::Connection::open(data.join("conversations/c-1.db")).unwrap();
         db.execute_batch("CREATE TABLE trajectory_meta (trajectory_id TEXT, cascade_id TEXT); INSERT INTO trajectory_meta VALUES ('t', 'c-1');")

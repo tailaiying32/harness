@@ -41,13 +41,13 @@ export type Theme = {
 
 export const themes: Theme[] = [
   {
-    id: "harness-dark", name: "Harness Dark", dark: true,
+    id: "tilde-dark", name: "Tilde Dark", dark: true,
     bg: "#111210", panel: "#1a1b17", fg: "#cfccc2", bright: "#f1eee4", dim: "#7d7a70", faint: "#4d4b43",
     line: "#24251f", accent: "#d9a35b", ok: "#8fae7e", bad: "#d47766", blue: "#7fa9d6", yellow: "#d8bd66", purple: "#b392c9",
     syn: { kw: "#d9a35b", fn: "#9db7c9", str: "#8fae7e", type: "#c9a8c4", num: "#d48a6a", comment: "#6b685f" },
   },
   {
-    id: "harness-light", name: "Harness Light", dark: false,
+    id: "tilde-light", name: "Tilde Light", dark: false,
     bg: "#fcfcfb", panel: "#f1f1ef", fg: "#3a3832", bright: "#191813", dim: "#858480", faint: "#b7b6b2",
     line: "#e6e6e3", accent: "#a8691c", ok: "#52733f", bad: "#b0463a", blue: "#2f6aa8", yellow: "#94740c", purple: "#7a4f9a",
     syn: { kw: "#a8691c", fn: "#2f6480", str: "#52733f", type: "#8a4f86", num: "#b0502a", comment: "#9a978b" },
@@ -167,8 +167,8 @@ export const themes: Theme[] = [
 export const sizes = ["compact", "regular", "roomy"] as const;
 export type Size = (typeof sizes)[number];
 
-export const DEFAULT_DARK_THEME = "harness-dark";
-export const DEFAULT_LIGHT_THEME = "harness-light";
+export const DEFAULT_DARK_THEME = "tilde-dark";
+export const DEFAULT_LIGHT_THEME = "tilde-light";
 
 /** Which of the two picked themes shows: always one, or whichever the system is in. */
 export const appearances = ["auto", "light", "dark"] as const;
@@ -194,7 +194,7 @@ export function shownTheme(appearance: Appearance, darkTheme: string, lightTheme
 
 /** A palette's other half, for filling in the side that had no pick before there were two. */
 const pairs: [dark: string, light: string][] = [
-  ["harness-dark", "harness-light"],
+  ["tilde-dark", "tilde-light"],
   ["solarized-dark", "solarized-light"],
   ["gruvbox-dark", "gruvbox-light"],
   ["catppuccin-mocha", "catppuccin-latte"],
@@ -211,7 +211,7 @@ export function currentTheme(): Theme {
 }
 
 /** Told when the theme or text size changes, for what isn't drawn with CSS (the terminal). */
-export const LOOK_CHANGED = "harness-look";
+export const LOOK_CHANGED = "tilde-look";
 
 /** Switching a theme only sets custom properties; nothing re-renders. */
 export function applyTheme(id: string): void {
@@ -251,7 +251,7 @@ export function applySize(size: Size): void {
 /** An icon on offer: its colours, and the side of the picker it sits on. */
 export type AppIcon = IconColours & { id: string; name: string; dark: boolean };
 /** The app's own two first, then plain white on black and black on white, then one in each other theme's colours. */
-const own = (t: Theme) => t.id === "harness-dark" || t.id === "harness-light";
+const own = (t: Theme) => t.id === "tilde-dark" || t.id === "tilde-light";
 export const appIcons: AppIcon[] = [
   ...themes.filter(own),
   // Off-white and dark grey: pure white on black, or black on white, glares.
@@ -260,7 +260,7 @@ export const appIcons: AppIcon[] = [
   ...themes.filter((t) => !own(t)),
 ];
 /** The icon the app ships with. Any other is put up while the app runs. */
-export const DEFAULT_APP_ICON = "harness-dark";
+export const DEFAULT_APP_ICON = "tilde-dark";
 /** Picking an icon changes the Dock's, which only a Mac has so far. */
 export const APP_ICONS = typeof navigator !== "undefined" && /Mac/.test(navigator.userAgent);
 
@@ -373,7 +373,7 @@ const modes = ["default", "acceptEdits", "auto"];
 // Stored in the window's own storage until there is a settings page.
 export function loadPrefs(): Prefs {
   try {
-    const saved = JSON.parse(localStorage.getItem("harness.prefs") ?? "{}") as Partial<Prefs> & { theme?: string };
+    const saved = JSON.parse(localStorage.getItem("tilde.prefs") ?? "{}") as Partial<Prefs> & { theme?: string };
     // Before there were two picks there was one `theme`: it becomes the pick
     // for its side, and its other half (or the default) the pick for the other.
     const old = themes.find((t) => t.id === saved.theme);
@@ -437,7 +437,7 @@ export function moveProjectPrefs(from: string, to: string): void {
 /** Saves the given choices, leaving the others as they were. */
 export function savePrefs(changed: Partial<Prefs>): void {
   try {
-    localStorage.setItem("harness.prefs", JSON.stringify({ ...loadPrefs(), ...changed }));
+    localStorage.setItem("tilde.prefs", JSON.stringify({ ...loadPrefs(), ...changed }));
   } catch {
     // Storage can be unavailable; the choice then lasts for this run only.
   }

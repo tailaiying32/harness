@@ -90,7 +90,7 @@ pub struct SmallAsk {
 /// the agent's refused. `forget` deletes the conversation once the agent has
 /// stopped.
 pub fn small_answer(binary: &Path, ask: &SmallAsk, prompt: &str, forget: impl Fn(&str)) -> Result<String, String> {
-    let folder = std::env::temp_dir().join("harness-labels");
+    let folder = std::env::temp_dir().join("tilde-labels");
     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let mut rpc = SyncRpc::start(binary, &["acp"], ask.label, &folder)?;
     let deadline = Instant::now() + ask.timeout;
@@ -248,7 +248,7 @@ impl SyncRpc {
             json!({
                 "protocolVersion": 1,
                 "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false, "_meta": client_meta },
-                "clientInfo": { "name": "harness", "version": env!("CARGO_PKG_VERSION") },
+                "clientInfo": { "name": "tilde", "version": env!("CARGO_PKG_VERSION") },
             }),
             deadline,
         )?;

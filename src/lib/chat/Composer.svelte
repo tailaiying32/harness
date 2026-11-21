@@ -43,7 +43,7 @@
     /** The agents found on this machine, Claude Code first. */
     agents: AgentId[];
     focus?: number;
-    /** Starts a new chat in this one's folder: Harness's `/clear`. */
+    /** Starts a new chat in this one's folder: Tilde's `/clear`. */
     onNew?: () => void;
     /** Whether dropped files land here now; not while something is drawn over the chat. */
     drops?: boolean;
@@ -430,7 +430,7 @@
   // click opens the chat, and the agent is sent the chat's ID to read it by.
   //
   // Typing / at the very start of the message lists the commands this chat's
-  // agent takes here, with Harness's skills, `/model` and `/clear`. A picked
+  // agent takes here, with Tilde's skills, `/model` and `/clear`. A picked
   // command is typed in as plain text. A command not in the list is still
   // sent as typed, unless it only works in the agent's own screen.
   //
@@ -513,7 +513,7 @@
       await apply({ from: at, to, insert, selStart: at + insert.length, selEnd: at + insert.length });
       return;
     }
-    if (picked.harness === "model") {
+    if (picked.tilde === "model") {
       // Take out what was typed (up to the end of the word) and open the menu.
       const word = chat.draft.slice(at).match(/^\S*\s?/)?.[0] ?? "";
       await apply({ from: at, to: at + word.length, insert: "", selStart: at, selEnd: at });
@@ -550,7 +550,7 @@
 
   async function send() {
     const text = chat.draft;
-    // `/model` is Harness's own: it opens the model menu, and nothing is sent.
+    // `/model` is Tilde's own: it opens the model menu, and nothing is sent.
     if (/^\/model(\s|$)/.test(text.trim())) {
       chat.draft = "";
       await tick();
@@ -558,7 +558,7 @@
       open = "model";
       return;
     }
-    // `/clear` (or `/new`) is Harness's own: a new chat in this folder.
+    // `/clear` (or `/new`) is Tilde's own: a new chat in this folder.
     if (/^\/(clear|new)$/.test(text.trim())) {
       chat.draft = "";
       await tick();

@@ -589,8 +589,8 @@
           items: current.items.map((item) => ({ ...item })),
           // Lookups of earlier chats: each call, and the title a read came back with.
           chats: current.items.flatMap((item) =>
-            item.type === "tool" && item.name.startsWith("mcp__harness_chats__")
-              ? [{ tool: item.name.slice("mcp__harness_chats__".length), input: item.input, title: item.chatTitle ?? null }]
+            item.type === "tool" && item.name.startsWith("mcp__tilde_chats__")
+              ? [{ tool: item.name.slice("mcp__tilde_chats__".length), input: item.input, title: item.chatTitle ?? null }]
               : [],
           ),
           panelView: current.panelView,

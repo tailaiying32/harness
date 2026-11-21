@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Harness",
+  "productName": "Tilde",
   "version": "0.1.0",
-  "identifier": "com.harness.app",
+  "identifier": "com.tailaiying.tilde",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Harness",
+        "title": "Tilde",
         "width": 1400,
         "height": 900,
         "backgroundColor": "#111210",

@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { iconSvg } from "../src/lib/appIcon.ts";
 
-// The icon the app ships with is Harness Dark's (see themes.ts).
+// The icon the app ships with is Tilde Dark's (see themes.ts).
 const colours = { bg: "#111210", accent: "#d9a35b", faint: "#4d4b43" };
 
 const root = fileURLToPath(new URL("..", import.meta.url));

@@ -29,10 +29,10 @@ const STDERR_TAIL_LINES: usize = 30;
 const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// The request ID of the context-usage question asked after each turn.
-const CONTEXT_REQUEST: &str = "harness-context-usage";
+const CONTEXT_REQUEST: &str = "tilde-context-usage";
 
 /// The request ID of the usage-limits question asked at start and after each turn.
-const USAGE_REQUEST: &str = "harness-usage";
+const USAGE_REQUEST: &str = "tilde-usage";
 
 /// Asks for the plan's usage limits: every limit, spent or not, without a
 /// model call (about 0.3 s on CLI 2.1.326). `rate_limit_event` only brings
@@ -80,7 +80,7 @@ fn usage_events(reply: &Value) -> Vec<AgentEvent> {
 }
 
 /// The start of a take-back request's ID; the message's ID follows.
-const WITHDRAW_REQUEST: &str = "harness-withdraw:";
+const WITHDRAW_REQUEST: &str = "tilde-withdraw:";
 
 /// Asks how full the context window is. "summary" answers from the last
 /// reply's usage without extra counting calls (about 20 ms on CLI 2.1.325).
@@ -1858,7 +1858,7 @@ mod tests {
         });
         let at = args.iter().position(|a| a == "--settings").unwrap();
         let settings: Value = serde_json::from_str(&args[at + 1]).unwrap();
-        assert_eq!(settings["permissions"]["allow"], json!(["mcp__harness_chats"]));
+        assert_eq!(settings["permissions"]["allow"], json!(["mcp__tilde_chats"]));
         let at = args.iter().position(|a| a == "--append-system-prompt").unwrap();
         assert!(args[at + 1].ends_with("read that chat by its ID."));
     }
@@ -2114,7 +2114,7 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
 
     #[test]
     fn titles_are_tidied() {
-        assert_eq!(clean_title("\n\"Plan harness worktree support.\"\nextra"), "Plan harness worktree support");
+        assert_eq!(clean_title("\n\"Plan tilde worktree support.\"\nextra"), "Plan tilde worktree support");
         assert_eq!(clean_title("**Fix login bug**"), "Fix login bug");
         assert_eq!(clean_title("   "), "");
     }
@@ -2227,7 +2227,7 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
 
     #[test]
     fn the_context_answer_keeps_only_what_takes_room() {
-        let reply = r#"{"type":"control_response","response":{"subtype":"success","request_id":"harness-context-usage","response":{"categories":[{"id":"system_prompt","name":"System prompt","tokens":3503,"kind":"used"},{"id":"mcp_tools_deferred","name":"MCP tools (deferred)","tokens":92263,"isDeferred":true,"kind":"deferred"},{"id":"messages","name":"Messages","tokens":18068,"kind":"used"},{"id":"skills","name":"Skills","tokens":0,"kind":"used"},{"id":"autocompact_buffer","name":"Autocompact buffer","tokens":33000,"kind":"buffer"},{"id":"free_space","name":"Free space","tokens":928620,"kind":"free"}],"totalTokens":38380,"maxTokens":1000000,"percentage":4}}}"#;
+        let reply = r#"{"type":"control_response","response":{"subtype":"success","request_id":"tilde-context-usage","response":{"categories":[{"id":"system_prompt","name":"System prompt","tokens":3503,"kind":"used"},{"id":"mcp_tools_deferred","name":"MCP tools (deferred)","tokens":92263,"isDeferred":true,"kind":"deferred"},{"id":"messages","name":"Messages","tokens":18068,"kind":"used"},{"id":"skills","name":"Skills","tokens":0,"kind":"used"},{"id":"autocompact_buffer","name":"Autocompact buffer","tokens":33000,"kind":"buffer"},{"id":"free_space","name":"Free space","tokens":928620,"kind":"free"}],"totalTokens":38380,"maxTokens":1000000,"percentage":4}}}"#;
         assert_eq!(
             events(reply, &Pending::default()),
             vec![AgentEvent::ContextUsage {
@@ -2240,7 +2240,7 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
             }]
         );
         // An older CLI without the question: no error shown to the user.
-        let refused = r#"{"type":"control_response","response":{"subtype":"error","request_id":"harness-context-usage","error":"Unsupported"}}"#;
+        let refused = r#"{"type":"control_response","response":{"subtype":"error","request_id":"tilde-context-usage","error":"Unsupported"}}"#;
         assert!(events(refused, &Pending::default()).is_empty());
     }
 
@@ -2566,7 +2566,7 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
     #[test]
     fn usage_question_reads_every_limit() {
         // As answered by CLI 2.1.326 on a Max plan (trimmed).
-        let reply = r#"{"type":"control_response","response":{"subtype":"success","request_id":"harness-usage","response":{"subscription_type":"max","rate_limits_available":true,"rate_limits":{"five_hour":null,"seven_day":{"utilization":37,"resets_at":"2026-11-23T21:59:59.999324+00:00"},"seven_day_opus":null,"seven_day_sonnet":null,"model_scoped":[{"display_name":"Fable","utilization":30,"resets_at":"2026-11-23T21:59:59.999588+00:00"}]}}}}"#;
+        let reply = r#"{"type":"control_response","response":{"subtype":"success","request_id":"tilde-usage","response":{"subscription_type":"max","rate_limits_available":true,"rate_limits":{"five_hour":null,"seven_day":{"utilization":37,"resets_at":"2026-11-23T21:59:59.999324+00:00"},"seven_day_opus":null,"seven_day_sonnet":null,"model_scoped":[{"display_name":"Fable","utilization":30,"resets_at":"2026-11-23T21:59:59.999588+00:00"}]}}}}"#;
         let got = events(reply, &Pending::default());
         assert_eq!(
             got,
@@ -2580,9 +2580,9 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
             ]
         );
         // No plan limits (an API key), or an older CLI's refusal: nothing, and no error.
-        let none = r#"{"type":"control_response","response":{"subtype":"success","request_id":"harness-usage","response":{"rate_limits_available":false}}}"#;
+        let none = r#"{"type":"control_response","response":{"subtype":"success","request_id":"tilde-usage","response":{"rate_limits_available":false}}}"#;
         assert!(events(none, &Pending::default()).is_empty());
-        let refused = r#"{"type":"control_response","response":{"subtype":"error","request_id":"harness-usage","error":"Unsupported"}}"#;
+        let refused = r#"{"type":"control_response","response":{"subtype":"error","request_id":"tilde-usage","error":"Unsupported"}}"#;
         assert!(events(refused, &Pending::default()).is_empty());
     }
 
@@ -2631,15 +2631,15 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
         let pending = Pending::default();
         let sent = Sent::default();
         sent.lock().unwrap().insert("m1".into());
-        let taken = r#"{"type":"control_response","response":{"subtype":"success","request_id":"harness-withdraw:m1","response":{"cancelled":true}}}"#;
+        let taken = r#"{"type":"control_response","response":{"subtype":"success","request_id":"tilde-withdraw:m1","response":{"cancelled":true}}}"#;
         assert_eq!(
             acknowledge(events(taken, &pending), &sent),
             vec![AgentEvent::MessageWithdrawn { id: "m1".into(), ok: true }]
         );
         assert!(sent.lock().unwrap().is_empty(), "no echo will come for it");
-        let late = r#"{"type":"control_response","response":{"subtype":"success","request_id":"harness-withdraw:m2","response":{"cancelled":false}}}"#;
+        let late = r#"{"type":"control_response","response":{"subtype":"success","request_id":"tilde-withdraw:m2","response":{"cancelled":false}}}"#;
         assert_eq!(events(late, &pending), vec![AgentEvent::MessageWithdrawn { id: "m2".into(), ok: false }]);
-        let refused = r#"{"type":"control_response","response":{"subtype":"error","request_id":"harness-withdraw:m3","error":"Unsupported"}}"#;
+        let refused = r#"{"type":"control_response","response":{"subtype":"error","request_id":"tilde-withdraw:m3","error":"Unsupported"}}"#;
         assert_eq!(events(refused, &pending), vec![AgentEvent::MessageWithdrawn { id: "m3".into(), ok: false }]);
     }
 
@@ -2763,7 +2763,7 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
 
     #[test]
     fn forgetting_a_session_removes_only_its_file() {
-        let dir = std::env::temp_dir().join(format!("harness-forget-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tilde-forget-{}", std::process::id()));
         let folder = dir.join("projects").join("-tmp-proj");
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("side-1.jsonl"), "x").unwrap();
@@ -2786,15 +2786,15 @@ they differ from your defaults, they win. Pass the ones that matter on to any he
     #[test]
     fn a_side_chat_given_the_chats_tool_may_use_it_without_asking() {
         let tools = vec![AppTools {
-            server: "harness_chats",
+            server: "tilde_chats",
             instruction: "Look up earlier chats.".into(),
             list: json!([]),
             call: Arc::new(|_, _| Box::pin(async { Ok(Vec::new()) })),
         }];
         let args = launch_args(&SpawnOptions { tools, side: Some(SideOptions::default()), ..bare_options() });
         let at = |flag: &str| args.iter().position(|a| a == flag).map(|i| args[i + 1].clone());
-        assert!(at("--mcp-config").unwrap().contains("harness_chats"));
-        assert_eq!(at("--allowedTools").as_deref(), Some("mcp__harness_chats"));
+        assert!(at("--mcp-config").unwrap().contains("tilde_chats"));
+        assert_eq!(at("--allowedTools").as_deref(), Some("mcp__tilde_chats"));
         assert_eq!(at("--tools").as_deref(), Some("Read,Grep,Glob"));
         assert!(args.contains(&"--strict-mcp-config".to_string()));
         assert!(at("--append-system-prompt").unwrap().contains("Look up earlier chats."));

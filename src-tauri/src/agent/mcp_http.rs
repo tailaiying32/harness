@@ -9,10 +9,10 @@
 //! refused with 405, which MCP clients accept. Tested with Cursor CLI
 //! 2026.11.13.
 //!
-//! It also answers the `harness-tab` command an agent runs in its shell (see
+//! It also answers the `tilde-tab` command an agent runs in its shell (see
 //! `terminal.rs`): a plain-text POST of a command line to `/tab/<token>`,
 //! answered in plain text. Each chat process gets its own token in
-//! `HARNESS_TAB_URL`.
+//! `TILDE_TAB_URL`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -27,10 +27,10 @@ use super::AppTools;
 
 /// Largest request body read, in bytes. Tool calls are small.
 const MAX_BODY: usize = 4 * 1024 * 1024;
-/// Longest command line `harness-tab` may send, in bytes.
+/// Longest command line `tilde-tab` may send, in bytes.
 const MAX_TAB_COMMAND: usize = 8 * 1024;
 
-/// Runs one `harness-tab` command line for a chat: the text for the agent,
+/// Runs one `tilde-tab` command line for a chat: the text for the agent,
 /// or why it couldn't.
 pub type TabRun = Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> + Send + Sync>;
 
@@ -56,7 +56,7 @@ fn server() -> Result<Arc<Server>, String> {
             let serving = server.clone();
             tauri::async_runtime::spawn(async move {
                 let Ok(listener) = TcpListener::from_std(listener) else {
-                    eprintln!("harness: the tool server couldn't start");
+                    eprintln!("tilde: the tool server couldn't start");
                     return;
                 };
                 while let Ok((stream, _)) = listener.accept().await {
@@ -104,10 +104,10 @@ pub fn open(tools: Vec<AppTools>) -> Result<Endpoint, String> {
     Ok(Endpoint { token, urls })
 }
 
-/// One chat process's `harness-tab` route, open while this is kept.
+/// One chat process's `tilde-tab` route, open while this is kept.
 pub struct TabEndpoint {
     token: String,
-    /// What `HARNESS_TAB_URL` is set to.
+    /// What `TILDE_TAB_URL` is set to.
     pub url: String,
 }
 
@@ -119,7 +119,7 @@ impl Drop for TabEndpoint {
     }
 }
 
-/// Answers `harness-tab` with `run` until the returned endpoint is dropped.
+/// Answers `tilde-tab` with `run` until the returned endpoint is dropped.
 pub fn open_tab(run: TabRun) -> Result<TabEndpoint, String> {
     let server = server()?;
     let token = uuid::Uuid::new_v4().simple().to_string();
@@ -128,7 +128,7 @@ pub fn open_tab(run: TabRun) -> Result<TabEndpoint, String> {
     Ok(TabEndpoint { token, url })
 }
 
-/// The `harness-tab` route a path names, if its token is live.
+/// The `tilde-tab` route a path names, if its token is live.
 fn tab_for(server: &Server, path: &str) -> Option<TabRun> {
     let token = path.strip_prefix("/tab/")?;
     server.tabs.lock().unwrap().get(token).cloned()
@@ -259,7 +259,7 @@ mod tests {
 
     fn echo() -> AppTools {
         AppTools {
-            server: "harness_echo",
+            server: "tilde_echo",
             instruction: String::new(),
             list: json!([{ "name": "echo", "inputSchema": { "type": "object" } }]),
             call: Arc::new(|_, args| Box::pin(async move { Ok(vec![json!({ "type": "text", "text": args["say"] })]) })),
@@ -290,7 +290,7 @@ mod tests {
     async fn tools_are_listed_and_called_over_http_until_the_endpoint_closes() {
         let endpoint = open(vec![echo()]).unwrap();
         let (name, url) = endpoint.urls[0].clone();
-        assert_eq!(name, "harness_echo");
+        assert_eq!(name, "tilde_echo");
 
         let (status, body) = post(&url, json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).await;
         assert_eq!(status, 200);
@@ -311,7 +311,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn harness_tab_posts_a_command_until_the_endpoint_closes() {
+    async fn tilde_tab_posts_a_command_until_the_endpoint_closes() {
         let run: TabRun = Arc::new(|command| {
             Box::pin(async move { if command == "bad" { Err("no".to_string()) } else { Ok(format!("ran {command}")) } })
         });

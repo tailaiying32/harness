@@ -1,18 +1,18 @@
 // The slash commands offered in the message box. Each agent reports its own
-// for a folder (see `list_commands` in the core); Harness adds its skills and
+// for a folder (see `list_commands` in the core); Tilde adds its skills and
 // `/model`, and hides the few that do nothing useful here or clash with the
 // app. The last lists are kept so the menu is full from the first `/` next
 // time; each is read again once per run.
 
 import { agentLabel, listCommands, listSkills, type AgentId, type CommandInfo, type SkillInfo } from "./ipc";
 
-/** A command in the menu. `harness` marks the app's own: `/model`, `/btw`, `/clear`, or one of its skills. */
-export type Command = CommandInfo & { harness?: "model" | "btw" | "clear" | "skill" };
+/** A command in the menu. `tilde` marks the app's own: `/model`, `/btw`, `/clear`, or one of its skills. */
+export type Command = CommandInfo & { tilde?: "model" | "btw" | "clear" | "skill" };
 
 /** Commands each agent lists that aren't offered. */
 const HIDDEN: Record<AgentId, Set<string>> = {
   "claude-code": new Set([
-    "model", // Harness's own `/model` opens the model menu instead
+    "model", // Tilde's own `/model` opens the model menu instead
     "effort", // the model menu sets effort
     "fast", // "not available in the Agent SDK"
     "clear", // starts a new session under the chat
@@ -25,7 +25,7 @@ const HIDDEN: Record<AgentId, Set<string>> = {
     "workflow-launch-exec", // server-launched sessions only
   ]),
   cursor: new Set([
-    "rename-chat", // Harness names the chat
+    "rename-chat", // Tilde names the chat
     "copy-request-id", // copies to the clipboard of Cursor's own screen
     "statusline", // the status line of Cursor's own screen
   ]),
@@ -109,26 +109,26 @@ const SCREEN_ONLY: Record<AgentId, Record<string, string>> = {
   },
 };
 
-/** Harness's `/clear` (or `/new`): a new chat in the same folder, as Cmd+N. */
+/** Tilde's `/clear` (or `/new`): a new chat in the same folder, as Cmd+N. */
 const CLEAR: Command = {
   name: "clear",
   description: "Start a new chat in this folder",
   hint: null,
   aliases: ["new"],
-  harness: "clear",
+  tilde: "clear",
 };
 
-const MODEL: Command = { name: "model", description: "Model and effort", hint: null, aliases: [], harness: "model" };
-/** Harness's side chat (see `send` in state/chat.svelte.ts), on the chat's own agent. */
+const MODEL: Command = { name: "model", description: "Model and effort", hint: null, aliases: [], tilde: "model" };
+/** Tilde's side chat (see `send` in state/chat.svelte.ts), on the chat's own agent. */
 const BTW: Command = {
   name: "btw",
   description: "Ask a side question in a side chat, without adding to this one",
   hint: "<question>",
   aliases: [],
-  harness: "btw",
+  tilde: "btw",
 };
 
-const STORE_KEY = "harness.commands";
+const STORE_KEY = "tilde.commands";
 /** Most lists kept between runs, newest kept. */
 const KEPT = 40;
 
@@ -158,7 +158,7 @@ function save() {
   }
 }
 
-/** Reads Harness's skills again: after one is imported or removed. */
+/** Reads Tilde's skills again: after one is imported or removed. */
 export async function refreshSkills(): Promise<void> {
   skillsAsked = true;
   try {
@@ -196,7 +196,7 @@ export function fetchCommands(agent: AgentId, folder: string): void {
     });
 }
 
-/** What the `/` menu offers: Harness's own commands and skills, then the agent's, by name. */
+/** What the `/` menu offers: Tilde's own commands and skills, then the agent's, by name. */
 export function commandsFor(agent: AgentId, folder: string): Command[] {
   const own = [MODEL, BTW, CLEAR];
   const out: Command[] = [...own];
@@ -204,10 +204,10 @@ export function commandsFor(agent: AgentId, folder: string): Command[] {
   for (const skill of store.skills) {
     if (taken.has(skill.name)) continue;
     taken.add(skill.name);
-    out.push({ name: skill.name, description: skill.description, hint: null, aliases: [], harness: "skill" });
+    out.push({ name: skill.name, description: skill.description, hint: null, aliases: [], tilde: "skill" });
   }
   for (const command of store.lists[keyOf(agent, folder)] ?? []) {
-    // A Harness skill of the same name is the one attached (see `Skills::expand`).
+    // A Tilde skill of the same name is the one attached (see `Skills::expand`).
     if (command.skill || taken.has(command.name) || HIDDEN[agent].has(command.name) || command.name.startsWith("__")) continue;
     taken.add(command.name);
     out.push(command);

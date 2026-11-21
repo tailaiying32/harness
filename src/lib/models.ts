@@ -11,10 +11,10 @@ import { AGENTS, ANTIGRAVITY, CLAUDE, CODEX, CURSOR, type AgentId, type ModelInf
 export type AgentModels = Record<AgentId, ModelInfo[]>;
 
 const KEYS: Record<AgentId, string> = {
-  "claude-code": "harness.models",
-  cursor: "harness.models.cursor",
-  codex: "harness.models.codex",
-  antigravity: "harness.models.antigravity",
+  "claude-code": "tilde.models",
+  cursor: "tilde.models.cursor",
+  codex: "tilde.models.codex",
+  antigravity: "tilde.models.antigravity",
 };
 
 /** Shown only until Claude Code has answered once on this machine. */
@@ -136,10 +136,10 @@ export function modelName(agent: AgentId, value: string): string {
 // joins the menu automatically (except Claude Code's pinned older versions).
 
 const PICK_KEYS: Record<AgentId, string> = {
-  "claude-code": "harness.models.claude-code.picked",
-  codex: "harness.models.codex.picked",
-  antigravity: "harness.models.antigravity.picked",
-  cursor: "harness.models.cursor.picked",
+  "claude-code": "tilde.models.claude-code.picked",
+  codex: "tilde.models.codex.picked",
+  antigravity: "tilde.models.antigravity.picked",
+  cursor: "tilde.models.cursor.picked",
 };
 
 /** `shown`: in the menu. `known`: every model seen so far, so a new one can be told apart. */

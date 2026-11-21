@@ -102,8 +102,12 @@ export function folderOf(path: string): string {
   return path.replace(/[\\/][^\\/]*$/, "");
 }
 
-/** A worktree branch's short name: "harness/idle-timeout-1a2b3c" → "idle-timeout". Other branches stay as they are. */
+/**
+ * A worktree branch's short name: "tilde/idle-timeout-1a2b3c" → "idle-timeout".
+ * Branches made before the app was renamed start "harness/". Other branches stay as they are.
+ */
 export function shortBranch(branch: string): string {
-  if (!branch.startsWith("harness/")) return branch;
-  return branch.slice("harness/".length).replace(/-[0-9a-f]{6}$/, "");
+  const prefix = ["tilde/", "harness/"].find((p) => branch.startsWith(p));
+  if (!prefix) return branch;
+  return branch.slice(prefix.length).replace(/-[0-9a-f]{6}$/, "");
 }

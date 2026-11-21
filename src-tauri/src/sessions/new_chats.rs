@@ -16,17 +16,17 @@ use crate::events::{AgentEvent, Decision, NewChatPart, StartedChat};
 use crate::worktree;
 
 /// The app's new-chats tool group, offered to every main chat's agent.
-pub const SERVER: &str = "harness_new_chats";
+pub const SERVER: &str = "tilde_new_chats";
 const TOOL: &str = "start";
 /// The name the window sees the call by, for every agent.
-pub const CALL_NAME: &str = "mcp__harness_new_chats__start";
+pub const CALL_NAME: &str = "mcp__tilde_new_chats__start";
 
 /// Most parts one question can hold.
 const MAX_PARTS: usize = 8;
 
 /// When to use it, in the instructions.
 const WHEN: &str = "Only when the user explicitly asks you to split work into separate chats, or to \
-start chats for parts of a plan, call the start tool of the harness_new_chats server: one call with \
+start chats for parts of a plan, call the start tool of the tilde_new_chats server: one call with \
 every part. Never use it on your own initiative, and not when the user asks for subagents. Each part's \
 brief is the new chat's whole first message and all it will know: give the goal, the decisions made, \
 the files to look at, and what done looks like. Leave out \"from\" unless the user asks to branch the \
@@ -312,7 +312,7 @@ impl SessionManager {
         for part in &ask.parts {
             let started = self.start_child(parent, part, &ask.from, &ask.repo_root).await;
             if let Err(e) = &started {
-                eprintln!("harness: couldn't start a chat for \"{}\": {e}", part.title);
+                eprintln!("tilde: couldn't start a chat for \"{}\": {e}", part.title);
             }
             chats.push(StartedChat {
                 title: part.title.clone(),
