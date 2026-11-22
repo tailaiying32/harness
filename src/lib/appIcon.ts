@@ -6,7 +6,7 @@
 // Every theme has an icon: the tile takes its background, `~/` its accent.
 // Which one shows is the user's own pick, not the theme on show.
 
-import type { Theme } from "./themes";
+import type { Theme } from "./themeData";
 
 /** The three colours an icon takes from a theme. */
 export type IconColours = Pick<Theme, "bg" | "accent" | "faint">;
@@ -42,11 +42,27 @@ function hazardBand(c: IconColours): string {
   return `<g clip-path="url(#tile)"><rect x="100" y="${BAND_TOP}" width="824" height="${930 - BAND_TOP}" fill="${c.accent}"/>${stripes}</g>`;
 }
 
+/** `~/` in one colour, placed as it sits on the icon's 1024 square. Needs the `level` clip path defined beside it. */
+function glyphSvg(colour: string): string {
+  return (
+    `<g transform="${TILDE_PLACE}"><path clip-path="url(#level)" d="${WAVE}" fill="none" stroke="${colour}" stroke-width="92"/></g>` +
+    `<polygon points="${SLASH}" fill="${colour}"/>`
+  );
+}
+
+/** `~/` alone, with no tile: the mark the website sets beside the name. Cropped to the glyph, about 1.72 wide for 1 high. */
+export function markSvg(colour: string): string {
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="225 340 585 340">` +
+    `<defs><clipPath id="level"><polygon points="${LEVEL_CUT}"/></clipPath></defs>` +
+    glyphSvg(colour) +
+    `</svg>`
+  );
+}
+
 /** The icon as a standalone SVG picture. */
 export function iconSvg(c: IconColours, { dev = false, bleed = false }: IconOptions = {}): string {
-  const glyph =
-    `<g transform="${TILDE_PLACE}"><path clip-path="url(#level)" d="${WAVE}" fill="none" stroke="${c.accent}" stroke-width="92"/></g>` +
-    `<polygon points="${SLASH}" fill="${c.accent}"/>`;
+  const glyph = glyphSvg(c.accent);
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="${bleed ? "100 100 824 824" : "0 0 1024 1024"}">` +
     `<defs>` +
