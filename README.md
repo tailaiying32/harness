@@ -96,6 +96,10 @@ Everything Tilde keeps for you lives on disk as plain files (tracked per project
 - macOS (Apple Silicon)
 - At least one supported CLI installed and signed in (`claude`, `codex`, `agy`, or `cursor`)
 
+## Feedback
+
+Found a bug or want a feature? [Open an issue](https://github.com/tailaiying32/tilde/issues).
+
 ## Developing locally
 
 Requires Node.js and a Rust toolchain.
