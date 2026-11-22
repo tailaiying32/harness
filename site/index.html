@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tilde</title>
+    <meta
+      name="description"
+      content="Tilde is a lightweight, thoughtfully designed home for your coding agents. Supports Claude Code, Codex, Antigravity, and Cursor."
+    />
+    <!-- The theme last shown, put up before anything draws (see look.ts). -->
+    <script>
+      try {
+        var look = JSON.parse(localStorage.getItem("tilde.look"));
+        for (var name in look.vars) document.documentElement.style.setProperty(name, look.vars[name]);
+        document.documentElement.style.colorScheme = look.scheme;
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="page"></div>
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>
