@@ -93,19 +93,51 @@
     io.observe(host ?? canvas);
 
     const target = host ?? window;
-    const onMove = (e: Event) => {
-      const pe = e as PointerEvent;
+    const place = (clientX: number, clientY: number) => {
       const rect = canvas.getBoundingClientRect();
-      pointerX = pe.clientX - rect.left;
-      pointerY = pe.clientY - rect.top;
+      pointerX = clientX - rect.left;
+      pointerY = clientY - rect.top;
       pointerIn =
         pointerX >= 0 && pointerX <= rect.width && pointerY >= 0 && pointerY <= rect.height;
     };
-    const onLeave = () => {
+    // A finger is followed through touch events: the browser cancels a
+    // touch's pointer events once it starts scrolling, but touch events keep
+    // coming, so the glow tracks taps and drags without blocking the scroll.
+    // After a tap, phones also send a made-up mouse move that no leave ever
+    // follows, which would pin the glow in place; moves just after a touch
+    // are dropped.
+    let lastTouch = -Infinity;
+    const onMove = (e: Event) => {
+      const pe = e as PointerEvent;
+      if (pe.pointerType === "touch" || performance.now() - lastTouch < 1000) return;
+      place(pe.clientX, pe.clientY);
+    };
+    const onLeave = (e: Event) => {
+      if ((e as PointerEvent).pointerType === "touch") return;
       pointerIn = false;
     };
+    const onTouch = (e: TouchEvent) => {
+      lastTouch = performance.now();
+      const t = e.touches[0];
+      if (t) place(t.clientX, t.clientY);
+      else pointerIn = false;
+    };
+    const TOUCH = ["touchstart", "touchmove", "touchend", "touchcancel"] as const;
     target.addEventListener("pointermove", onMove, { passive: true });
     target.addEventListener("pointerleave", onLeave, { passive: true });
+    for (const name of TOUCH) window.addEventListener(name, onTouch, { passive: true });
+    // Leaving the window (up to the address bar, say) does not always send
+    // a leave to the section itself, so the page's own exit is watched too.
+    const root = document.documentElement;
+    const onExit = () => {
+      pointerIn = false;
+    };
+    const onOut = (e: PointerEvent) => {
+      if (!e.relatedTarget) onExit();
+    };
+    root.addEventListener("mouseleave", onExit);
+    document.addEventListener("pointerout", onOut);
+    window.addEventListener("blur", onExit);
 
     function draw(now: number) {
       raf = 0;
@@ -226,6 +258,10 @@
       io.disconnect();
       target.removeEventListener("pointermove", onMove);
       target.removeEventListener("pointerleave", onLeave);
+      for (const name of TOUCH) window.removeEventListener(name, onTouch);
+      root.removeEventListener("mouseleave", onExit);
+      document.removeEventListener("pointerout", onOut);
+      window.removeEventListener("blur", onExit);
     };
   });
 </script>
