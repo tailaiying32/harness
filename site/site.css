@@ -23,6 +23,12 @@
     --faint: #b7b6b2;
     --line: #e6e6e3;
     --accent: #a8691c;
+    --ok: #52733f;
+    --bad: #b0463a;
+    --blue: #2f6aa8;
+    --yellow: #94740c;
+    --purple: #7a4f9a;
+    color-scheme: light;
   }
 }
 

@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 
 // The website (site/): its own build, apart from the app's. The app's build
@@ -10,9 +10,42 @@ import { svelte } from "@sveltejs/vite-plugin-svelte";
 const repo = fileURLToPath(new URL(".", import.meta.url));
 const site = fileURLToPath(new URL("./site", import.meta.url));
 
+function resolveSiteOrigin(): string {
+  const raw =
+    process.env.SITE_URL ||
+    (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : "") ||
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "");
+  return raw.replace(/\/+$/, "");
+}
+
+function siteMetaPlugin(): Plugin {
+  const origin = resolveSiteOrigin();
+  return {
+    name: "tilde-site-meta",
+    transformIndexHtml(html) {
+      const canonical = origin ? `<link rel="canonical" href="${origin}/" />\n    <meta property="og:url" content="${origin}/" />` : "";
+      return html
+        .replaceAll("%SITE_ORIGIN%", origin)
+        .replace("<!-- %CANONICAL_TAGS% -->", canonical);
+    },
+    generateBundle() {
+      if (!origin) return;
+      this.emitFile({
+        type: "asset",
+        fileName: "sitemap.xml",
+        source:
+          `<?xml version="1.0" encoding="UTF-8"?>\n` +
+          `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+          `  <url>\n    <loc>${origin}/</loc>\n    <changefreq>weekly</changefreq>\n    <priority>1.0</priority>\n  </url>\n` +
+          `</urlset>\n`,
+      });
+    },
+  };
+}
+
 export default defineConfig({
   root: site,
-  plugins: [svelte({ configFile: `${repo}/svelte.config.js` })],
+  plugins: [svelte({ configFile: `${repo}/svelte.config.js` }), siteMetaPlugin()],
   clearScreen: false,
   build: {
     outDir: "dist",
