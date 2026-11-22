@@ -510,6 +510,15 @@ const PLAN_INSTRUCTION: &str = "When you present a plan for the user to approve 
 wrap the whole plan in a <proposed_plan> block (keep the tags exactly) and end your turn. Don't write \
 the plan only in the chat: the app shows the block with approve buttons and tells you when to build.";
 
+/// Said after the terminal's lines. `tilde-tab` posts to the app on this
+/// computer, and Codex's sandbox blocks that in every mode but full access;
+/// untold, Codex ran it inside the sandbox and only reported "Failed to
+/// connect". Told this, it asks to run it outside, with its own approve card
+/// (tested on codex-cli 0.169.1, default and read-only modes). A softer "when
+/// your shell runs in a sandbox" wording was ignored.
+const TAB_INSTRUCTION: &str = "Your sandbox blocks the command that opens a terminal tab, since it talks \
+to the app on this computer: ask to run it outside the sandbox from the start.";
+
 /// What the agent is told on every start and resume, after Codex's own
 /// instructions: the app's tools, the chat's notes and docs, the project's
 /// memory and the user's preferences. Sent each time like Claude Code's
@@ -523,7 +532,13 @@ fn instructions(opts: &SpawnOptions) -> Option<String> {
     } else {
         lines.push(PLAN_INSTRUCTION.to_string());
     }
-    lines.extend(opts.tools.iter().map(|t| t.instruction.to_string()));
+    for tools in &opts.tools {
+        lines.push(tools.instruction.to_string());
+        // A side chat never asks, so it couldn't run the command anyway.
+        if tools.server == crate::terminal::SERVER && !side {
+            lines.push(TAB_INSTRUCTION.to_string());
+        }
+    }
     if let Some(notes) = &opts.notes {
         lines.push(super::notes_instruction(notes, opts.project_docs.as_deref(), !side));
     }
@@ -2766,6 +2781,38 @@ mod tests {
         ]});
         assert_eq!(mcp_text(&reply), "MCP servers:\n\n- **tilde_chats**: connected, 2 tools\n- **linear**: needs sign-in");
         assert_eq!(mcp_text(&json!({ "data": [] })), "No MCP servers.");
+    }
+
+    #[test]
+    fn codex_is_told_to_ask_before_opening_a_terminal_tab() {
+        let tools = |server: &'static str| crate::agent::AppTools {
+            server,
+            instruction: format!("about {server}"),
+            list: json!([]),
+            call: Arc::new(|_, _| Box::pin(async { Ok(Vec::new()) })),
+        };
+        let opts = |side: Option<crate::agent::SideOptions>, servers: &[&'static str]| SpawnOptions {
+            binary: "codex".into(),
+            project_path: "/work".into(),
+            resume_id: None,
+            mode: None,
+            model: None,
+            effort: None,
+            side,
+            tools: servers.iter().map(|s| tools(s)).collect(),
+            notes: None,
+            project_docs: None,
+            memory: None,
+            preferences: None,
+            env: Vec::new(),
+        };
+        // Said right after the terminal's own lines.
+        let told = instructions(&opts(None, &["tilde_browser", crate::terminal::SERVER])).unwrap();
+        assert!(told.contains(&format!("about tilde_terminal\n{TAB_INSTRUCTION}")), "{told}");
+        // Not without the terminal, and not to a side chat, which never asks.
+        assert!(!instructions(&opts(None, &["tilde_browser"])).unwrap().contains(TAB_INSTRUCTION));
+        let side = instructions(&opts(Some(Default::default()), &[crate::terminal::SERVER])).unwrap();
+        assert!(!side.contains(TAB_INSTRUCTION));
     }
 
     #[test]

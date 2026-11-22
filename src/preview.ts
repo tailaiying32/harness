@@ -412,6 +412,11 @@ const savedChat: AgentEvent[] = [
   result("t1", "…"),
   tool("t2", "Grep", { pattern: "projectPath" }),
   result("t2", "src/lib/state/chat.svelte.ts:63\nsrc/lib/chat/Composer.svelte:39"),
+  // Edits that don't carry the file's text (Cursor's): the project's doc gets a tab, the repo's file none.
+  tool("t2a", "Edit", { file_path: `${home}/.tilde/projects/-Users-you-code-tilde/docs/TODO.md` }),
+  result("t2a", "Edited."),
+  tool("t2b", "Edit", { file_path: `${home}/code/tilde/CHANGES.md` }),
+  result("t2b", "Edited."),
   tool("t3", "Edit", {
     file_path: `${home}/code/tilde/src/App.svelte`,
     old_string: "<main>\n  <ChatView />",

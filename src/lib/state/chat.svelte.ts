@@ -295,6 +295,7 @@ export class Chat {
     for (const doc of chat.docs) {
       if (chat.isChatDoc(doc.path) || chat.wasSaved(doc.path)) void chat.refreshDoc(doc.path);
     }
+    void chat.showProjectDocs();
     chat.mode = row.mode as Mode;
     chat.modelChoice = row.model;
     chat.effortChoice = row.effort ?? "default";
@@ -1210,8 +1211,15 @@ export class Chat {
     const text = textAfter(tool, doc?.text);
     if (text === null) {
       // The edit doesn't say what the file holds now (Cursor's tools never
-      // do), but a doc in the chat's folder is read from disk.
-      if (!this.isChatDoc(path)) return;
+      // do), but a doc in the chat's folder is read from disk, and so is one
+      // in the project's docs, once the docs list says it is there.
+      if (!this.isChatDoc(path)) {
+        if (!doc) {
+          this.maybeProjectDocs.add(path);
+          if (!this.replaying) void this.showProjectDocs();
+        }
+        return;
+      }
       if (!doc) this.docs.push({ path, text: "" });
       if (!this.replaying) void this.refreshDoc(path);
       this.showNewChatDoc(path, !doc);
@@ -1222,6 +1230,32 @@ export class Chat {
     // Then the file itself: the user may have edited it since Claude read it.
     if (!this.replaying) void this.refreshDoc(path);
     this.showNewChatDoc(path, !doc);
+  }
+
+  /** Markdown files edited without their text, outside the chat's folder: project docs, maybe. */
+  private maybeProjectDocs = new Set<string>();
+
+  /**
+   * Gives each of those that is a doc of the project its tab, read from disk:
+   * a doc the agent itself saved to the project (Cursor), which had no tab
+   * until its link was clicked. Other markdown files (a repo's README) get none.
+   */
+  private async showProjectDocs(): Promise<void> {
+    if (this.owner || !this.maybeProjectDocs.size) return;
+    const paths = [...this.maybeProjectDocs];
+    this.maybeProjectDocs.clear();
+    let project: DocEntry[];
+    try {
+      ({ project } = await listDocs(this.sessionId, this.projectPath.trim()));
+    } catch {
+      return;
+    }
+    const plain = (path: string) => path.replace(/\\/g, "/");
+    for (const path of paths) {
+      if (!project.some((d) => plain(d.path) === plain(path))) continue;
+      if (!this.docs.some((d) => d.path === path)) this.docs.push({ path, text: "" });
+      void this.refreshDoc(path);
+    }
   }
 
   /**
