@@ -322,25 +322,68 @@
     raf = requestAnimationFrame(step);
   }
 
-  function onMove(e: PointerEvent) {
+  function place(clientX: number, clientY: number) {
     if (!gridEl) return;
     const r = gridEl.getBoundingClientRect();
-    pointerCol = ((e.clientX - r.left) / r.width) * COLS;
-    pointerRow = ((e.clientY - r.top) / r.height) * ROWS;
+    pointerCol = ((clientX - r.left) / r.width) * COLS;
+    pointerRow = ((clientY - r.top) / r.height) * ROWS;
     pointerIn = true;
     kick();
   }
 
-  function onLeave() {
+  // A finger is followed through touch events on the whole window (see
+  // HeroField): they keep coming while the page scrolls, and a drag that
+  // starts outside the mark still lights it as it passes over.
+  // After a tap, phones also send a made-up mouse move that no leave ever
+  // follows, which would pin the glow in place; moves just after a touch
+  // are dropped.
+  let lastTouch = -Infinity;
+  function onMove(e: PointerEvent) {
+    if (e.pointerType === "touch" || performance.now() - lastTouch < 1000) return;
+    place(e.clientX, e.clientY);
+  }
+
+  function onLeave(e: PointerEvent) {
+    if (e.pointerType === "touch") return;
     pointerIn = false;
     kick();
+  }
+
+  function onTouch(e: TouchEvent) {
+    lastTouch = performance.now();
+    const t = e.touches[0];
+    if (t) {
+      place(t.clientX, t.clientY);
+    } else {
+      pointerIn = false;
+      kick();
+    }
   }
 
   onMount(() => {
     introStart = performance.now();
     kick();
+    const TOUCH = ["touchstart", "touchmove", "touchend", "touchcancel"] as const;
+    for (const name of TOUCH) window.addEventListener(name, onTouch, { passive: true });
+    // Leaving the window does not always send a leave to the mark itself,
+    // so the page's own exit is watched too.
+    const root = document.documentElement;
+    const onExit = () => {
+      pointerIn = false;
+      kick();
+    };
+    const onOut = (e: PointerEvent) => {
+      if (!e.relatedTarget) onExit();
+    };
+    root.addEventListener("mouseleave", onExit);
+    document.addEventListener("pointerout", onOut);
+    window.addEventListener("blur", onExit);
     return () => {
       if (raf) cancelAnimationFrame(raf);
+      for (const name of TOUCH) window.removeEventListener(name, onTouch);
+      root.removeEventListener("mouseleave", onExit);
+      document.removeEventListener("pointerout", onOut);
+      window.removeEventListener("blur", onExit);
     };
   });
 </script>
