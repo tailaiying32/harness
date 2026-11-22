@@ -9,15 +9,20 @@ const LOOK = "tilde.look";
 
 const system = window.matchMedia("(prefers-color-scheme: dark)");
 
-/** The picked theme, or the app's own for a system in light or dark. */
-function pickedTheme(): Theme {
-  let id: string | null = null;
+/** The manual pick id, or null when following the system light/dark mode. */
+export function manualPick(): string | null {
   try {
-    id = localStorage.getItem(PICK);
+    const id = localStorage.getItem(PICK);
+    return themes.some((t) => t.id === id) ? id : null;
   } catch {
-    // No storage: the system decides.
+    return null;
   }
-  return themes.find((t) => t.id === id) ?? themes.find((t) => t.dark === system.matches)!;
+}
+
+/** The picked theme, or Tilde Dark / Tilde Light matching the system's colour scheme. */
+function pickedTheme(): Theme {
+  const id = manualPick();
+  return (id ? themes.find((t) => t.id === id) : undefined) ?? themes.find((t) => t.dark === system.matches)!;
 }
 
 let shown = pickedTheme();
@@ -41,15 +46,29 @@ export function show(theme: Theme): void {
   const scheme = theme.dark ? "dark" : "light";
   root.style.colorScheme = scheme;
   try {
-    localStorage.setItem(LOOK, JSON.stringify({ vars, scheme }));
+    if (manualPick()) localStorage.setItem(LOOK, JSON.stringify({ vars, scheme }));
+    else localStorage.removeItem(LOOK);
   } catch {
     // Storage can be unavailable; the page then starts in the default colours.
   }
   for (const changed of watchers) changed(theme);
 }
 
-/** The visitor's pick: kept, then shown. */
+/** Sync the document immediately on load so light/dark system changes apply without stale vars. */
+show(shown);
+
+/** The visitor's pick ("auto" clears the override and follows system light/dark). */
 export function pick(id: string): void {
+  if (id === "auto") {
+    try {
+      localStorage.removeItem(PICK);
+      localStorage.removeItem(LOOK);
+    } catch {
+      // Ignore storage errors.
+    }
+    show(pickedTheme());
+    return;
+  }
   const theme = themes.find((t) => t.id === id);
   if (!theme) return;
   try {
@@ -61,4 +80,6 @@ export function pick(id: string): void {
 }
 
 // With no pick made, the page follows the system as it goes light or dark.
-system.addEventListener("change", () => show(pickedTheme()));
+system.addEventListener("change", () => {
+  if (!manualPick()) show(pickedTheme());
+});

@@ -3,22 +3,81 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tilde</title>
+    <title>Tilde — Native Desktop Workspace for Coding Agents</title>
     <meta
       name="description"
-      content="Tilde is a lightweight, thoughtfully designed home for your coding agents. Supports Claude Code, Codex, Antigravity, and Cursor."
+      content="Tilde is a lightweight, native macOS workspace for Claude Code, Codex, Antigravity, and Cursor—using your existing CLI logins with local context, inline comments, git worktrees, terminal, and browser."
     />
-    <!-- The theme last shown, put up before anything draws (see look.ts). -->
+    <meta name="robots" content="index, follow" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#111210" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#fcfcfb" />
+
+    <!-- %CANONICAL_TAGS% -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Tilde" />
+    <meta property="og:title" content="Tilde — Native Desktop Workspace for Coding Agents" />
+    <meta
+      property="og:description"
+      content="A lightweight, thoughtfully designed macOS workspace for Claude Code, Codex, Antigravity, and Cursor using your existing CLI logins."
+    />
+    <meta property="og:image" content="%SITE_ORIGIN%/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Tilde — ~/ mark and description" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Tilde — Native Desktop Workspace for Coding Agents" />
+    <meta
+      name="twitter:description"
+      content="A lightweight, thoughtfully designed macOS workspace for Claude Code, Codex, Antigravity, and Cursor using your existing CLI logins."
+    />
+    <meta name="twitter:image" content="%SITE_ORIGIN%/og.png" />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Tilde",
+        "operatingSystem": "macOS",
+        "applicationCategory": "DeveloperApplication",
+        "description": "A lightweight, thoughtfully designed native desktop workspace for Claude Code, Codex, Antigravity, and Cursor using your existing CLI logins.",
+        "downloadUrl": "https://github.com/tailaiying32/tilde/releases/latest",
+        "codeRepository": "https://github.com/tailaiying32/tilde",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        }
+      }
+    </script>
+
+    <!-- Only apply a cached theme before paint when the visitor picked one manually; otherwise CSS follows system light/dark. -->
     <script>
       try {
-        var look = JSON.parse(localStorage.getItem("tilde.look"));
-        for (var name in look.vars) document.documentElement.style.setProperty(name, look.vars[name]);
-        document.documentElement.style.colorScheme = look.scheme;
+        if (localStorage.getItem("tilde.site.theme")) {
+          var look = JSON.parse(localStorage.getItem("tilde.look"));
+          for (var name in look.vars) document.documentElement.style.setProperty(name, look.vars[name]);
+          document.documentElement.style.colorScheme = look.scheme;
+        }
       } catch (e) {}
     </script>
   </head>
   <body>
     <div id="page"></div>
+    <noscript>
+      <main style="max-width: 640px; margin: 12vh auto; padding: 0 24px; font-family: ui-monospace, monospace;">
+        <h1>Tilde</h1>
+        <p>Tilde is a lightweight, thoughtfully designed home for your coding agents. Supports Claude Code, Codex, Antigravity, and Cursor.</p>
+        <p>
+          <a href="https://github.com/tailaiying32/tilde/releases/latest">Download for macOS</a> ·
+          <a href="https://github.com/tailaiying32/tilde">GitHub</a>
+        </p>
+      </main>
+    </noscript>
     <script type="module" src="/main.ts"></script>
   </body>
 </html>
