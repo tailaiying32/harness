@@ -11,8 +11,6 @@ Supports **Claude Code**, **Codex**, **Antigravity**, and **Cursor** using your 
 ## Why Tilde?
 Most desktop wrappers are heavy Electron shells that trap chat history, plans, and notes inside a single vendor, while gobbling up disk space and memory. Tilde puts a single UI in front of the CLIs already installed on your machine and owns the local context layer, so chats, docs, memory and preferences stay portable across every agent. Beyond that, it pairs a beautiful, terminal-inspired UI with thoughtful design choices and small quality-of-life features so your agents work with you, not against you.
 
----
-
 ## Features
 
 ### Agents & sessions
@@ -54,8 +52,6 @@ Most desktop wrappers are heavy Electron shells that trap chat history, plans, a
 - **Images as text tokens:** Pasted, dropped, or tool-returned images stay clean as `[image N]` tokens in chat and open in a full-space viewer (fit-to-window or actual pixels) on click.
 - **Themes, icon, and layout controls:** 20 built-in themes, 3 font sizes, a customizable app icon, and a resizable side panel that drags smoothly into full-screen or collapses cleanly.
 
----
-
 ## Architecture
 
 ### Stack
@@ -88,8 +84,6 @@ Everything Tilde keeps for you lives on disk as plain files (tracked per project
         ├── docs/           # shared project docs across all chats & worktrees
         └── memory/         # shared project memory index and notes
 ```
-
----
 
 ## Requirements
 
