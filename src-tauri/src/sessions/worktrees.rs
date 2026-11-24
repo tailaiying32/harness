@@ -781,24 +781,44 @@ impl SessionManager {
         }
     }
 
-    /// Moves a chat to the trash. Its worktree folder, if any, is put away,
-    /// and the idle terminal tabs its agent opened are closed.
-    pub(super) async fn trash(&self, session_id: &str) -> Result<(), String> {
+    /// Marks a chat trashed, so it leaves the sidebar at once.
+    pub(super) fn mark_trashed(&self, session_id: &str) -> Result<(), String> {
         let store = &self.0.store;
         store.chat_git(session_id)?.ok_or("That chat no longer exists")?;
+        store.set_trashed(session_id, Some(now_ms()))
+    }
+
+    pub(super) fn is_trashed(&self, session_id: &str) -> bool {
+        matches!(self.0.store.chat_git(session_id), Ok(Some(row)) if row.trashed_at.is_some())
+    }
+
+    /// The slow part of trashing a chat, after its process stopped: its
+    /// worktree folder, if any, is put away, and the idle terminal tabs its
+    /// agent opened are closed. Skipped if the chat was restored meanwhile.
+    pub(super) async fn put_away_trashed(&self, session_id: &str) {
+        // No sweep, no emptying the trash, and no message starting this chat
+        // while its folder goes. A restore and message wait, then bring it back.
+        let _sweeping = self.0.sweep_lock.lock().await;
+        let _starting = self.0.start_lock.lock().await;
+        if !self.is_trashed(session_id) {
+            return;
+        }
+        self.0.sessions.lock().unwrap().remove(session_id);
+        let store = &self.0.store;
         if let Some(wt) = self.follow_branch(session_id).await {
             let away = wt.clone();
             let chat = session_id.to_string();
             match blocking(move || worktree::put_away(&away, &chat)).await {
                 Ok(()) => {
-                    store.set_worktree(session_id, &wt, "put_away")?;
+                    if let Err(e) = store.set_worktree(session_id, &wt, "put_away") {
+                        eprintln!("tilde: couldn't save a put-away worktree: {e}");
+                    }
                     self.terminal_gone(&wt.path, "chat deleted");
                 }
                 Err(e) => eprintln!("tilde: couldn't put a worktree away: {e}"),
             }
         }
         self.terminal_chat_gone(session_id);
-        store.set_trashed(session_id, Some(now_ms()))
     }
 
     /// Takes a chat out of the trash. Its worktree comes back with its next message.
@@ -812,6 +832,8 @@ impl SessionManager {
 
     /// Deletes every chat in the trash for good, with their branches.
     pub async fn empty_trash(&self) -> Result<(), String> {
+        // After any chat still being put away (see `put_away_trashed`).
+        let _sweeping = self.0.sweep_lock.lock().await;
         for row in self.0.store.sweep_list()? {
             if row.trashed_at.is_some() {
                 self.purge(&row).await;

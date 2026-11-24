@@ -151,8 +151,7 @@ async fn load_session(state: State<'_, AppState>, session_id: String) -> Result<
 async fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     state.side.end_chat(&session_id);
     state.browsers.close(&session_id);
-    let sessions = state.sessions.clone();
-    sessions.delete(&session_id).await
+    state.sessions.delete_soon(&session_id)
 }
 
 /// Chats in the trash, most recently trashed first.
