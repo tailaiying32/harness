@@ -951,6 +951,28 @@ export class Chat {
   }
 
   /**
+   * What is typed under each doc ("what should change?"), by path: a remark
+   * on the doc as a whole, sent with its comments. Kept until sent, like them.
+   */
+  docNotes = $state<Record<string, string>>({});
+
+  docNote(path: string): string {
+    if (this.owner) return this.owner.docNote(path);
+    return this.docNotes[path] ?? "";
+  }
+
+  setDocNote(path: string, text: string): void {
+    if (this.owner) return this.owner.setDocNote(path, text);
+    if (text) this.docNotes[path] = text;
+    else delete this.docNotes[path];
+  }
+
+  /** A doc has something to send: comments not sent yet, or a typed note. */
+  hasDocFeedback(path: string): boolean {
+    return this.pendingComments(path).length > 0 || !!this.docNote(path).trim();
+  }
+
+  /**
    * Comments on the agent's latest answer, waiting to go with the next
    * message (see comments.ts). Main chats only; in memory only.
    */
@@ -998,17 +1020,63 @@ export class Chat {
   }
 
   /**
-   * Sends what was typed with the comments on the latest answer, which then
-   * go. Without comments it is a plain send. The agent is also told to
-   * answer each and ask rather than guess (an app note, unseen).
+   * Docs with something waiting to go (comments not sent yet, or a typed
+   * note), in tab order. Main chats only.
+   */
+  private get waitingDocs(): string[] {
+    if (this.owner) return [];
+    return this.docs.map((d) => d.path).filter((path) => this.hasDocFeedback(path));
+  }
+
+  /** A waiting plan has comments, a typed note or an edit not sent yet. */
+  private get planWaiting(): boolean {
+    return this.planPending && (this.pendingComments(PLAN_TAB).length > 0 || !!this.planNote.trim() || !!this.editedPlan());
+  }
+
+  /** Something waits to go with the next message from the main box: comments anywhere, or a note under a doc or the plan. */
+  get hasWaitingFeedback(): boolean {
+    return !this.owner && (this.chatComments.length > 0 || this.waitingDocs.length > 0 || this.planWaiting);
+  }
+
+  /**
+   * Sends what was typed with everything waiting: comments on the latest
+   * answer, each doc's comments and note, and the waiting plan's comments,
+   * note and edit. One message, so the user never sends twice. A message
+   * while the plan waits is already the answer to it (the core turns the
+   * plan down and points the agent here), so the plan's parts go as Keep
+   * planning would send them. Nothing waiting: a plain send. The agent is
+   * also told to answer each and ask rather than guess (app notes, unseen).
    */
   async sendWithComments(typed: string): Promise<string | undefined> {
-    const comments = this.owner ? [] : this.chatComments;
-    if (!comments.length) return this.send(typed);
-    const sent = new Set(comments.map((c) => c.id));
-    this.appNotes.push(CHAT_GUIDANCE);
-    const messageId = await this.send(withChatComments(typed, comments));
-    if (messageId) this.chatComments = this.chatComments.filter((c) => !sent.has(c.id));
+    if (!this.hasWaitingFeedback) return this.send(typed);
+    const chatComments = this.chatComments;
+    const docs = this.waitingDocs.map((path) => ({ path, comments: this.pendingComments(path), note: this.docNote(path) }));
+    const plan = this.planWaiting ? { comments: this.pendingComments(PLAN_TAB), message: this.planFeedback() } : null;
+    const parts: string[] = [];
+    if (typed.trim()) parts.push(typed.trim());
+    if (chatComments.length) parts.push(withChatComments("", chatComments));
+    for (const d of docs) parts.push(this.docMessage(d.path, d.comments, d.note.trim()));
+    if (plan) parts.push(`About the plan:\n\n${plan.message}`);
+    if (chatComments.length) this.appNotes.push(CHAT_GUIDANCE);
+    if (docs.length || plan) this.appNotes.push(GUIDANCE);
+    // Notes cleared before the wait, so a second Send doesn't send them again.
+    for (const d of docs) this.setDocNote(d.path, "");
+    const planNote = this.planNote;
+    if (plan) this.planNote = "";
+    const messageId = await this.send(parts.join("\n\n"));
+    if (!messageId) {
+      for (const d of docs) if (!this.docNote(d.path)) this.setDocNote(d.path, d.note);
+      if (plan && !this.planNote) this.planNote = planNote;
+      return messageId;
+    }
+    const sent = new Set(chatComments.map((c) => c.id));
+    this.chatComments = this.chatComments.filter((c) => !sent.has(c.id));
+    for (const d of docs) this.markSent(d.path, d.comments, messageId);
+    if (plan) {
+      const gone = new Set(plan.comments.map((c) => c.id));
+      this.setComments(PLAN_TAB, this.commentsFor(PLAN_TAB).filter((c) => !gone.has(c.id)));
+      this.planDraft = null;
+    }
     return messageId;
   }
 
@@ -1052,14 +1120,23 @@ export class Chat {
    * quoting its spot.
    */
   keepPlanningMessage(): string {
+    const comments = this.pendingComments(PLAN_TAB);
+    const feedback = this.planFeedback();
+    const parts: string[] = feedback ? [feedback] : [];
+    if (comments.length) parts.push(GUIDANCE);
+    if (!this.planNote.trim() && !comments.length) parts.push("Keep planning.");
+    return parts.join("\n\n");
+  }
+
+  /** The waiting plan's edit (whole), typed note and comments, as one block; empty if none. */
+  private planFeedback(): string {
     const edited = this.editedPlan();
     const note = this.planNote.trim();
     const comments = this.pendingComments(PLAN_TAB);
     const parts: string[] = [];
     if (edited) parts.push(`I edited the plan; here is my version:\n\n${edited}`);
     if (note) parts.push(note);
-    if (comments.length) parts.push(formatComments(comments, this.planText, "the plan"), GUIDANCE);
-    if (!note && !comments.length) parts.push("Keep planning.");
+    if (comments.length) parts.push(formatComments(comments, this.planText, "the plan"));
     return parts.join("\n\n");
   }
 
@@ -1074,21 +1151,42 @@ export class Chat {
   }
 
   /**
-   * Sends a doc's comments as one message from the user, quoting each spot.
-   * The agent is also told to ask rather than guess. The comments show faint
-   * until the turn that takes the message ends.
+   * Sends a doc's comments as one message from the user: the note typed
+   * under the doc first, then each comment quoting its spot. The agent is
+   * also told to ask rather than guess. The comments show faint until the
+   * turn that takes the message ends; the note clears once sent.
    */
   async sendComments(path: string): Promise<void> {
     if (this.owner) return this.owner.sendComments(path);
     const pending = this.pendingComments(path);
-    if (!pending.length) return;
+    const note = this.docNote(path).trim();
+    if (!pending.length && !note) return;
+    // Cleared before the wait, so a second click doesn't send it again.
+    const typed = this.docNote(path);
+    this.setDocNote(path, "");
+    this.appNotes.push(GUIDANCE);
+    const messageId = await this.send(this.docMessage(path, pending, note), []);
+    if (!messageId) {
+      if (!this.docNote(path)) this.setDocNote(path, typed);
+      return;
+    }
+    this.markSent(path, pending, messageId);
+  }
+
+  /** A doc's note and comments as one block: "Comments on <doc>:", the note, the list. */
+  private docMessage(path: string, pending: DocComment[], note: string): string {
     const text = this.docs.find((d) => d.path === path)?.text ?? "";
     const name = path.split(/[\\/]/).pop() || path;
-    this.appNotes.push(GUIDANCE);
-    const messageId = await this.send(formatComments(pending, text, `[${name}](<${path}>)`), []);
-    if (!messageId) return;
-    const sent = new Set(pending.map((c) => c.id));
-    this.comments[path] = this.commentsFor(path).map((c) => (sent.has(c.id) ? { ...c, sentWith: messageId } : c));
+    const where = `[${name}](<${path}>)`;
+    if (!pending.length) return `About ${where}:\n\n${note}`;
+    if (!note) return formatComments(pending, text, where);
+    return `Comments on ${where}:\n\n${note}\n\n${commentList(pending, text)}`;
+  }
+
+  /** Sent comments stay, faint, until the turn that takes their message ends. */
+  private markSent(path: string, sent: DocComment[], messageId: string): void {
+    const ids = new Set(sent.map((c) => c.id));
+    this.comments[path] = this.commentsFor(path).map((c) => (ids.has(c.id) ? { ...c, sentWith: messageId } : c));
   }
 
   /** Drops sent comments whose message has been taken up, once its turn is over. */
