@@ -1053,12 +1053,9 @@ impl SessionManager {
                 session.closing = false;
                 session.busy = false;
                 session.background = false;
-                // A waiting request went with the process; close its question.
-                let card = session.ask.take().map(|a| a.card);
+                // An open worktree question stays: its answer comes as a new
+                // message, which starts a process again.
                 drop(sessions);
-                if let Some(request_id) = card {
-                    self.record(session_id, AgentEvent::ApprovalCancelled { request_id });
-                }
                 self.sweep_soon();
             }
             SessionState::Idle => {
@@ -1241,6 +1238,26 @@ impl SessionManager {
     /// work) and its worktree put away. Its history stays until the trash is
     /// emptied (see `worktrees.rs`).
     pub async fn delete(&self, session_id: &str) -> Result<(), String> {
+        self.mark_trashed(session_id)?;
+        self.finish_trash(session_id).await;
+        Ok(())
+    }
+
+    /// Like `delete`, but returns once the chat is in the trash. Stopping its
+    /// process and putting a large worktree away can take a minute, so that
+    /// carries on in the background.
+    pub fn delete_soon(&self, session_id: &str) -> Result<(), String> {
+        self.mark_trashed(session_id)?;
+        let manager = self.clone();
+        let id = session_id.to_string();
+        tokio::spawn(async move { manager.finish_trash(&id).await });
+        Ok(())
+    }
+
+    async fn finish_trash(&self, session_id: &str) {
+        if !self.is_trashed(session_id) {
+            return; // restored already
+        }
         let agent = self
             .0
             .sessions
@@ -1253,8 +1270,7 @@ impl SessionManager {
             // Its folder may be put away next; let the process finish first.
             let _ = self.wait_for_exit(session_id).await;
         }
-        self.0.sessions.lock().unwrap().remove(session_id);
-        self.trash(session_id).await
+        self.put_away_trashed(session_id).await;
     }
 
     pub fn rename(&self, session_id: &str, title: &str) -> Result<(), String> {
@@ -2271,6 +2287,60 @@ are there now, so use the new paths.)\n\ncarry on",
         rig.manager.close("s1");
         rig.send_at(&repo, "auto", "more").await;
         assert_eq!(rig.fake.folders.lock().unwrap()[2], wt.work_path());
+    }
+
+    #[tokio::test]
+    async fn the_worktree_question_outlives_its_idle_process() {
+        let rig = rig(LONG);
+        let repo = scratch_repo();
+        rig.send_at(&repo, "auto", "fix it").await;
+        rig.ask("fix it").await;
+        let card = rig.card();
+        rig.manager.close("s1");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(!rig.manager.is_live("s1"));
+        assert_eq!(rig.saw(|e| matches!(e, AgentEvent::ApprovalCancelled { .. })), 0);
+        rig.manager.choose_worktree("s1", &card, "worktree").await.unwrap();
+        assert!(rig.worktree().is_some());
+    }
+
+    #[tokio::test]
+    async fn deleting_soon_trashes_at_once_and_puts_the_worktree_away_after() {
+        let rig = rig(LONG);
+        let repo = scratch_repo();
+        let wt = rig.into_worktree(&repo).await;
+        async fn gone(path: &Path) -> bool {
+            for _ in 0..100 {
+                if !path.exists() {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            false
+        }
+
+        // A sweep is running, so the put-away waits; the chat is in the trash already.
+        let sweeping = rig.manager.0.sweep_lock.lock().await;
+        rig.manager.delete_soon("s1").unwrap();
+        assert!(rig.store.sidebar().unwrap().is_empty());
+        assert_eq!(rig.manager.list_trash().unwrap().len(), 1);
+        // Restored before its folder went: the folder stays.
+        rig.manager.restore_chat("s1").unwrap();
+        drop(sweeping);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(wt.path.exists());
+        assert_eq!(rig.store.chat_git("s1").unwrap().unwrap().status.as_deref(), Some("live"));
+
+        rig.manager.delete_soon("s1").unwrap();
+        assert!(gone(&wt.path).await, "folder put away in the background");
+        assert!(!rig.manager.is_live("s1"));
+        for _ in 0..100 {
+            if rig.store.chat_git("s1").unwrap().unwrap().status.as_deref() == Some("put_away") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(rig.store.chat_git("s1").unwrap().unwrap().status.as_deref(), Some("put_away"));
     }
 
     #[tokio::test]
