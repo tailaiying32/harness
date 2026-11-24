@@ -576,10 +576,11 @@
       chat.note(screen);
       return;
     }
-    // Comments on the latest answer go with the message, or alone. A command
-    // goes as typed and leaves them waiting.
+    // Waiting comments (on the latest answer, docs, the plan) and notes typed
+    // under a doc or the plan go with the message, or alone. A command goes
+    // as typed and leaves them waiting.
     const command = text.trim().startsWith("/");
-    const comments = !command && chat.chatComments.length > 0;
+    const comments = !command && chat.hasWaitingFeedback;
     if ((!text.trim() && !comments) || !ready) return;
     chat.draft = "";
     await tick();
