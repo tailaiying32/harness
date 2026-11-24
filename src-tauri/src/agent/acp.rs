@@ -1953,6 +1953,11 @@ not your original:\n\n{plan}"
         self.shared.state.lock().unwrap().waiting.keys().cloned().collect()
     }
 
+    fn open_plans(&self) -> Vec<String> {
+        let state = self.shared.state.lock().unwrap();
+        state.waiting.iter().filter(|(_, w)| matches!(w, Waiting::Plan { .. })).map(|(id, _)| id.clone()).collect()
+    }
+
     fn interrupt(&self) -> Result<(), String> {
         let session_id = self.session_id().ok_or("Nothing to stop yet")?;
         self.shared.rpc.notify("session/cancel", json!({ "sessionId": session_id }));

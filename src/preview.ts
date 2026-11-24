@@ -772,6 +772,13 @@ const commands: Record<string, (args: Args) => unknown> = {
   write_notes: (args) => void notesByChat.set(String(args.chatId), String(args.text)),
   answer_approval: (args) =>
     String(args.requestId).startsWith("plan-") ? void afterPlan(args.sessionId, args.decision) : finish(args.sessionId),
+  // The waiting plan goes to another agent: answered first, then the switch.
+  hand_over_plan: (args) => {
+    emit(args.sessionId, { kind: "approval_answered", request_id: "plan-r1", decision: args.decision, answers: null });
+    emit(args.sessionId, { kind: "status", state: "exited" });
+    emit(args.sessionId, { kind: "agent_switched", from: "claude-code", to: args.agent, model: args.model });
+    void afterPlan(args.sessionId, args.decision);
+  },
   interrupt: (args) => {
     playing.delete(args.sessionId);
     emit(args.sessionId, { kind: "interrupted" });

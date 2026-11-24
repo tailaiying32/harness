@@ -430,6 +430,7 @@ impl SessionManager {
                     &message_id,
                     true,
                     &[note],
+                    None,
                 )
                 .await
             }

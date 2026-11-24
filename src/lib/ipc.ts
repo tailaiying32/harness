@@ -255,6 +255,26 @@ export const sendMessage = (
   appNotes: string[] = [],
 ) => invoke<void>("send_message", { sessionId, agent, projectPath, mode, model, effort, text, images, messageId, appNotes });
 
+/**
+ * Hands a chat whose plan waits to another agent, with the user's answer to
+ * the plan. Approved ("allow"), `text` goes to the new agent as a note from
+ * the app, not shown; sent back ("deny"), it is the user's message.
+ */
+export const handOverPlan = (
+  sessionId: string,
+  agent: AgentId,
+  projectPath: string,
+  mode: Mode,
+  model: string,
+  effort: string,
+  text: string,
+  messageId: string,
+  appNotes: string[],
+  decision: "allow" | "deny",
+  /** The plan as the user edited it, when approved. */
+  plan?: string,
+) => invoke<void>("hand_over_plan", { sessionId, agent, projectPath, mode, model, effort, text, messageId, appNotes, decision, plan });
+
 export const answerApproval = (
   sessionId: string,
   requestId: string,

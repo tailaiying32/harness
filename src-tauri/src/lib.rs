@@ -273,6 +273,46 @@ async fn send_message(
         .await
 }
 
+/// Hands a chat whose plan waits to another agent, with the user's answer to
+/// the plan: approved, the new agent builds it; sent back, it revises it.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn hand_over_plan(
+    state: State<'_, AppState>,
+    session_id: String,
+    agent: String,
+    project_path: String,
+    mode: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    text: String,
+    message_id: String,
+    app_notes: Option<Vec<String>>,
+    decision: Decision,
+    // The plan as the user edited it.
+    plan: Option<String>,
+) -> Result<(), String> {
+    let project_path = PathBuf::from(project_path);
+    if !project_path.is_dir() {
+        return Err(format!("Not a folder: {}", project_path.display()));
+    }
+    let sessions = state.sessions.clone();
+    sessions
+        .hand_over_plan(
+            &session_id,
+            &agent,
+            project_path,
+            mode,
+            model,
+            effort,
+            &text,
+            &message_id,
+            &app_notes.unwrap_or_default(),
+            sessions::PlanAnswer { decision, plan },
+        )
+        .await
+}
+
 /// Ask one of a chat's side chats something. Starts it as a copy of the chat
 /// on its first question.
 #[tauri::command]
@@ -1426,6 +1466,7 @@ pub fn run() {
             check_prs,
             title_batch,
             send_message,
+            hand_over_plan,
             answer_approval,
             withdraw_message,
             interrupt,

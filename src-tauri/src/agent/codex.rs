@@ -2195,6 +2195,11 @@ not your original:\n\n{plan}"
         self.shared.state.lock().unwrap().waiting.keys().cloned().collect()
     }
 
+    fn open_plans(&self) -> Vec<String> {
+        let state = self.shared.state.lock().unwrap();
+        state.waiting.iter().filter(|(_, w)| matches!(w, Waiting::Plan { .. })).map(|(id, _)| id.clone()).collect()
+    }
+
     fn withdraw_message(&self, id: &str) -> Result<(), String> {
         let ok = {
             let mut state = self.shared.state.lock().unwrap();

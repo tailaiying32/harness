@@ -259,8 +259,16 @@
   // (see Chat.keepPlanningMessage).
   function keepPlanning() {
     if (!plan) return;
+    // Another agent was picked while the plan waited: it takes the plan on.
+    if (chat.switching) return void chat.handOverPlan("deny");
     void chat.answer(plan, "deny", chat.keepPlanningMessage());
     chat.planNote = "";
+  }
+
+  function approve() {
+    if (!plan) return;
+    if (chat.switching) return void chat.handOverPlan("allow");
+    void chat.answer(plan, "allow", undefined, undefined, chat.approvedPlan());
   }
 </script>
 
@@ -392,11 +400,11 @@
           ></textarea>
         </div>
         <div class="actions">
-          <button class="primary" onclick={() => chat.answer(plan, "allow", undefined, undefined, chat.approvedPlan())}>Approve plan</button>
-          {#if plan.alwaysLabel}
+          <button class="primary" disabled={chat.handingOver} onclick={approve}>Approve plan</button>
+          {#if plan.alwaysLabel && !chat.switching}
             <button onclick={() => chat.answer(plan, "always_allow", undefined, undefined, chat.approvedPlan())}>{plan.alwaysLabel}</button>
           {/if}
-          <button onclick={keepPlanning}>Keep planning</button>
+          <button disabled={chat.handingOver} onclick={keepPlanning}>Keep planning</button>
         </div>
       {:else}
         <span class="faint">{planOutcome(plan)}</span>
