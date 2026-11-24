@@ -116,8 +116,10 @@
   let docBody = $state<HTMLElement>();
   /** The tab's comments not sent yet; the notes take none. */
   const pending = $derived(active === NOTES_TAB ? [] : chat.pendingComments(active));
-  /** A doc (not the plan or the notes) with comments waiting to go. */
-  const docPending = $derived(active !== PLAN_TAB && pending.length > 0);
+  /** A doc (not the plan or the notes): it takes comments and a note under it. */
+  const isDoc = $derived(!!active && active !== PLAN_TAB && active !== NOTES_TAB);
+  /** The doc has comments or a typed note waiting to go. */
+  const docReady = $derived(isDoc && chat.hasDocFeedback(active));
 
   function jump(id: string) {
     editor?.focusComment(id);
@@ -221,8 +223,10 @@
   // The side chat's own message box. Enter sends; Shift+Enter starts a new line.
   let askBox = $state<HTMLTextAreaElement>();
 
-  // A box shown again with kept text is sized to fit it.
+  // A box shown again with kept text is sized to fit it; so is a doc's box
+  // when another doc, with its own note, comes on show.
   $effect(() => {
+    void active;
     if (box) untrack(grow);
   });
   $effect(() => {
@@ -366,18 +370,30 @@
     </div>
   {/key}
 
-  {#if docPending}
-    <!-- Comments waiting to go: sending them is the doc's main action now. -->
+  {#if isDoc && active}
+    <!-- A doc's foot, like a waiting plan's: its comments, a box for a remark
+         on the doc as a whole, and Send for both (grey until one has something). -->
+    {@const tab = active}
     <div class="foot">
-      {@render commentDock()}
+      {#if pending.length}{@render commentDock()}{/if}
+      <div class="feedback">
+        <span class="marker">&gt;</span>
+        <textarea
+          bind:this={box}
+          bind:value={() => chat.docNote(tab), (v) => chat.setDocNote(tab, v)}
+          oninput={grow}
+          rows="1"
+          placeholder="what should change?"
+        ></textarea>
+      </div>
       <div class="actions">
-        <button class="primary" onclick={sendComments}>Send comments</button>
-        {#if chat.isChatDoc(active)}
+        <button class="primary" disabled={!docReady} onclick={sendComments}>Send comments</button>
+        {#if chat.isChatDoc(tab)}
           <button disabled={chat.busy} onclick={saveToProject}>Save to project</button>
         {/if}
       </div>
     </div>
-  {:else if chat.isChatDoc(active) || (active === NOTES_TAB && chat.notes?.trim())}
+  {:else if active === NOTES_TAB && chat.notes?.trim()}
     <!-- A doc in the chat's folder, and the notes, go with the chat unless saved to the project. -->
     <div class="foot">
       <div class="actions">
