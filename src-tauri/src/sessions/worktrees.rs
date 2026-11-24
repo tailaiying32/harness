@@ -395,6 +395,7 @@ impl SessionManager {
             &message_id,
             false,
             &[],
+            None,
         )
         .await
     }

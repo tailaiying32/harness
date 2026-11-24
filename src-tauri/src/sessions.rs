@@ -121,6 +121,14 @@ Then carry on from where it left off.",
     )
 }
 
+/// The user's answer to a waiting plan that goes to another agent
+/// (`hand_over_plan`). `plan` is the plan as the user edited it.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PlanAnswer {
+    pub decision: Decision,
+    pub plan: Option<String>,
+}
+
 fn with_app_notes(notes: &[String], text: &str) -> String {
     let notes: Vec<&str> = notes.iter().map(|n| n.trim()).filter(|n| !n.is_empty()).collect();
     if notes.is_empty() {
@@ -424,7 +432,30 @@ impl SessionManager {
         // moved, say); not shown or saved.
         app_notes: &[String],
     ) -> Result<(), String> {
-        self.send_inner(session_id, agent, project_path, mode, model, effort, text, images, message_id, true, app_notes)
+        self.send_inner(session_id, agent, project_path, mode, model, effort, text, images, message_id, true, app_notes, None)
+            .await
+    }
+
+    /// Hands a chat whose plan waits to another agent, with the user's answer
+    /// to the plan (`switch_agent`). An approved plan goes on as a note from
+    /// the app (`text`, not shown: Approve says nothing in the chat); one
+    /// sent back goes on with what the user said, shown as their message.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn hand_over_plan(
+        &self,
+        session_id: &str,
+        agent: &str,
+        project_path: PathBuf,
+        mode: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        text: &str,
+        message_id: &str,
+        app_notes: &[String],
+        answer: PlanAnswer,
+    ) -> Result<(), String> {
+        let show = answer.decision == Decision::Deny;
+        self.send_inner(session_id, agent, project_path, mode, model, effort, text, &[], message_id, show, app_notes, Some(answer))
             .await
     }
 
@@ -446,8 +477,12 @@ impl SessionManager {
         message_id: &str,
         show: bool,
         app_notes: &[String],
+        // The user's answer to a waiting plan, when this message hands the
+        // chat and its plan to another agent.
+        plan_answer: Option<PlanAnswer>,
     ) -> Result<(), String> {
         let inner = &self.0;
+        let handed_plan = plan_answer.is_some();
 
         // The chat runs on the agent the window picked. A saved chat on
         // another agent is handed over first (`switch_agent`). The program
@@ -501,7 +536,7 @@ impl SessionManager {
         }
 
         if let Some(from) = &switch_from {
-            self.switch_agent(session_id, from, &agent_id, model.as_deref()).await?;
+            self.switch_agent(session_id, from, &agent_id, model.as_deref(), plan_answer).await?;
         }
 
         let _starting = inner.start_lock.lock().await;
@@ -627,7 +662,9 @@ impl SessionManager {
         // has to say waits for the next message.
         let command = expanded.is_none() && text.trim_start().starts_with('/');
         let mut app_notes = app_notes.to_vec();
-        if show && !created && !command {
+        // An approved plan handed to another agent isn't shown, but it is that
+        // agent's first message: the handover note goes with it.
+        if (show || handed_plan) && !created && !command {
             app_notes.extend(inner.store.take_pending_note(session_id).ok().flatten());
         }
         // The message answered the worktree or new-chats question; a command
@@ -794,16 +831,56 @@ impl SessionManager {
     /// is stopped and its session left behind: the new agent starts fresh,
     /// on its own defaults, and is told (with the next message) to reread
     /// this chat. Nothing is carried over from the old agent.
-    async fn switch_agent(&self, session_id: &str, from: &str, to: &str, model: Option<&str>) -> Result<(), String> {
+    ///
+    /// One turn can be handed over as it stands: a turn held only by a plan
+    /// that waits for the user. The old agent is doing nothing but wait, so
+    /// stopping it loses no work. The plan gets `plan_answer` (turned down
+    /// when the user just wrote on); it is saved before the stop, so the
+    /// plan never reads as cancelled, and the old agent isn't told.
+    async fn switch_agent(
+        &self,
+        session_id: &str,
+        from: &str,
+        to: &str,
+        model: Option<&str>,
+        plan_answer: Option<PlanAnswer>,
+    ) -> Result<(), String> {
         let inner = &self.0;
-        let live = {
+        let (busy, live) = {
             let sessions = inner.sessions.lock().unwrap();
             let session = sessions.get(session_id);
-            if session.is_some_and(|s| s.busy) {
+            (session.is_some_and(|s| s.busy), session.and_then(|s| s.agent.clone()))
+        };
+        if busy {
+            let plans = live.as_ref().map(|agent| agent.open_plans()).unwrap_or_default();
+            let open = live.as_ref().map(|agent| agent.open_requests().len()).unwrap_or(0);
+            if plans.is_empty() || plans.len() != open {
                 return Err("Stop the turn before switching agents.".to_string());
             }
-            session.and_then(|s| s.agent.clone())
-        };
+            let PlanAnswer { decision, plan } = plan_answer.unwrap_or(PlanAnswer {
+                decision: Decision::Deny,
+                plan: None,
+            });
+            for request_id in plans {
+                if let Some(plan) = &plan {
+                    self.record(
+                        session_id,
+                        AgentEvent::PlanEdited {
+                            request_id: request_id.clone(),
+                            plan: plan.clone(),
+                        },
+                    );
+                }
+                self.record(
+                    session_id,
+                    AgentEvent::ApprovalAnswered {
+                        request_id,
+                        decision: decision.clone(),
+                        answers: None,
+                    },
+                );
+            }
+        }
         if let Some(agent) = live {
             agent.stop();
             self.wait_for_exit(session_id).await?;
@@ -1336,7 +1413,7 @@ mod tests {
 
     /// Tests written from the outside: what a user does and should see.
     mod black_box;
-    use crate::events::ModelInfo;
+    use crate::events::{ApprovalKind, ModelInfo};
     use crate::worktree::PrInfo;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1361,6 +1438,8 @@ mod tests {
         hang_on_close: Arc<AtomicBool>,
         /// Requests waiting for an answer, as the real adapter keeps them.
         open: Arc<Mutex<Vec<String>>>,
+        /// Every plan asked about; the open ones are the waiting plans.
+        plans: Arc<Mutex<Vec<String>>>,
     }
 
     struct FakeAgent {
@@ -1368,6 +1447,7 @@ mod tests {
         told: Arc<Mutex<Vec<String>>>,
         hang_on_close: Arc<AtomicBool>,
         open: Arc<Mutex<Vec<String>>>,
+        plans: Arc<Mutex<Vec<String>>>,
     }
 
     impl RunningAgent for FakeAgent {
@@ -1400,6 +1480,10 @@ mod tests {
         }
         fn open_requests(&self) -> Vec<String> {
             self.open.lock().unwrap().clone()
+        }
+        fn open_plans(&self) -> Vec<String> {
+            let plans = self.plans.lock().unwrap();
+            self.open.lock().unwrap().iter().filter(|id| plans.contains(id)).cloned().collect()
         }
         fn withdraw_message(&self, id: &str) -> Result<(), String> {
             self.told.lock().unwrap().push(format!("withdraw {id}"));
@@ -1445,10 +1529,16 @@ mod tests {
             // What the test plays as the agent passes the adapter first, which
             // keeps the requests that wait for an answer.
             let open = self.open.clone();
+            let plans = self.plans.clone();
             let inner = sink.clone();
             self.sinks.lock().unwrap().push(Arc::new(move |event: AgentEvent| {
                 match &event {
-                    AgentEvent::ApprovalRequest { request_id, .. } => open.lock().unwrap().push(request_id.clone()),
+                    AgentEvent::ApprovalRequest { request_id, approval, .. } => {
+                        if *approval == ApprovalKind::Plan {
+                            plans.lock().unwrap().push(request_id.clone());
+                        }
+                        open.lock().unwrap().push(request_id.clone())
+                    }
                     AgentEvent::ApprovalCancelled { request_id } => open.lock().unwrap().retain(|id| id != request_id),
                     _ => {}
                 }
@@ -1462,6 +1552,7 @@ mod tests {
                 told: self.told.clone(),
                 hang_on_close: self.hang_on_close.clone(),
                 open: self.open.clone(),
+                plans: self.plans.clone(),
             }))
         }
         fn list_models(&self, _: &Path, _: Option<&[String]>) -> Result<Vec<ModelInfo>, String> {
@@ -2599,6 +2690,103 @@ are there now, so use the new paths.)\n\ncarry on",
             .unwrap_err();
         assert!(err.contains("Stop the turn"), "{err}");
         assert_eq!(rig.store.session("s1").unwrap().unwrap().agent, crate::agent::CURSOR);
+    }
+
+    /// A chat on Claude Code with a plan waiting, and Cursor installed.
+    async fn rig_with_a_waiting_plan() -> (Rig, Arc<Fake>) {
+        let rig = rig(LONG);
+        rig.send("make a plan").await;
+        rig.agent_says(AgentEvent::SessionStarted { agent_session_id: "claude-1".into(), model: None, mode: None });
+        rig.agent_says(AgentEvent::ApprovalRequest {
+            request_id: "p1".into(),
+            approval: ApprovalKind::Plan,
+            tool_name: "ExitPlanMode".into(),
+            title: "ExitPlanMode".into(),
+            input: serde_json::json!({ "plan": "do it" }),
+            tool_id: None,
+            always_label: None,
+        });
+        rig.agent_says(AgentEvent::Status {
+            state: SessionState::WaitingApproval,
+        });
+        let cursor = Arc::new(Fake::default());
+        rig.manager.0.agents.add(crate::agent::CURSOR, cursor.clone(), Some("cursor".into()));
+        (rig, cursor)
+    }
+
+    fn answered(events: &[AgentEvent], decision: Decision) -> Option<usize> {
+        events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::ApprovalAnswered { request_id, decision: d, .. } if request_id == "p1" && *d == decision))
+    }
+
+    #[tokio::test]
+    async fn an_approved_plan_is_handed_to_another_agent_to_build() {
+        let (rig, cursor) = rig_with_a_waiting_plan().await;
+        let answer = PlanAnswer {
+            decision: Decision::Allow,
+            plan: Some("do it well".into()),
+        };
+        rig.manager
+            .hand_over_plan("s1", crate::agent::CURSOR, "/work".into(), None, None, None, "Build this plan.", "m2", &[], answer)
+            .await
+            .unwrap();
+
+        // The old agent is stopped, never answered or interrupted.
+        let told = rig.told();
+        assert!(told.contains(&"kill".to_string()), "{told:?}");
+        assert!(!told.iter().any(|t| t.starts_with("answer") || t == "stop"), "{told:?}");
+        assert_eq!(rig.store.session("s1").unwrap().unwrap().agent, crate::agent::CURSOR);
+
+        // The plan is saved as approved, with the user's edit, before the switch.
+        let events = rig.store.events("s1").unwrap();
+        let approved = answered(&events, Decision::Allow).expect("approved");
+        let switched = events.iter().position(|e| matches!(e, AgentEvent::AgentSwitched { .. })).expect("switched");
+        assert!(approved < switched, "{events:?}");
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::PlanEdited { plan, .. } if plan == "do it well")));
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Interrupted)), "{events:?}");
+        // The chat shows no message for the approval.
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::UserMessage { text, .. } if text == "Build this plan.")));
+        // The new agent gets the handover note and the plan to build.
+        let said = cursor.told.lock().unwrap().last().unwrap().clone();
+        assert!(said.contains("handed to you from Claude Code"), "{said}");
+        assert!(said.contains("Build this plan."), "{said}");
+    }
+
+    #[tokio::test]
+    async fn a_message_on_another_agent_hands_the_waiting_plan_over_turned_down() {
+        let (rig, cursor) = rig_with_a_waiting_plan().await;
+        rig.manager
+            .send_message("s1", crate::agent::CURSOR, "/work".into(), None, None, None, "smaller, please", &[], "m2", &[])
+            .await
+            .unwrap();
+        let events = rig.store.events("s1").unwrap();
+        assert!(answered(&events, Decision::Deny).is_some(), "{events:?}");
+        assert!(!rig.told().iter().any(|t| t.starts_with("answer")));
+        let said = cursor.told.lock().unwrap().last().unwrap().clone();
+        assert!(said.contains("handed to you") && said.contains("smaller, please"), "{said}");
+    }
+
+    #[tokio::test]
+    async fn a_turn_held_by_more_than_a_plan_is_not_handed_over() {
+        let (rig, _cursor) = rig_with_a_waiting_plan().await;
+        rig.agent_says(AgentEvent::ApprovalRequest {
+            request_id: "t1".into(),
+            approval: ApprovalKind::Tool,
+            tool_name: "Bash".into(),
+            title: "Bash".into(),
+            input: serde_json::json!({}),
+            tool_id: None,
+            always_label: None,
+        });
+        let err = rig
+            .manager
+            .send_message("s1", crate::agent::CURSOR, "/work".into(), None, None, None, "go", &[], "m2", &[])
+            .await
+            .unwrap_err();
+        assert!(err.contains("Stop the turn"), "{err}");
+        assert_eq!(rig.store.session("s1").unwrap().unwrap().agent, crate::agent::CLAUDE);
+        assert!(answered(&rig.store.events("s1").unwrap(), Decision::Deny).is_none());
     }
 
     #[tokio::test]

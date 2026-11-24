@@ -99,6 +99,8 @@ pub struct ClaudeCodeAdapter;
 struct PendingApproval {
     input: Value,
     suggestions: Value,
+    /// A plan waiting for its answer.
+    plan: bool,
 }
 
 type Pending = Arc<Mutex<HashMap<String, PendingApproval>>>;
@@ -1091,6 +1093,11 @@ impl RunningAgent for ClaudeCodeProcess {
         self.pending.lock().unwrap().keys().cloned().collect()
     }
 
+    fn open_plans(&self) -> Vec<String> {
+        let pending = self.pending.lock().unwrap();
+        pending.iter().filter(|(_, p)| p.plan).map(|(id, _)| id.clone()).collect()
+    }
+
     // Claude Code drops it from its queue and answers whether it was still
     // there (see the `WITHDRAW_REQUEST` reply).
     fn withdraw_message(&self, id: &str) -> Result<(), String> {
@@ -1570,6 +1577,7 @@ fn translate(v: &Value, pending: &Pending) -> Translated {
                     PendingApproval {
                         input: request["input"].clone(),
                         suggestions,
+                        plan: approval == ApprovalKind::Plan,
                     },
                 );
                 out.events.push(AgentEvent::ApprovalRequest {

@@ -26,6 +26,7 @@ import {
   sideEnd,
   sideInterrupt,
   sideWithdrawMessage,
+  handOverPlan,
   SIDE_GONE,
   sideSend,
   signIn,
@@ -56,7 +57,7 @@ import {
   agentLabel,
   type AgentId,
 } from "../ipc";
-import { defaultMode, modeFor, modelName } from "../models";
+import { agentModes, defaultMode, modeFor, modelName } from "../models";
 import { FILE_LINK, fileWord, linkable, toLinks, type FileRef } from "../chat/files";
 import { chatsTool, currentToolName, docPath, planOf, showsOutput, textAfter, type ToolCall } from "../tools";
 import { ChatInfo } from "./chatInfo.svelte";
@@ -599,6 +600,26 @@ export class Chat {
     return this.plan !== null && !this.plan.answered && !this.plan.cancelled;
   }
 
+  /**
+   * The turn is held by a waiting plan and nothing else: the agent only
+   * waits, so the chat can be handed to another agent as it stands.
+   */
+  get planOnly(): boolean {
+    // (A chat opened again while its plan waits may not have heard a status yet.)
+    if (this.status === "working" || this.status === "starting" || !this.planPending) return false;
+    return !this.items.some(
+      (i) =>
+        i.type === "approval" &&
+        i.approval !== "plan" &&
+        i.approval !== "worktree" &&
+        i.approval !== "new_chats" &&
+        !i.answered &&
+        !i.cancelled,
+    );
+  }
+  /** The plan and the chat are on their way to another agent. */
+  handingOver = $state(false);
+
   /** The plan's tab was closed. A new plan, or "open plan" in the chat, brings it back. */
   planClosed = $state(false);
 
@@ -1138,6 +1159,56 @@ export class Chat {
     if (note) parts.push(note);
     if (comments.length) parts.push(formatComments(comments, this.planText, "the plan"));
     return parts.join("\n\n");
+  }
+
+  /**
+   * Answers the waiting plan through the agent picked for the chat's next
+   * message: approved, that agent builds it; kept planning, it revises it.
+   * The old agent is stopped where it waits, and the plan keeps its answer.
+   */
+  async handOverPlan(decision: "allow" | "deny"): Promise<void> {
+    const plan = this.plan;
+    if (!plan || !this.switching || !this.planOnly || this.handingOver) return;
+    this.handingOver = true;
+    const approve = decision === "allow";
+    const edited = approve ? this.approvedPlan() : undefined;
+    const text = approve
+      ? `The user approved this plan and picked you to build it. Build it now.\n\n${edited ?? this.planText}`
+      : this.keepPlanningMessage();
+    // The agent that revises the plan gets its text, and plans as the old one did.
+    const notes = approve ? [] : [`The plan the user wants changed:\n\n${planOf(plan.input).text}`];
+    if (!approve && agentModes[this.agent].some((m) => m.id === "plan")) this.mode = "plan" as Mode;
+    const note = this.push<NoteItem>({ type: "note", text: switchNote(this.agent, this.modelChoice) });
+    const messageId = crypto.randomUUID();
+    // Approve says nothing in the chat; what Keep planning says is the user's message.
+    const said = approve ? null : this.push({ type: "user", text, messageId });
+    this.stopping = false;
+    if (this.turnStartedAt === null) this.turnStartedAt = Date.now();
+    try {
+      await handOverPlan(
+        this.sessionId,
+        this.agent,
+        this.projectPath.trim(),
+        this.mode,
+        this.modelChoice,
+        this.effortChoice,
+        text,
+        messageId,
+        notes,
+        decision,
+        edited,
+      );
+      this.planDraft = null;
+      this.planNote = "";
+      // The comments went with the answer.
+      delete this.comments[PLAN_TAB];
+      this.onSent?.();
+    } catch (e) {
+      this.items = this.items.filter((i) => i.id !== note.id && i.id !== said?.id);
+      this.push({ type: "error", text: String(e) });
+    } finally {
+      this.handingOver = false;
+    }
   }
 
   /** Self-test only: puts a comment on the first match of `quote` in a tab's text. */
@@ -1919,7 +1990,10 @@ export class Chat {
     if (!this.started) this.ranOn = this.agent;
     // A switch goes through with this message: its line sits above it.
     const switched = this.switching && !this.owner ? this.push<NoteItem>({ type: "note", text: switchNote(this.agent, this.modelChoice) }) : null;
-    this.push({ type: "user", text: message, messageId, queued: this.busy, images: images.length ? images : undefined });
+    // A message that hands a waiting plan to another agent doesn't wait for
+    // the turn: the old agent is stopped and the new one reads it first.
+    const handsOver = switched !== null && this.planOnly;
+    this.push({ type: "user", text: message, messageId, queued: this.busy && !handsOver, images: images.length ? images : undefined });
     this.stopping = false;
     if (this.turnStartedAt === null) this.turnStartedAt = Date.now();
     try {

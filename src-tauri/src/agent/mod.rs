@@ -355,6 +355,10 @@ pub trait RunningAgent: Send + Sync {
     ) -> Result<(), String>;
     /// The requests still waiting for the user's answer, by request ID.
     fn open_requests(&self) -> Vec<String>;
+    /// Those of them that are plans waiting for the user's answer.
+    fn open_plans(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// Take back a message sent mid-turn that the agent hasn't read yet. The
     /// answer comes as `MessageWithdrawn`.
     fn withdraw_message(&self, id: &str) -> Result<(), String>;

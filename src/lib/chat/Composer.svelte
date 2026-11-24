@@ -120,13 +120,14 @@
   );
   // Every installed agent's models are offered, under its name; picking one
   // puts the chat on that agent. In a chat that has started, the next message
-  // hands it over; while a turn runs, other agents wait (greyed out).
+  // hands it over; while a turn runs, other agents wait (greyed out). A turn
+  // that only waits on a plan can be handed over as it stands.
   const groups = $derived(
     agents
       .filter((a) => a === chat.agent || (models[a] ?? []).length > 0)
       .map((agent) => ({ agent, list: agent === chat.agent ? modelOptions : models[agent] })),
   );
-  const locked = (agent: AgentId) => chat.started && chat.busy && agent !== chat.agent;
+  const locked = (agent: AgentId) => chat.started && chat.busy && !chat.planOnly && agent !== chat.agent;
 
   function pickModel(agent: AgentId, choice: string) {
     chat.setAgent(agent, loadPrefs().mode);
