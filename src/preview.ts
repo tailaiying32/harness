@@ -1233,6 +1233,8 @@ Object.assign(commands, {
   title_bar: () => {},
   dev_build: () => false,
   set_app_icon: () => {},
+  update_check: () => null,
+  update_install: () => {},
 });
 
 (window as any).__TAURI_INTERNALS__ = {
