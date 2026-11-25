@@ -136,7 +136,7 @@
   {#if open}
     {#if confirming}
       <div class="menu ask" role="alertdialog">
-        <span class="question">stays awake until {clock(until)} at most</span>
+        <span class="question">stay awake until {clock(until)}</span>
         {#if waiting.length}<span class="waiting">waiting on you: {waiting.join(", ")}</span>{/if}
         {#if problem}<span class="problem">{problem}</span>{/if}
         <span class="answers">
