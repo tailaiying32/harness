@@ -2,16 +2,12 @@
   // The theme picker in the top bar: a menu drawn like the app's own, never a
   // native one. It stays open after a pick, so themes can be tried in a row.
   import { themes, type Theme } from "../src/lib/themeData";
-  import { manualPick, pick, shownTheme, watchTheme } from "./look";
+  import { pick, shownTheme, watchTheme } from "./look";
 
   let { quiet = false }: { quiet?: boolean } = $props();
 
   let shown = $state(shownTheme().id);
-  let auto = $state(manualPick() === null);
-  watchTheme((theme) => {
-    shown = theme.id;
-    auto = manualPick() === null;
-  });
+  watchTheme((theme) => (shown = theme.id));
   let open = $state(false);
   let root: HTMLElement;
 
@@ -34,12 +30,8 @@
   </button>
   {#if open}
     <div class="menu" role="menu">
-      <button role="menuitemradio" aria-checked={auto} class:picked={auto} onclick={() => pick("auto")}>
-        <span class="swatch split"></span>
-        auto (system)
-      </button>
       {#each themes as t (t.id)}
-        <button role="menuitemradio" aria-checked={!auto && t.id === shown} class:picked={!auto && t.id === shown} onclick={() => pick(t.id)}>
+        <button role="menuitemradio" aria-checked={t.id === shown} class:picked={t.id === shown} onclick={() => pick(t.id)}>
           <span class="swatch" style:background={t.bg} style:border-color={t.faint}><span style:background={t.accent}></span></span>
           {label(t)}
         </button>
@@ -110,9 +102,5 @@
   .swatch span {
     width: 1ch;
     height: 0.45em;
-  }
-  .swatch.split {
-    background: linear-gradient(90deg, #111210 50%, #fcfcfb 50%);
-    border-color: var(--faint);
   }
 </style>

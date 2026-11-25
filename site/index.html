@@ -9,8 +9,7 @@
       content="Tilde is a lightweight, native macOS workspace for Claude Code, Codex, Antigravity, and Cursor—using your existing CLI logins with local context, inline comments, git worktrees, terminal, and browser."
     />
     <meta name="robots" content="index, follow" />
-    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#111210" />
-    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#fcfcfb" />
+    <meta name="theme-color" content="#111210" />
 
     <!-- %CANONICAL_TAGS% -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
@@ -55,11 +54,11 @@
       }
     </script>
 
-    <!-- Only apply a cached theme before paint when the visitor picked one manually; otherwise CSS follows system light/dark. -->
+    <!-- The theme last shown, put up before anything draws (see look.ts). -->
     <script>
       try {
-        if (localStorage.getItem("tilde.site.theme")) {
-          var look = JSON.parse(localStorage.getItem("tilde.look"));
+        var look = JSON.parse(localStorage.getItem("tilde.look"));
+        if (look) {
           for (var name in look.vars) document.documentElement.style.setProperty(name, look.vars[name]);
           document.documentElement.style.colorScheme = look.scheme;
         }

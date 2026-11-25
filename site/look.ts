@@ -7,22 +7,15 @@ import { themes, themeVars, type Theme } from "../src/lib/themeData";
 const PICK = "tilde.site.theme";
 const LOOK = "tilde.look";
 
-const system = window.matchMedia("(prefers-color-scheme: dark)");
-
-/** The manual pick id, or null when following the system light/dark mode. */
-export function manualPick(): string | null {
-  try {
-    const id = localStorage.getItem(PICK);
-    return themes.some((t) => t.id === id) ? id : null;
-  } catch {
-    return null;
-  }
-}
-
-/** The picked theme, or Tilde Dark / Tilde Light matching the system's colour scheme. */
+/** The picked theme, or Tilde Dark by default. */
 function pickedTheme(): Theme {
-  const id = manualPick();
-  return (id ? themes.find((t) => t.id === id) : undefined) ?? themes.find((t) => t.dark === system.matches)!;
+  let id: string | null = null;
+  try {
+    id = localStorage.getItem(PICK);
+  } catch {
+    // Storage can be unavailable; fall back to Tilde Dark.
+  }
+  return (id ? themes.find((t) => t.id === id) : undefined) ?? themes.find((t) => t.id === "tilde-dark") ?? themes[0];
 }
 
 let shown = pickedTheme();
@@ -46,29 +39,18 @@ export function show(theme: Theme): void {
   const scheme = theme.dark ? "dark" : "light";
   root.style.colorScheme = scheme;
   try {
-    if (manualPick()) localStorage.setItem(LOOK, JSON.stringify({ vars, scheme }));
-    else localStorage.removeItem(LOOK);
+    localStorage.setItem(LOOK, JSON.stringify({ vars, scheme }));
   } catch {
     // Storage can be unavailable; the page then starts in the default colours.
   }
   for (const changed of watchers) changed(theme);
 }
 
-/** Sync the document immediately on load so light/dark system changes apply without stale vars. */
+/** Sync the document immediately on load so cached variables match the active theme. */
 show(shown);
 
-/** The visitor's pick ("auto" clears the override and follows system light/dark). */
+/** The visitor's pick: kept, then shown. */
 export function pick(id: string): void {
-  if (id === "auto") {
-    try {
-      localStorage.removeItem(PICK);
-      localStorage.removeItem(LOOK);
-    } catch {
-      // Ignore storage errors.
-    }
-    show(pickedTheme());
-    return;
-  }
   const theme = themes.find((t) => t.id === id);
   if (!theme) return;
   try {
@@ -78,8 +60,3 @@ export function pick(id: string): void {
   }
   show(theme);
 }
-
-// With no pick made, the page follows the system as it goes light or dark.
-system.addEventListener("change", () => {
-  if (!manualPick()) show(pickedTheme());
-});
