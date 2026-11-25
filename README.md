@@ -6,7 +6,8 @@ Supports **Claude Code**, **Codex**, **Antigravity**, and **Cursor** using your 
 
 [Download for macOS](https://github.com/tailaiying32/tilde/releases/latest) · Windows coming soon.
 
-![Tilde workspace with an active chat, plan, and inline comment dock](assets/screenshot.png)
+<!-- ![Tilde workspace with an active chat, plan, and inline comment dock](assets/screenshot.png) -->
+https://github.com/user-attachments/assets/8e6d8ed1-d77c-4a38-b2ff-60c78d38d41a
 
 ## Why Tilde?
 Most desktop wrappers are heavy Electron shells that trap chat history, plans, and notes inside a single vendor, while gobbling up disk space and memory. Tilde puts a single UI in front of the CLIs already installed on your machine and owns the local context layer, so chats, docs, memory and preferences stay portable across every agent. Beyond that, it pairs a beautiful, terminal-inspired UI with thoughtful design choices and small quality-of-life features so your agents work with you, not against you.
