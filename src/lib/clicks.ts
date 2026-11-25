@@ -2,6 +2,7 @@
 
 import { homeDir } from "@tauri-apps/api/path";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { imageLoaded } from "./markdown";
 import { localPath } from "./paths";
 
 /** Where a click's links go: the folder relative links start from, and how to show a markdown file. */
@@ -27,6 +28,18 @@ export function contentClick(target: LinkTarget): (e: MouseEvent) => Promise<voi
       } catch {
         copy.textContent = "couldn't copy";
       }
+      return;
+    }
+
+    // A web image not loaded yet (see markdown.ts): the click loads it.
+    const image = el.closest<HTMLElement>("[data-image]");
+    if (image) {
+      const src = image.dataset.image ?? "";
+      imageLoaded(src);
+      const img = document.createElement("img");
+      img.src = src;
+      img.alt = image.dataset.alt ?? "";
+      image.replaceWith(img);
       return;
     }
 

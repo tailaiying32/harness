@@ -85,6 +85,8 @@ Everything Tilde keeps for you lives on disk as plain files (tracked per project
         └── memory/         # shared project memory index and notes
 ```
 
+Each agent also keeps its own transcript of every chat in its own folder (`~/.claude`, `~/.codex` and so on). Deleting a chat in Tilde removes Tilde's copy only; the agent's transcript stays until you delete it there.
+
 ## Requirements
 
 - macOS (Apple Silicon)
