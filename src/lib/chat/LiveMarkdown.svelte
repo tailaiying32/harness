@@ -1,3 +1,13 @@
+<script module lang="ts">
+  type EditorModules = [
+    typeof import("./liveMarkdown"),
+    typeof import("./commentMarks"),
+    typeof import("./findMarks"),
+  ];
+  /** Cached after first load so switching or moving docs mounts CodeMirror synchronously with no flash. */
+  let cached: EditorModules | null = null;
+</script>
+
 <script lang="ts">
   // Markdown written in place, shown formatted as you type (see liveMarkdown.ts).
   // The editor loads the first time one is shown; until then, the text shows
@@ -40,16 +50,11 @@
   /** A change from outside is being put in: not an edit to report back. */
   let taking = false;
 
-  onMount(async () => {
-    const [{ createLiveMarkdown }, commentMarks, findMarks] = await Promise.all([
-      import("./liveMarkdown"),
-      import("./commentMarks"),
-      import("./findMarks"),
-    ]);
+  function mountEditor([live, commentMarks, findMarks]: EditorModules) {
     if (gone || !host) return;
     marks = commentMarks;
     finding = findMarks;
-    view = createLiveMarkdown(host, {
+    view = live.createLiveMarkdown(host, {
       text,
       placeholder,
       onchange: (t) => taking || onchange(t),
@@ -58,6 +63,21 @@
       oncomments,
     });
     if (autofocus) view.focus();
+  }
+
+  onMount(() => {
+    if (cached) {
+      mountEditor(cached);
+      return;
+    }
+    void Promise.all([
+      import("./liveMarkdown"),
+      import("./commentMarks"),
+      import("./findMarks"),
+    ]).then((mods) => {
+      cached = mods;
+      mountEditor(mods);
+    });
   });
 
   // Text changed from outside (a new plan arrived, Claude wrote the notes):
