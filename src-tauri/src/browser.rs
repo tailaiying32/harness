@@ -32,7 +32,8 @@ check a web UI you are building, use the tilde_browser tools (open, read, click,
 screenshot, resize, tabs, close); the user sees the same pages. It has tabs: open loads into the \
 tab on show unless you ask for a new one, and every tool takes an optional tab id (see tabs). The \
 panel is narrow, so pages show their small-screen layout; use resize to give a page a window \
-size of your choosing.";
+size of your choosing. Pages keep running and every tool works whether or not the user is looking \
+(another chat, another panel view, another app): never stop or wait for the browser to be shown.";
 
 /// How long an action may take before it is given up.
 const ACTION_WAIT: Duration = Duration::from_secs(15);
@@ -883,8 +884,11 @@ impl Browsers {
         // Starts blank: the page's scripts are set up before the first real load.
         let blank = tauri::Url::parse("about:blank").expect("valid");
         // Not focused: a focused new web view brings the app to the front.
+        // Never paused or slowed while unseen: the agent works pages the user
+        // isn't looking at (another chat, another app, another Space).
         let builder = WebviewBuilder::new(&label, WebviewUrl::External(blank))
             .focused(false)
+            .background_throttling(tauri::utils::config::BackgroundThrottlingPolicy::Disabled)
             .initialization_script(BRIDGE_JS)
             .on_navigation(move |url| {
                 if is_local(url) {
@@ -926,6 +930,7 @@ impl Browsers {
             let (tx, rx) = oneshot::channel::<usize>();
             let _ = webview.with_webview(move |platform| {
                 mac::only_bridge(platform.inner(), BRIDGE_JS);
+                mac::draw_when_unseen(platform.inner());
                 let _ = tx.send(platform.inner() as usize);
             });
             rx.await.unwrap_or(0)
@@ -1214,7 +1219,7 @@ fn tabs_lines(list: &[BrowserTab], shown: Option<&str>, on_screen: bool) -> Stri
         let url = if tab.url.is_empty() { "(empty)" } else { tab.url.as_str() };
         out.push_str(&format!("{}  {title}  {url}", tab.id));
         if shown == Some(tab.id.as_str()) {
-            out.push_str(if on_screen { ", on screen" } else { ", shown when the browser panel is open" });
+            out.push_str(if on_screen { ", on screen" } else { ", on show (off screen for now; every tool still works)" });
         }
         out.push('\n');
     }
@@ -1473,6 +1478,20 @@ mod mac {
                 true,
             );
             scripts.addUserScript(&bridge);
+        }
+    }
+
+    /// Keeps the page drawing (animation frames, `visibilityState` "visible")
+    /// while the window is covered or on another Space. WebKit otherwise
+    /// counts a covered window as hidden and stops drawing, so screenshots go
+    /// stale. Private WebKit setting; skipped if this WebKit lacks it.
+    pub fn draw_when_unseen(view: *mut c_void) {
+        // SAFETY: as in `snapshot`: wry's live WKWebView, on the main thread.
+        let view: &AnyObject = unsafe { &*(view as *const AnyObject) };
+        let setter = objc2::sel!(_setWindowOcclusionDetectionEnabled:);
+        let has: bool = unsafe { msg_send![view, respondsToSelector: setter] };
+        if has {
+            let _: () = unsafe { msg_send![view, _setWindowOcclusionDetectionEnabled: false] };
         }
     }
 
@@ -1938,6 +1957,6 @@ mod tests {
             tabs_lines(&list, Some("1"), true),
             "1  My app  http://localhost:5173/, on screen\n2  (no title)  (empty)"
         );
-        assert!(tabs_lines(&list, Some("2"), false).ends_with("(empty), shown when the browser panel is open"));
+        assert!(tabs_lines(&list, Some("2"), false).ends_with("(empty), on show (off screen for now; every tool still works)"));
     }
 }

@@ -175,6 +175,9 @@ impl Chats {
 struct Inner {
     active: Mutex<Option<Active>>,
     chats: Mutex<Chats>,
+    /// Held while any chat works, so the system doesn't slow the app down
+    /// (App Nap on Mac) while its window is out of sight.
+    no_nap: Mutex<Option<NoNap>>,
     /// To the window. Not the wrapped one that feeds `observe`.
     out: Out,
     cfg: Config,
@@ -188,6 +191,7 @@ impl KeepAwake {
         Self(Arc::new(Inner {
             active: Mutex::default(),
             chats: Mutex::default(),
+            no_nap: Mutex::default(),
             out,
             cfg: Config::from_env(),
         }))
@@ -203,6 +207,14 @@ impl KeepAwake {
             chats.observe(envelope);
             chats.any_working()
         };
+        {
+            let mut no_nap = self.0.no_nap.lock().unwrap();
+            if working && no_nap.is_none() {
+                *no_nap = Some(NoNap::take());
+            } else if !working {
+                no_nap.take();
+            }
+        }
         if working && let Some(a) = self.0.active.lock().unwrap().as_mut() {
             a.seen_work = true;
             a.quiet_since = None;
@@ -409,7 +421,7 @@ fn clock(ms: u64) -> String {
 }
 
 pub use platform::on_battery;
-use platform::{Hold, idle};
+use platform::{Hold, NoNap, idle};
 
 #[cfg(target_os = "macos")]
 mod platform {
@@ -437,6 +449,30 @@ mod platform {
         fn drop(&mut self) {
             let _ = self.0.kill();
             let _ = self.0.wait();
+        }
+    }
+
+    /// Keeps App Nap off: a covered or hidden app is otherwise slowed, and
+    /// with it the agents' tool calls and the browser's pages.
+    pub struct NoNap(objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2::runtime::NSObjectProtocol>>);
+
+    // SAFETY: the token is an opaque object NSProcessInfo hands back; ending it
+    // from any thread is allowed.
+    unsafe impl Send for NoNap {}
+
+    impl NoNap {
+        pub fn take() -> Self {
+            use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+            let info = NSProcessInfo::processInfo();
+            let reason = NSString::from_str("A chat is working");
+            NoNap(info.beginActivityWithOptions_reason(NSActivityOptions::UserInitiatedAllowingIdleSystemSleep, &reason))
+        }
+    }
+
+    impl Drop for NoNap {
+        fn drop(&mut self) {
+            // SAFETY: the token from `beginActivityWithOptions`, ended once.
+            unsafe { objc2_foundation::NSProcessInfo::processInfo().endActivity(&self.0) };
         }
     }
 
@@ -476,6 +512,15 @@ mod platform {
     };
     use windows_sys::Win32::System::SystemInformation::GetTickCount;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+
+    /// Windows has no App Nap to hold off.
+    pub struct NoNap;
+
+    impl NoNap {
+        pub fn take() -> Self {
+            NoNap
+        }
+    }
 
     /// How often the hold looks again at whether the screen must stay on.
     const RECHECK: Duration = Duration::from_secs(30);
@@ -546,6 +591,14 @@ mod platform {
     use std::time::Duration;
 
     pub struct Hold;
+
+    pub struct NoNap;
+
+    impl NoNap {
+        pub fn take() -> Self {
+            NoNap
+        }
+    }
 
     impl Hold {
         pub fn take() -> Result<Self, String> {
