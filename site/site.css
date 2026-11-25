@@ -10,26 +10,7 @@
   /* The page's column: the window is as wide as the text above it. */
   --page: 1240px;
   --edge: 32px;
-}
-
-/* Until the script has run, a light system gets the light theme. */
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #fcfcfb;
-    --panel: #f1f1ef;
-    --fg: #3a3832;
-    --bright: #191813;
-    --dim: #858480;
-    --faint: #b7b6b2;
-    --line: #e6e6e3;
-    --accent: #a8691c;
-    --ok: #52733f;
-    --bad: #b0463a;
-    --blue: #2f6aa8;
-    --yellow: #94740c;
-    --purple: #7a4f9a;
-    color-scheme: light;
-  }
+  color-scheme: dark;
 }
 
 /* The app's window fills its frame; a page runs as long as its text. */
