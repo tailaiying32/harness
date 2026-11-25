@@ -15,6 +15,7 @@ mod side_chat;
 mod skills;
 mod store;
 mod terminal;
+mod update;
 mod worktree;
 
 use std::collections::BTreeMap;
@@ -1176,6 +1177,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(update::Updates::default())
         .setup(|app| {
             launched();
             let dir = match crate::home::app_env("DATA_DIR") {
@@ -1528,6 +1531,8 @@ pub fn run() {
             autotest,
             autotest_wait,
             autotest_report,
+            update::update_check,
+            update::update_install,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

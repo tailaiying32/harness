@@ -7,6 +7,8 @@
   import RenameField from "./RenameField.svelte";
   import { prLabel, shortPath } from "./paths";
   import { loadPrefs, savePrefs } from "./themes";
+  import { onMount } from "svelte";
+  import { updateCheck, updateInstall } from "./ipc";
 
   let { app, onsettings }: { app: AppState; onsettings: () => void } = $props();
 
@@ -134,7 +136,47 @@
     deleting = null;
     await app.remove(id);
   }
+
+  // ---- Updates ----
+  // A newer version, downloaded and waiting. Looked for at start and when the
+  // window comes back, at most every few hours; a failed look (offline) tries
+  // again next time.
+  let update = $state<string | null>(null);
+  let lastLook = 0;
+  let looking = false;
+  const LOOK_EVERY = 6 * 60 * 60 * 1000;
+  async function look() {
+    if (update || looking || Date.now() - lastLook < LOOK_EVERY) return;
+    looking = true;
+    try {
+      update = await updateCheck();
+      lastLook = Date.now();
+    } catch {
+    } finally {
+      looking = false;
+    }
+  }
+  onMount(() => void look());
+
+  /** Restarting ends the turns in progress, so it asks first while a chat is working. */
+  let askRestart = $state(false);
+  let installing = $state(false);
+  let installFailed = $state("");
+  const working = $derived(app.projects.some((p) => p.sessions.some((s) => app.dot(s.id) === "working")));
+  async function install() {
+    askRestart = false;
+    installing = true;
+    installFailed = "";
+    try {
+      await updateInstall();
+    } catch (e) {
+      installing = false;
+      installFailed = String(e);
+    }
+  }
 </script>
+
+<svelte:window onfocus={look} />
 
 <aside>
   <!-- On a Mac: the strip by the window buttons drags the window, like a title bar. -->
@@ -207,8 +249,24 @@
   </div>
 
   <div class="foot">
-    <button onclick={() => app.newChat()}>+ new chat</button>
-    <button onclick={onsettings}>settings</button>
+    {#if askRestart}
+      <span class="ask">chats working, restart?</span>
+      <button class="danger" onclick={install}>yes</button>
+      <button class="no" onclick={() => (askRestart = false)}>no</button>
+    {:else}
+      <button onclick={() => app.newChat()}>+ new chat</button>
+      <!-- While an update waits it takes settings' place; ⌘, still opens settings. -->
+      {#if update}
+        <button
+          class="update"
+          title={installFailed || `Restart into Tilde ${update}`}
+          disabled={installing}
+          onclick={() => (working ? (askRestart = true) : install())}>{installing ? "updating…" : "update"}</button
+        >
+      {:else}
+        <button onclick={onsettings}>settings</button>
+      {/if}
+    {/if}
   </div>
 </aside>
 
@@ -414,6 +472,7 @@
   .foot {
     display: flex;
     justify-content: space-between;
+    gap: 1ch;
     margin-top: var(--gap);
   }
   .foot button {
@@ -421,6 +480,15 @@
   }
   .foot button:hover {
     color: var(--fg);
+  }
+  .foot .update {
+    color: var(--accent);
+  }
+  .foot .ask {
+    padding-left: 0;
+  }
+  .foot .danger {
+    color: var(--bad);
   }
   /* A narrow window is all chat. */
   @media (max-width: 720px) {

@@ -582,3 +582,7 @@ export const titleBar = (bg: string, fg: string, dark: boolean) => invoke<void>(
 export const devBuild = () => invoke<boolean>("dev_build");
 /** Shows a picture (a PNG, base64) as the Dock icon while the app runs. Mac only; nothing elsewhere. */
 export const setAppIcon = (png: string) => invoke<void>("set_app_icon", { png });
+/** Looks for a newer version and downloads it; its version once ready, or null. */
+export const updateCheck = () => invoke<string | null>("update_check");
+/** Puts the downloaded update in place and restarts into it. */
+export const updateInstall = () => invoke<void>("update_install");
