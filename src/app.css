@@ -224,10 +224,15 @@ button.primary:disabled {
   font-style: italic;
 }
 
-.md a {
+.md a,
+.md .md-image {
   color: var(--accent);
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+.md img {
+  max-width: 100%;
 }
 
 .md ul,

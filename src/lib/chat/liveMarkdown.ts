@@ -292,8 +292,9 @@ class TableWidget extends WidgetType {
     box.innerHTML = renderMarkdown(this.source);
     box.addEventListener("mousedown", (event) => {
       const target = event.target as HTMLElement;
-      // A link is followed by the panel's click handling, not edited.
-      if (target.closest("a")) return;
+      // A link, or an image waiting to load, is left to the panel's click
+      // handling, not edited.
+      if (target.closest("a, [data-image]")) return;
       event.preventDefault();
       view.dispatch({ selection: { anchor: cellPosition(view.state, view.posAtDOM(box), target) } });
       view.focus();
